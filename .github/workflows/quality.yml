@@ -29,7 +29,9 @@ jobs:
 
   unsigned-build:
     name: Unsigned build
-    runs-on: macos-15
+    # SpeechTranscriber is an iOS 26 SDK type. macos-15 defaults to Xcode 16.4,
+    # whose compiler cannot parse that type even behind an availability check.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - run: >-
