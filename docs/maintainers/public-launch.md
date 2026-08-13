@@ -53,9 +53,11 @@ Open a draft pull request from a disposable branch and prove that:
 - a missing DCO sign-off blocks merge;
 - a fake Team ID or absolute home path fails `Guardrails`;
 - a Swift compile error fails `Unsigned build`;
-- an approval becomes stale after a new commit;
-- the code-owner review and unresolved-conversation rules block merge;
+- unresolved conversations block merge;
+- the single-maintainer bootstrap does not falsely require an impossible self-approval;
 - a passing pull request can be squash-merged without bypass.
+
+When a second trusted maintainer is added, repeat the exercise after enabling the one-approval and Code Owner requirements, including proof that a new commit dismisses a stale approval.
 
 Delete the disposable branch after the test. Keep the closed pull request as public evidence that the controls were exercised.
 
