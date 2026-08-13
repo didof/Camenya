@@ -6,7 +6,7 @@ Repository files can define checks, but GitHub must be configured to make them m
 - requires zero approving reviews while the project has only one maintainer;
 - does not require Code Owner approval while the only Code Owner may also be the pull-request author;
 - requires all review conversations to be resolved;
-- requires the `Guardrails`, `DCO`, and `Unsigned build` status checks;
+- requires the `Guardrails`, `DCO`, `Unsigned build`, and `Simulator tests` status checks;
 - requires the branch to be up to date before merge;
 - blocks force pushes and branch deletion;
 - applies to administrators and repository maintainers;

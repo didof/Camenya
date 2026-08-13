@@ -42,3 +42,36 @@ jobs:
           -derivedDataPath /private/tmp/camenya-derived
           CODE_SIGNING_ALLOWED=NO
           build
+
+  simulator-tests:
+    name: Simulator tests
+    # Keep the test compiler aligned with the build job: SpeechTranscriber
+    # requires the iOS 26 SDK even when a test runs on an older runtime.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Run automated tests on an installed iPhone Simulator
+        run: |
+          camenya_simulator_id="$(
+            xcrun simctl list devices available |
+              awk '
+                /^[[:space:]]+iPhone/ {
+                  split($0, fields, /[()]/)
+                  print fields[2]
+                  exit
+                }
+              '
+          )"
+
+          if [[ -z "$camenya_simulator_id" ]]; then
+            echo "No available iPhone Simulator is installed on this runner." >&2
+            exit 1
+          fi
+
+          xcodebuild \
+            -project Camenya.xcodeproj \
+            -scheme Camenya \
+            -destination "platform=iOS Simulator,id=$camenya_simulator_id" \
+            -derivedDataPath /private/tmp/camenya-tests-derived \
+            CODE_SIGNING_ALLOWED=NO \
+            test
