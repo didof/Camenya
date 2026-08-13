@@ -59,11 +59,17 @@ struct TakeRange: Codable, Equatable, Hashable, Sendable {
     func isValid(inside originalDuration: TimeInterval, minimumDuration: TimeInterval) -> Bool {
         let startSeconds = start.seconds
         let endSeconds = end.seconds
-        return startSeconds.isFinite
-            && endSeconds.isFinite
-            && originalDuration.isFinite
-            && startSeconds >= 0
-            && endSeconds <= originalDuration
+        guard startSeconds.isFinite,
+              endSeconds.isFinite,
+              originalDuration.isFinite else {
+            return false
+        }
+        let quantizedOriginalEnd = MediaTime(
+            seconds: originalDuration,
+            preferredTimescale: end.timescale
+        ).seconds
+        return startSeconds >= 0
+            && endSeconds <= quantizedOriginalEnd
             && duration >= minimumDuration
     }
 }
