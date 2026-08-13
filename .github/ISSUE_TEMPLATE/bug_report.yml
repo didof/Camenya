@@ -1,0 +1,64 @@
+name: Bug report
+description: Report a reproducible Camenya defect without exposing local identity or media.
+title: "[Bug]: "
+labels:
+  - "type: bug"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping Camenya. Use synthetic media where possible. Never attach signing material, Apple or device identifiers, personal paths, raw logs, or private recordings.
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Observable problem
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Give the smallest repeatable sequence, starting from app launch or a new Project.
+      placeholder: |
+        1. Create a new Project
+        2. …
+    validations:
+      required: true
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Affected stage
+      options:
+        - Capture or camera switching
+        - Pause, resume, or finalization
+        - Project timeline or playback
+        - Captions or trim review
+        - Project export or Photos save
+        - Self-build or local installation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: recovery
+    attributes:
+      label: Media and recovery outcome
+      description: State whether the Project, Take, Segments, or exported file remained recoverable. Do not attach private media.
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: The public commit hash you built. Do not provide a build ID, Team ID, device ID, or profile UUID.
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed Apple identity, device identity, personal paths, raw logs, and private media from this report.
+          required: true
+        - label: I built Camenya from source rather than installing a third-party binary.
+          required: true

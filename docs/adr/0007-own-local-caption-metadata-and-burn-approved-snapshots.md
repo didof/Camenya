@@ -1,0 +1,3 @@
+# Own local caption metadata and burn approved snapshots
+
+Camenya owns one editable Caption Track per Take and recognizes it only through explicitly on-device Speech adapters; unsupported locale, authorization, or model states fail visibly and never retry in the cloud. Only approved, non-stale value snapshots enter Project Export, where Camenya burns them into the movie by default so Photos and social sharing preserve the result. `AVVideoCompositionCoreAnimationTool` and its Core Animation layer inputs are accepted as the standard AVFoundation integration for this offline burn-in path; selectable caption tracks and external SRT/VTT remain separate interoperability features.

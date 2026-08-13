@@ -1,0 +1,11 @@
+# The official project has one accountable merge boundary. Branch protection
+# must require a code-owner review for every pull request.
+* @didof
+
+# Changes to project identity and its executable enforcement require the same
+# explicit stewardship even when the rest of the repository gains more owners.
+/GOVERNANCE.md @didof
+/CONTRIBUTING.md @didof
+/DCO @didof
+/.github/ @didof
+/Scripts/verify-public-repository.sh @didof

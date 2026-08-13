@@ -1,0 +1,52 @@
+name: Feature proposal
+description: Propose one focused change that preserves Camenya's project invariants.
+title: "[Proposal]: "
+labels:
+  - "type: proposal"
+  - "status: needs-design"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read GOVERNANCE.md first. Describe the user problem before the implementation. Proposals do not become `good first issue` until maintainers have bounded and accepted them.
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: What becomes possible or less difficult for a person recording with Camenya?
+    validations:
+      required: true
+  - type: textarea
+    id: smallest-outcome
+    attributes:
+      label: Smallest useful outcome
+      description: Define one independently testable increment and explicitly exclude adjacent work.
+    validations:
+      required: true
+  - type: textarea
+    id: state
+    attributes:
+      label: State and failure behavior
+      description: What happens during recording, pause, interruption, cancellation, low storage, retry, and recovery?
+    validations:
+      required: true
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Boundary check
+      options:
+        - label: The proposal keeps unfinished media local and introduces no account, network, cloud, telemetry, advertising, or payment path.
+          required: true
+        - label: The proposal keeps official distribution source-only and requires no shared Apple signing identity.
+          required: true
+        - label: The proposal adds no permission, entitlement, capability, or third-party runtime dependency; otherwise I have explained it above as a protected change.
+          required: true
+        - label: The proposal preserves recoverable media and the defined Pause, Resume, Flip, Segment, Take, and Project Export semantics.
+          required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Acceptance criteria
+      description: List observable results and deterministic tests that would prove the increment complete.
+    validations:
+      required: true

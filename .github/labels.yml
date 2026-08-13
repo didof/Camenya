@@ -1,0 +1,42 @@
+- name: "type: bug"
+  color: "d73a4a"
+  description: Reproducible behavior that contradicts the documented product.
+- name: "type: proposal"
+  color: "a2eeef"
+  description: A user problem and candidate product change awaiting a bounded design.
+- name: "type: documentation"
+  color: "0075ca"
+  description: Documentation-only work.
+- name: "area: capture"
+  color: "5319e7"
+  description: Camera, microphone, flash, recording, pause, resume, or switching.
+- name: "area: captions"
+  color: "7057ff"
+  description: On-device transcription, caption review, styles, or burn-in.
+- name: "area: editing"
+  color: "c5def5"
+  description: Timeline, trim, teleprompter, overlays, or review workflows.
+- name: "area: export"
+  color: "0e8a16"
+  description: Project finalization, export, Photos save, or recovery.
+- name: "area: tooling"
+  color: "1d76db"
+  description: Self-build setup, scripts, CI, and repository guardrails.
+- name: "status: needs-design"
+  color: "fbca04"
+  description: The problem is relevant but scope or acceptance criteria are not ready.
+- name: "status: blocked"
+  color: "b60205"
+  description: Progress requires a named prerequisite or external decision.
+- name: "governance: protected"
+  color: "b60205"
+  description: Changes a permission, capability, trust, privacy, signing, dependency, or distribution boundary.
+- name: "good first issue"
+  color: "7057ff"
+  description: Accepted, small, documented, low-risk work suitable for a first contribution.
+- name: "help wanted"
+  color: "008672"
+  description: Maintainers have accepted the direction and welcome implementation help.
+- name: "physical iPhone required"
+  color: "d4c5f9"
+  description: Completion requires explicit validation on an iPhone.
