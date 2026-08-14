@@ -4,6 +4,12 @@ import SwiftUI
 struct TimelinePlaybackSource: Equatable, Sendable {
     let url: URL
     let selection: TakeRange?
+
+    static func make(snapshot: ExportSnapshot) -> [TimelinePlaybackSource] {
+        snapshot.clips.map {
+            TimelinePlaybackSource(url: $0.mediaURL, selection: $0.selection)
+        }
+    }
 }
 
 struct TimelineReviewScreen: View {
@@ -11,12 +17,6 @@ struct TimelineReviewScreen: View {
     @Environment(\.dismiss) private var dismiss
     let title: String
     let format: ProjectFormat
-
-    init(urls: [URL], title: String, format: ProjectFormat) {
-        _playback = StateObject(wrappedValue: TimelinePlaybackController(urls: urls))
-        self.title = title
-        self.format = format
-    }
 
     init(sources: [TimelinePlaybackSource], title: String, format: ProjectFormat) {
         _playback = StateObject(wrappedValue: TimelinePlaybackController(sources: sources))
@@ -61,12 +61,6 @@ final class TimelinePlaybackController: ObservableObject {
     private var completedItemCount = 0
     private var completionObservers: [NSObjectProtocol] = []
     private var preparationTask: Task<Void, Never>?
-
-    init(urls: [URL]) {
-        self.sources = urls.map { TimelinePlaybackSource(url: $0, selection: nil) }
-        player = AVQueuePlayer()
-        reloadQueue()
-    }
 
     init(sources: [TimelinePlaybackSource]) {
         self.sources = sources

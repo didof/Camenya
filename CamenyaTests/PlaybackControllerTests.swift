@@ -6,7 +6,9 @@ import XCTest
 final class PlaybackControllerTests: XCTestCase {
     func testTimelineReturnsToReplayableStartAfterNaturalCompletion() async {
         let url = URL(fileURLWithPath: "/tmp/timeline.mov")
-        let controller = TimelinePlaybackController(urls: [url])
+        let controller = TimelinePlaybackController(
+            sources: [TimelinePlaybackSource(url: url, selection: nil)]
+        )
         await waitForCurrentItem(in: controller)
         controller.togglePlayback()
         let completedItem = controller.player.currentItem

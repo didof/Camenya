@@ -51,8 +51,9 @@ final class ProjectStoreTests: XCTestCase {
 
         let migrated = try store.load(id: projectID)
 
-        XCTAssertEqual(migrated.schemaVersion, 3)
+        XCTAssertEqual(migrated.schemaVersion, ProjectManifest.currentSchemaVersion)
         XCTAssertEqual(migrated.takes.first?.duration, 12)
+        XCTAssertEqual(migrated.primaryStoryline.clips.map(\.takeID), migrated.takes.map(\.id))
         XCTAssertNil(migrated.takes.first?.trimDecision)
         XCTAssertNil(migrated.captionConfiguration)
         XCTAssertNil(migrated.takes.first?.captions)
@@ -88,6 +89,49 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertNil(updated.takes.first?.trimDecision)
         XCTAssertEqual(updated.approximateDuration, 10)
         XCTAssertEqual(try store.load(id: project.id).takes.first?.trimAnalysis, .suggestion(suggestion))
+    }
+
+    func testStaleTrimAnalysisCannotWriteMetadataOrEnvelopeAfterStorylineChanges() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let takeID = UUID()
+        let withTake = try store.addTake(
+            projectID: project.id,
+            takeID: takeID,
+            movieAt: makeMovie(),
+            orientation: .portrait,
+            duration: 10,
+            createdAt: Date()
+        )
+        _ = try store.setTrimDecision(
+            projectID: project.id,
+            takeID: takeID,
+            decision: .keepOriginal
+        )
+
+        XCTAssertThrowsError(try store.recordTrimAnalysis(
+            projectID: project.id,
+            takeID: takeID,
+            result: .noSuggestion(.negligibleSaving),
+            envelope: [0.1, 0.2],
+            expectedStorylineRevision: withTake.primaryStoryline.revision
+        )) { error in
+            XCTAssertEqual(
+                error as? ProjectStoreError,
+                .staleRevision(
+                    expected: withTake.primaryStoryline.revision,
+                    actual: StorylineRevision(rawValue: 2)
+                )
+            )
+        }
+        let reloaded = try store.load(id: project.id)
+        XCTAssertNil(reloaded.takes.first?.trimAnalysis)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: store.takeTrimEnvelopeURL(projectID: project.id, takeID: takeID).path
+        ))
     }
 
     func testTrimEnvelopePersistsAndResetRestoresOriginalState() throws {
@@ -399,7 +443,7 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertEqual(reordered.takes.map(\.id), [ids[0], ids[3], ids[1], ids[2]])
     }
 
-    func testDeletingATakeRemovesOnlyItsOwnedMedia() throws {
+    func testDeletingAReferencedTakeIsRejectedAndPreservesAllMedia() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = ProjectStore(projectsRoot: root)
@@ -409,10 +453,18 @@ final class ProjectStoreTests: XCTestCase {
         _ = try store.addTake(projectID: project.id, takeID: deletedID, movieAt: makeMovie(), orientation: .portrait, duration: 1, createdAt: Date(timeIntervalSince1970: 101))
         _ = try store.addTake(projectID: project.id, takeID: keptID, movieAt: makeMovie(), orientation: .portrait, duration: 2, createdAt: Date(timeIntervalSince1970: 102))
 
-        let updated = try store.deleteTake(projectID: project.id, takeID: deletedID, modifiedAt: Date(timeIntervalSince1970: 200))
+        XCTAssertThrowsError(
+            try store.deleteTake(
+                projectID: project.id,
+                takeID: deletedID,
+                modifiedAt: Date(timeIntervalSince1970: 200)
+            )
+        ) { error in
+            XCTAssertEqual(error as? ProjectStoreError, .takeReferencedByStoryline(deletedID))
+        }
 
-        XCTAssertEqual(updated.takes.map(\.id), [keptID])
-        XCTAssertFalse(FileManager.default.fileExists(atPath: store.takeMovieURL(projectID: project.id, takeID: deletedID).path))
+        XCTAssertEqual(try store.load(id: project.id).takes.map(\.id), [deletedID, keptID])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.takeMovieURL(projectID: project.id, takeID: deletedID).path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: store.takeMovieURL(projectID: project.id, takeID: keptID).path))
     }
 
