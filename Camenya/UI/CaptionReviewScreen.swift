@@ -359,7 +359,7 @@ private struct CaptionReviewEditor: View {
                 HStack(spacing: 10) {
                     Text("Phrase \(index + 1)")
                         .font(.subheadline.weight(.semibold))
-                    Text("\(RecordingDurationFormatter.clock(cue.range.start.seconds))–\(RecordingDurationFormatter.clock(cue.range.end.seconds))")
+                    Text("\(RecordingDurationFormatter.editingClock(cue.range.start.seconds))–\(RecordingDurationFormatter.editingClock(cue.range.end.seconds))")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                     if let confidence = cue.confidence, confidence < 0.6 {
@@ -496,7 +496,7 @@ private struct CaptionReviewEditor: View {
         let lower = isStart ? previousEnd : cue.range.start.seconds + 0.1
         let upper = isStart ? cue.range.end.seconds - 0.1 : nextStart
         return VStack(alignment: .leading, spacing: 4) {
-            Text("\(isStart ? "Start" : "End") \(RecordingDurationFormatter.clock(value))")
+            Text("\(isStart ? "Start" : "End") \(RecordingDurationFormatter.editingClock(value))")
                 .font(.caption.monospacedDigit())
             Slider(value: Binding(
                 get: { isStart ? currentCue(cueID)!.range.start.seconds : currentCue(cueID)!.range.end.seconds },
@@ -509,6 +509,7 @@ private struct CaptionReviewEditor: View {
                 }
             ), in: lower...max(lower, upper))
             .accessibilityLabel(isStart ? "Caption start" : "Caption end")
+            .accessibilityValue(RecordingDurationFormatter.editingClock(value))
         }
     }
 

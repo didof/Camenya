@@ -11,12 +11,12 @@ final class SilenceTrimPresentationTests: XCTestCase {
         let presentation = SilenceTrimPresentation(editor: editor)
 
         XCTAssertEqual(presentation.summaryTitle, "Suggested silence trim")
-        XCTAssertEqual(presentation.keptDuration, "00:07")
-        XCTAssertEqual(presentation.removedDuration, "00:03")
+        XCTAssertEqual(presentation.keptDuration, "00:07.0")
+        XCTAssertEqual(presentation.removedDuration, "00:03.0")
         XCTAssertFalse(presentation.showsResetAction)
         XCTAssertEqual(
             presentation.waveformAccessibilityValue,
-            "Removes 00:01 from the beginning, removes 00:02 from the end, keeps 00:07"
+            "Removes 00:01.0 from the beginning, removes 00:02.0 from the end, keeps 00:07.0"
         )
     }
 

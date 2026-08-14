@@ -14,11 +14,11 @@ struct SilenceTrimPresentation: Equatable, Sendable {
         } else {
             summaryTitle = suggestionWasDetected ? "Suggested silence trim" : "No trim suggested"
         }
-        keptDuration = RecordingDurationFormatter.clock(editor.keptDuration)
-        removedDuration = RecordingDurationFormatter.clock(editor.removedDuration)
+        keptDuration = RecordingDurationFormatter.editingClock(editor.keptDuration)
+        removedDuration = RecordingDurationFormatter.editingClock(editor.removedDuration)
         waveformAccessibilityValue = [
-            "Removes \(RecordingDurationFormatter.clock(editor.leadingRemoval)) from the beginning",
-            "removes \(RecordingDurationFormatter.clock(editor.trailingRemoval)) from the end",
+            "Removes \(RecordingDurationFormatter.editingClock(editor.leadingRemoval)) from the beginning",
+            "removes \(RecordingDurationFormatter.editingClock(editor.trailingRemoval)) from the end",
             "keeps \(keptDuration)"
         ].joined(separator: ", ")
         showsResetAction = editor.hasManualChanges
