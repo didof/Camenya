@@ -7,6 +7,16 @@ enum CaptionEditorError: Error, Equatable {
     case cannotMerge(UUID)
 }
 
+enum CaptionCueBoundary: Equatable, Sendable {
+    case start
+    case end
+}
+
+enum CaptionCueNudgeDirection: Equatable, Sendable {
+    case earlier
+    case later
+}
+
 struct CaptionDraftCheckpoint: Equatable, Sendable {
     private(set) var savedTrack: TakeCaptionTrack
 
@@ -24,6 +34,8 @@ struct CaptionDraftCheckpoint: Equatable, Sendable {
 }
 
 struct CaptionEditorState: Equatable, Sendable {
+    static let nudgeStep: TimeInterval = 0.1
+
     private(set) var track: TakeCaptionTrack
 
     init(track: TakeCaptionTrack) {
@@ -85,23 +97,58 @@ struct CaptionEditorState: Equatable, Sendable {
     }
 
     mutating func updateRange(cueID: UUID, range: TakeRange) throws {
-        guard let index = track.cues.firstIndex(where: { $0.id == cueID }) else {
-            throw CaptionEditorError.cueNotFound(cueID)
-        }
-        guard range.duration >= 0.1,
-              range.start.seconds >= track.sourceRange.start.seconds,
-              range.end.seconds <= track.sourceRange.end.seconds else {
-            throw CaptionEditorError.invalidRange
-        }
-        if index > 0, range.start.seconds < track.cues[index - 1].range.end.seconds {
-            throw CaptionEditorError.invalidRange
-        }
-        if index + 1 < track.cues.count,
-           range.end.seconds > track.cues[index + 1].range.start.seconds {
-            throw CaptionEditorError.invalidRange
-        }
+        let index = try cueIndex(for: cueID)
+        guard isValid(range, forCueAt: index) else { throw CaptionEditorError.invalidRange }
         track.cues[index].range = range
         track.reviewState = .needsReview
+    }
+
+    func rangeAfterNudge(
+        cueID: UUID,
+        boundary: CaptionCueBoundary,
+        direction: CaptionCueNudgeDirection
+    ) throws -> TakeRange? {
+        let index = try cueIndex(for: cueID)
+        let range = track.cues[index].range
+        let candidate: TakeRange
+        switch (boundary, direction) {
+        case (.start, .earlier):
+            candidate = TakeRange(
+                startSeconds: range.start.seconds - Self.nudgeStep,
+                endSeconds: range.end.seconds
+            )
+        case (.start, .later):
+            candidate = TakeRange(
+                startSeconds: range.start.seconds + Self.nudgeStep,
+                endSeconds: range.end.seconds
+            )
+        case (.end, .earlier):
+            candidate = TakeRange(
+                startSeconds: range.start.seconds,
+                endSeconds: range.end.seconds - Self.nudgeStep
+            )
+        case (.end, .later):
+            candidate = TakeRange(
+                startSeconds: range.start.seconds,
+                endSeconds: range.end.seconds + Self.nudgeStep
+            )
+        }
+        return candidate != range && isValid(candidate, forCueAt: index) ? candidate : nil
+    }
+
+    @discardableResult
+    mutating func nudge(
+        cueID: UUID,
+        boundary: CaptionCueBoundary,
+        direction: CaptionCueNudgeDirection
+    ) throws -> Bool {
+        guard let candidate = try rangeAfterNudge(
+            cueID: cueID,
+            boundary: boundary,
+            direction: direction
+        ) else { return false }
+        try updateRange(cueID: cueID, range: candidate)
+        return true
     }
 
     mutating func setEnabled(cueID: UUID, isEnabled: Bool) {
@@ -180,6 +227,29 @@ struct CaptionEditorState: Equatable, Sendable {
         )
         track.cues.replaceSubrange(index...(index + 1), with: [merged])
         track.reviewState = .needsReview
+    }
+
+    private func cueIndex(for cueID: UUID) throws -> Int {
+        guard let index = track.cues.firstIndex(where: { $0.id == cueID }) else {
+            throw CaptionEditorError.cueNotFound(cueID)
+        }
+        return index
+    }
+
+    private func isValid(_ range: TakeRange, forCueAt index: Int) -> Bool {
+        guard range.duration >= 0.1,
+              range.start.seconds >= track.sourceRange.start.seconds,
+              range.end.seconds <= track.sourceRange.end.seconds else {
+            return false
+        }
+        if index > 0, range.start.seconds < track.cues[index - 1].range.end.seconds {
+            return false
+        }
+        if index + 1 < track.cues.count,
+           range.end.seconds > track.cues[index + 1].range.start.seconds {
+            return false
+        }
+        return true
     }
 }
 
