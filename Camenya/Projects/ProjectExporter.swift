@@ -15,43 +15,39 @@ struct ProjectExportPlan: Equatable, Sendable {
     let sources: [ProjectExportSource]
     let format: ProjectFormat
     let captionConfiguration: ProjectCaptionConfiguration?
+    let revision: StorylineRevision
 
     var urls: [URL] { sources.map(\.url) }
 
-    static func make(project: ProjectManifest, store: ProjectStore) throws -> ProjectExportPlan {
-        guard !project.takes.isEmpty else { throw ProjectExportError.emptyTimeline }
-        guard let format = project.format else { throw ProjectExportError.missingFormat }
-        let sources = try project.takes.map { take in
-            guard let effectiveSourceRange = take.concreteEffectiveRange else {
-                throw ProjectExportError.invalidTakeRange(take.id)
-            }
-            let selection: TakeRange? = take.trimDecision.flatMap { decision in
-                if case let .useSelection(range) = decision { return range }
-                return nil
-            }
-            let approvedCaptions: TakeCaptionTrack?
-            if let captions = take.captions,
-               captions.reviewState == .approved,
-               captions.localeIdentifier == project.captionConfiguration?.localeIdentifier,
-               captions.sourceRange == effectiveSourceRange {
-                approvedCaptions = captions
-            } else {
-                approvedCaptions = nil
-            }
-            return ProjectExportSource(
-                takeID: take.id,
-                url: store.takeMovieURL(projectID: project.id, takeID: take.id),
-                selection: selection,
-                duration: take.effectiveDuration,
-                captions: approvedCaptions
+    init(
+        sources: [ProjectExportSource],
+        format: ProjectFormat,
+        captionConfiguration: ProjectCaptionConfiguration?,
+        revision: StorylineRevision = .zero
+    ) {
+        self.sources = sources
+        self.format = format
+        self.captionConfiguration = captionConfiguration
+        self.revision = revision
+    }
+
+    init(snapshot: ExportSnapshot) throws {
+        guard !snapshot.clips.isEmpty else { throw ProjectExportError.emptyTimeline }
+        guard let format = snapshot.format else { throw ProjectExportError.missingFormat }
+        sources = snapshot.clips.map { clip in
+            ProjectExportSource(
+                takeID: clip.takeID,
+                url: clip.mediaURL,
+                selection: clip.selection,
+                duration: clip.selection.duration,
+                captions: clip.approvedCaptions
             )
         }
-        return ProjectExportPlan(
-            sources: sources,
-            format: format,
-            captionConfiguration: project.captionConfiguration
-        )
+        self.format = format
+        captionConfiguration = snapshot.captionConfiguration
+        revision = snapshot.revision
     }
+
 }
 
 enum ProjectExportError: Error, LocalizedError, Equatable {

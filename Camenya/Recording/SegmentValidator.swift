@@ -14,10 +14,12 @@ struct SegmentValidator {
         }
         let asset = AVURLAsset(url: url)
         let videoTracks = try await asset.loadTracks(withMediaType: .video)
-        guard !videoTracks.isEmpty else { throw FinalizationError.missingVideoTrack(url.lastPathComponent) }
+        guard let videoTrack = videoTracks.first else {
+            throw FinalizationError.missingVideoTrack(url.lastPathComponent)
+        }
         let audioTracks = try await asset.loadTracks(withMediaType: .audio)
         guard !audioTracks.isEmpty else { throw FinalizationError.missingAudioTrack(url.lastPathComponent) }
-        let duration = try await asset.load(.duration).seconds
+        let duration = try await videoTrack.load(.timeRange).duration.seconds
         guard duration.isFinite, duration > minimumDuration else {
             throw FinalizationError.exportFailed("The recorded segment is too short to recover.")
         }

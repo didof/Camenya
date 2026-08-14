@@ -1,6 +1,8 @@
 import Foundation
 
 struct ProjectStore: Sendable {
+    private static let persistenceLock = NSLock()
+
     let projectsRoot: URL
 
     init(projectsRoot: URL? = nil) {
@@ -21,7 +23,7 @@ struct ProjectStore: Sendable {
             name: Self.defaultName(for: createdAt)
         )
         try FileManager.default.createDirectory(at: projectDirectory(id: project.id), withIntermediateDirectories: true)
-        try save(project)
+        try saveNew(project)
         return project
     }
 
@@ -30,8 +32,9 @@ struct ProjectStore: Sendable {
         decoder.dateDecodingStrategy = .iso8601
         var project = try decoder.decode(ProjectManifest.self, from: Data(contentsOf: manifestURL(id: id)))
         if project.schemaVersion < ProjectManifest.currentSchemaVersion {
+            let expectedRevision = project.primaryStoryline.revision
             project.schemaVersion = ProjectManifest.currentSchemaVersion
-            try? save(project)
+            try save(project, expectedRevision: expectedRevision)
         }
         return project
     }
@@ -54,18 +57,20 @@ struct ProjectStore: Sendable {
     @discardableResult
     func renameProject(id: UUID, name: String, modifiedAt: Date = Date()) throws -> ProjectManifest {
         var project = try load(id: id)
+        let expectedRevision = project.primaryStoryline.revision
         project.name = name
         project.modifiedAt = modifiedAt
-        try save(project)
+        try save(project, expectedRevision: expectedRevision)
         return project
     }
 
     @discardableResult
     func updateNote(projectID: UUID, text: String, modifiedAt: Date = Date()) throws -> ProjectManifest {
         var project = try load(id: projectID)
+        let expectedRevision = project.primaryStoryline.revision
         project.note = text
         project.modifiedAt = modifiedAt
-        try save(project)
+        try save(project, expectedRevision: expectedRevision)
         return project
     }
 
@@ -76,6 +81,7 @@ struct ProjectStore: Sendable {
         modifiedAt: Date = Date()
     ) throws -> ProjectManifest {
         var project = try load(id: projectID)
+        let expectedRevision = project.primaryStoryline.revision
         if project.captionConfiguration?.localeIdentifier != configuration.localeIdentifier {
             for index in project.takes.indices {
                 guard var captions = project.takes[index].captions,
@@ -86,7 +92,7 @@ struct ProjectStore: Sendable {
         }
         project.captionConfiguration = configuration
         project.modifiedAt = modifiedAt
-        try save(project)
+        try save(project, expectedRevision: expectedRevision)
         return project
     }
 
@@ -95,9 +101,18 @@ struct ProjectStore: Sendable {
         projectID: UUID,
         takeID: UUID,
         draft: TakeCaptionTrack,
+        expectedStorylineRevision: StorylineRevision? = nil,
         modifiedAt: Date = Date()
     ) throws -> ProjectManifest {
         var project = try load(id: projectID)
+        let expectedRevision = project.primaryStoryline.revision
+        if let expectedStorylineRevision,
+           expectedStorylineRevision != expectedRevision {
+            throw ProjectStoreError.staleRevision(
+                expected: expectedStorylineRevision,
+                actual: expectedRevision
+            )
+        }
         guard let index = project.takes.firstIndex(where: { $0.id == takeID }) else {
             throw ProjectStoreError.takeNotFound(takeID)
         }
@@ -114,7 +129,7 @@ struct ProjectStore: Sendable {
         persistedDraft.reviewState = .needsReview
         project.takes[index].captions = persistedDraft
         project.modifiedAt = modifiedAt
-        try save(project)
+        try save(project, expectedRevision: expectedRevision)
         return project
     }
 
@@ -125,6 +140,7 @@ struct ProjectStore: Sendable {
         modifiedAt: Date = Date()
     ) throws -> ProjectManifest {
         var project = try load(id: projectID)
+        let expectedRevision = project.primaryStoryline.revision
         guard let index = project.takes.firstIndex(where: { $0.id == takeID }) else {
             throw ProjectStoreError.takeNotFound(takeID)
         }
@@ -142,7 +158,7 @@ struct ProjectStore: Sendable {
         captions.reviewState = .approved
         project.takes[index].captions = captions
         project.modifiedAt = modifiedAt
-        try save(project)
+        try save(project, expectedRevision: expectedRevision)
         return project
     }
 
@@ -157,6 +173,7 @@ struct ProjectStore: Sendable {
         modifiedAt: Date = Date()
     ) throws -> ProjectManifest {
         var project = try load(id: projectID)
+        let expectedRevision = project.primaryStoryline.revision
         let format = ProjectFormat(orientation: orientation)
         if let existing = project.format, existing != format {
             throw ProjectStoreError.formatMismatch(expected: existing, received: format)
@@ -184,8 +201,15 @@ struct ProjectStore: Sendable {
 
         project.format = project.format ?? format
         project.takes.append(ProjectTake(id: takeID, createdAt: createdAt, duration: duration))
+        let sourceRange = TakeRange(startSeconds: 0, endSeconds: duration)
+        project.primaryStoryline.clips.append(TimelineClip(
+            takeID: takeID,
+            availableRange: sourceRange,
+            selection: sourceRange
+        ))
+        project.primaryStoryline.revision = try project.primaryStoryline.revision.incremented()
         project.modifiedAt = modifiedAt
-        try save(project)
+        try save(project, expectedRevision: expectedRevision)
         return project
     }
 
@@ -197,6 +221,7 @@ struct ProjectStore: Sendable {
         modifiedAt: Date = Date()
     ) throws -> ProjectManifest {
         var project = try load(id: projectID)
+        let expectedRevision = project.primaryStoryline.revision
         guard let sourceIndex = project.takes.firstIndex(where: { $0.id == takeID }) else {
             throw ProjectStoreError.takeNotFound(takeID)
         }
@@ -206,7 +231,7 @@ struct ProjectStore: Sendable {
         let take = project.takes.remove(at: sourceIndex)
         project.takes.insert(take, at: toIndex)
         project.modifiedAt = modifiedAt
-        try save(project)
+        try save(project, expectedRevision: expectedRevision)
         return project
     }
 
@@ -241,6 +266,7 @@ struct ProjectStore: Sendable {
         modifiedAt: Date = Date()
     ) throws -> ProjectManifest {
         var project = try load(id: projectID)
+        let expectedRevision = project.primaryStoryline.revision
         guard destination >= 0, destination <= project.takes.count else {
             throw ProjectStoreError.invalidTimelineIndex(destination)
         }
@@ -254,7 +280,7 @@ struct ProjectStore: Sendable {
         let removedBeforeDestination = sourceOffsets.filter { $0 < destination }.count
         project.takes.insert(contentsOf: movedTakes, at: destination - removedBeforeDestination)
         project.modifiedAt = modifiedAt
-        try save(project)
+        try save(project, expectedRevision: expectedRevision)
         return project
     }
 
@@ -265,8 +291,12 @@ struct ProjectStore: Sendable {
         modifiedAt: Date = Date()
     ) throws -> ProjectManifest {
         var project = try load(id: projectID)
+        let expectedRevision = project.primaryStoryline.revision
         guard let index = project.takes.firstIndex(where: { $0.id == takeID }) else {
             throw ProjectStoreError.takeNotFound(takeID)
+        }
+        guard !project.primaryStoryline.clips.contains(where: { $0.takeID == takeID }) else {
+            throw ProjectStoreError.takeReferencedByStoryline(takeID)
         }
         let sourceDirectory = takeDirectory(projectID: projectID, takeID: takeID)
         let stagedDirectory = projectDirectory(id: projectID)
@@ -284,7 +314,7 @@ struct ProjectStore: Sendable {
         project.takes.remove(at: index)
         project.modifiedAt = modifiedAt
         do {
-            try save(project)
+            try save(project, expectedRevision: expectedRevision)
         } catch {
             if hasMedia {
                 try? FileManager.default.moveItem(at: stagedDirectory, to: sourceDirectory)
@@ -397,12 +427,13 @@ struct ProjectStore: Sendable {
         modifiedAt: Date = Date()
     ) throws -> ProjectManifest {
         var project = try load(id: projectID)
+        let expectedRevision = project.primaryStoryline.revision
         guard let index = project.takes.firstIndex(where: { $0.id == takeID }) else {
             throw ProjectStoreError.takeNotFound(takeID)
         }
         project.takes[index].thumbnailFileName = "thumbnail.jpg"
         project.modifiedAt = modifiedAt
-        try save(project)
+        try save(project, expectedRevision: expectedRevision)
         return project
     }
 
@@ -414,6 +445,7 @@ struct ProjectStore: Sendable {
         modifiedAt: Date = Date()
     ) throws -> ProjectManifest {
         var project = try load(id: projectID)
+        let expectedRevision = project.primaryStoryline.revision
         guard let index = project.takes.firstIndex(where: { $0.id == takeID }) else {
             throw ProjectStoreError.takeNotFound(takeID)
         }
@@ -422,6 +454,27 @@ struct ProjectStore: Sendable {
             throw ProjectStoreError.invalidTakeRange(takeID)
         }
         project.takes[index].trimDecision = decision
+        let selection: TakeRange
+        switch decision {
+        case .keepOriginal:
+            selection = TakeRange(startSeconds: 0, endSeconds: project.takes[index].duration)
+        case let .useSelection(range):
+            selection = range
+        }
+        let matchingClips = project.primaryStoryline.clips.indices.filter {
+            project.primaryStoryline.clips[$0].takeID == takeID
+        }
+        guard matchingClips.count == 1, let clipIndex = matchingClips.first else {
+            throw ProjectStoreError.invalidPrimaryStoryline
+        }
+        let clip = project.primaryStoryline.clips[clipIndex]
+        project.primaryStoryline.clips[clipIndex] = TimelineClip(
+            id: clip.id,
+            takeID: clip.takeID,
+            availableRange: clip.availableRange,
+            selection: selection
+        )
+        project.primaryStoryline.revision = try project.primaryStoryline.revision.incremented()
         if var captions = project.takes[index].captions {
             let effectiveRange: TakeRange
             switch decision {
@@ -439,7 +492,7 @@ struct ProjectStore: Sendable {
             }
         }
         project.modifiedAt = modifiedAt
-        try save(project)
+        try save(project, expectedRevision: expectedRevision)
         return project
     }
 
@@ -449,9 +502,18 @@ struct ProjectStore: Sendable {
         takeID: UUID,
         result: TrimAnalysisResult,
         envelope: [Float]? = nil,
+        expectedStorylineRevision: StorylineRevision? = nil,
         modifiedAt: Date = Date()
     ) throws -> ProjectManifest {
         var project = try load(id: projectID)
+        let expectedRevision = project.primaryStoryline.revision
+        if let expectedStorylineRevision,
+           expectedStorylineRevision != expectedRevision {
+            throw ProjectStoreError.staleRevision(
+                expected: expectedStorylineRevision,
+                actual: expectedRevision
+            )
+        }
         guard let index = project.takes.firstIndex(where: { $0.id == takeID }) else {
             throw ProjectStoreError.takeNotFound(takeID)
         }
@@ -461,11 +523,16 @@ struct ProjectStore: Sendable {
             throw ProjectStoreError.invalidTakeRange(takeID)
         }
         var persistedResult = result
+        var stagedEnvelopeURL: URL?
         if let envelope {
+            let staged = takeTrimEnvelopeURL(projectID: projectID, takeID: takeID)
+                .deletingLastPathComponent()
+                .appendingPathComponent("trim-envelope-\(UUID().uuidString).pending.json")
             try JSONEncoder().encode(envelope).write(
-                to: takeTrimEnvelopeURL(projectID: projectID, takeID: takeID),
+                to: staged,
                 options: .atomic
             )
+            stagedEnvelopeURL = staged
             if case let .suggestion(suggestion) = result {
                 persistedResult = .suggestion(TrimSuggestion(
                     range: suggestion.range,
@@ -476,7 +543,22 @@ struct ProjectStore: Sendable {
         }
         project.takes[index].trimAnalysis = persistedResult
         project.modifiedAt = modifiedAt
-        try save(project)
+        do {
+            try save(project, expectedRevision: expectedRevision)
+        } catch {
+            if let stagedEnvelopeURL {
+                try? FileManager.default.removeItem(at: stagedEnvelopeURL)
+            }
+            throw error
+        }
+        if let stagedEnvelopeURL {
+            let destination = takeTrimEnvelopeURL(projectID: projectID, takeID: takeID)
+            if FileManager.default.fileExists(atPath: destination.path) {
+                _ = try FileManager.default.replaceItemAt(destination, withItemAt: stagedEnvelopeURL)
+            } else {
+                try FileManager.default.moveItem(at: stagedEnvelopeURL, to: destination)
+            }
+        }
         let keepsEnvelope: Bool
         switch persistedResult {
         case .suggestion, .noSuggestion: keepsEnvelope = envelope != nil
@@ -502,11 +584,26 @@ struct ProjectStore: Sendable {
         modifiedAt: Date = Date()
     ) throws -> ProjectManifest {
         var project = try load(id: projectID)
+        let expectedRevision = project.primaryStoryline.revision
         guard let index = project.takes.firstIndex(where: { $0.id == takeID }) else {
             throw ProjectStoreError.takeNotFound(takeID)
         }
         project.takes[index].trimAnalysis = nil
         project.takes[index].trimDecision = nil
+        let matchingClips = project.primaryStoryline.clips.indices.filter {
+            project.primaryStoryline.clips[$0].takeID == takeID
+        }
+        guard matchingClips.count == 1, let clipIndex = matchingClips.first else {
+            throw ProjectStoreError.invalidPrimaryStoryline
+        }
+        let clip = project.primaryStoryline.clips[clipIndex]
+        project.primaryStoryline.clips[clipIndex] = TimelineClip(
+            id: clip.id,
+            takeID: clip.takeID,
+            availableRange: clip.availableRange,
+            selection: TakeRange(startSeconds: 0, endSeconds: project.takes[index].duration)
+        )
+        project.primaryStoryline.revision = try project.primaryStoryline.revision.incremented()
         if var captions = project.takes[index].captions {
             let originalRange = TakeRange(
                 startSeconds: 0,
@@ -518,7 +615,7 @@ struct ProjectStore: Sendable {
             }
         }
         project.modifiedAt = modifiedAt
-        try save(project)
+        try save(project, expectedRevision: expectedRevision)
         try? FileManager.default.removeItem(at: takeTrimEnvelopeURL(projectID: projectID, takeID: takeID))
         return project
     }
@@ -531,15 +628,17 @@ struct ProjectStore: Sendable {
 
     func recordPhotosSaveCompleted(projectID: UUID) throws {
         var project = try load(id: projectID)
+        let expectedRevision = project.primaryStoryline.revision
         project.recoveryState = .photosSaveCompleted
-        try save(project)
+        try save(project, expectedRevision: expectedRevision)
     }
 
     @discardableResult
     func setPendingExportState(projectID: UUID, pending: Bool) throws -> ProjectManifest {
         var project = try load(id: projectID)
+        let expectedRevision = project.primaryStoryline.revision
         project.recoveryState = pending ? .pendingExport : .clean
-        try save(project)
+        try save(project, expectedRevision: expectedRevision)
         return project
     }
 
@@ -604,7 +703,59 @@ struct ProjectStore: Sendable {
         }
     }
 
-    private func save(_ project: ProjectManifest) throws {
+    func persist(
+        _ project: ProjectManifest,
+        expectedRevision: StorylineRevision
+    ) throws {
+        Self.persistenceLock.lock()
+        defer { Self.persistenceLock.unlock() }
+        let current = try decodeManifest(id: project.id)
+        guard current.manifestRevision == project.manifestRevision else {
+            throw ProjectStoreError.staleManifest(
+                expected: project.manifestRevision,
+                actual: current.manifestRevision
+            )
+        }
+        guard current.primaryStoryline.revision == expectedRevision else {
+            throw ProjectStoreError.staleRevision(
+                expected: expectedRevision,
+                actual: current.primaryStoryline.revision
+            )
+        }
+        guard current.manifestRevision < UInt64.max else {
+            throw ProjectStoreError.manifestRevisionExhausted
+        }
+        var committed = project
+        committed.manifestRevision = current.manifestRevision + 1
+        try write(committed)
+    }
+
+    private func saveNew(_ project: ProjectManifest) throws {
+        Self.persistenceLock.lock()
+        defer { Self.persistenceLock.unlock() }
+        guard !FileManager.default.fileExists(atPath: manifestURL(id: project.id).path) else {
+            throw ProjectStoreError.projectAlreadyExists(project.id)
+        }
+        try write(project)
+    }
+
+    private func save(
+        _ project: ProjectManifest,
+        expectedRevision: StorylineRevision
+    ) throws {
+        try persist(project, expectedRevision: expectedRevision)
+    }
+
+    private func decodeManifest(id: UUID) throws -> ProjectManifest {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(
+            ProjectManifest.self,
+            from: Data(contentsOf: manifestURL(id: id))
+        )
+    }
+
+    private func write(_ project: ProjectManifest) throws {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -638,7 +789,7 @@ struct ProjectStore: Sendable {
         let project = ProjectManifest(createdAt: now, modifiedAt: now, name: "Recovered")
         try prepareRoot()
         try FileManager.default.createDirectory(at: projectDirectory(id: project.id), withIntermediateDirectories: true)
-        try save(project)
+        try saveNew(project)
         return project
     }
 
@@ -689,4 +840,10 @@ enum ProjectStoreError: Error, Equatable {
     case captionsNotFound(UUID)
     case staleCaptions(UUID)
     case mediaNotFound(URL)
+    case invalidPrimaryStoryline
+    case takeReferencedByStoryline(UUID)
+    case staleRevision(expected: StorylineRevision, actual: StorylineRevision)
+    case projectAlreadyExists(UUID)
+    case staleManifest(expected: UInt64, actual: UInt64)
+    case manifestRevisionExhausted
 }

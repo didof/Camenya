@@ -12,19 +12,14 @@ final class ProjectExporterTests: XCTestCase {
         let projectID = UUID()
         let firstID = UUID()
         let secondID = UUID()
-        let project = ProjectManifest(
-            id: projectID,
-            createdAt: Date(timeIntervalSince1970: 0),
-            modifiedAt: Date(timeIntervalSince1970: 0),
-            name: "Project",
+        let plan = try ProjectExportPlan(snapshot: fixtureSnapshot(
+            projectID: projectID,
             format: .portrait,
-            takes: [
-                ProjectTake(id: secondID, createdAt: Date(timeIntervalSince1970: 2), duration: 8),
-                ProjectTake(id: firstID, createdAt: Date(timeIntervalSince1970: 1), duration: 12)
+            sources: [
+                (secondID, store.takeMovieURL(projectID: projectID, takeID: secondID), TakeRange(startSeconds: 0, endSeconds: 8)),
+                (firstID, store.takeMovieURL(projectID: projectID, takeID: firstID), TakeRange(startSeconds: 0, endSeconds: 12))
             ]
-        )
-
-        let plan = try ProjectExportPlan.make(project: project, store: store)
+        ))
 
         XCTAssertEqual(plan.format, .portrait)
         XCTAssertEqual(plan.urls, [
@@ -40,21 +35,19 @@ final class ProjectExporterTests: XCTestCase {
         let trimmedID = UUID()
         let originalID = UUID()
         let approved = TakeRange(startSeconds: 2, endSeconds: 8)
-        let project = ProjectManifest(
-            id: projectID,
-            createdAt: Date(),
-            modifiedAt: Date(),
-            name: "Project",
+        let plan = try ProjectExportPlan(snapshot: fixtureSnapshot(
+            projectID: projectID,
             format: .portrait,
-            takes: [
-                ProjectTake(id: trimmedID, createdAt: Date(), duration: 10, trimDecision: .useSelection(approved)),
-                ProjectTake(id: originalID, createdAt: Date(), duration: 10, trimDecision: .keepOriginal)
+            sources: [
+                (trimmedID, store.takeMovieURL(projectID: projectID, takeID: trimmedID), approved),
+                (originalID, store.takeMovieURL(projectID: projectID, takeID: originalID), TakeRange(startSeconds: 0, endSeconds: 10))
             ]
-        )
+        ))
 
-        let plan = try ProjectExportPlan.make(project: project, store: store)
-
-        XCTAssertEqual(plan.sources.map(\.selection), [approved, nil])
+        XCTAssertEqual(plan.sources.map(\.selection), [
+            approved,
+            TakeRange(startSeconds: 0, endSeconds: 10)
+        ])
     }
 
     @MainActor
@@ -77,7 +70,7 @@ final class ProjectExporterTests: XCTestCase {
 
         do {
             _ = try await ProjectExporter().export(
-                plan: ProjectExportPlan.make(project: updated, store: store),
+                plan: try await persistedExportPlan(projectID: updated.id, store: store),
                 to: output
             )
             XCTFail("Expected invalid media to fail")
@@ -102,7 +95,7 @@ final class ProjectExporterTests: XCTestCase {
         project = try store.addTake(projectID: project.id, takeID: secondID, movieAt: secondSource, orientation: .landscapeLeft, duration: 0.5, createdAt: Date())
 
         let output = try await ProjectExporter().export(
-            plan: ProjectExportPlan.make(project: project, store: store),
+            plan: try await persistedExportPlan(projectID: project.id, store: store),
             to: store.pendingExportURL(projectID: project.id)
         )
 
@@ -146,7 +139,7 @@ final class ProjectExporterTests: XCTestCase {
         )
 
         let output = try await ProjectExporter().export(
-            plan: ProjectExportPlan.make(project: updated, store: store),
+            plan: try await persistedExportPlan(projectID: updated.id, store: store),
             to: store.pendingExportURL(projectID: project.id)
         )
 
@@ -216,7 +209,7 @@ final class ProjectExporterTests: XCTestCase {
         )
 
         let output = try await ProjectExporter().export(
-            plan: ProjectExportPlan.make(project: updated, store: store),
+            plan: try await persistedExportPlan(projectID: updated.id, store: store),
             to: store.pendingExportURL(projectID: project.id)
         )
 
@@ -277,7 +270,7 @@ final class ProjectExporterTests: XCTestCase {
         updated = try store.approveCaptions(projectID: project.id, takeID: takeID)
 
         let output = try await ProjectExporter().export(
-            plan: ProjectExportPlan.make(project: updated, store: store),
+            plan: try await persistedExportPlan(projectID: updated.id, store: store),
             to: store.pendingExportURL(projectID: project.id)
         )
         let asset = AVURLAsset(url: output)
@@ -312,7 +305,10 @@ final class ProjectExporterTests: XCTestCase {
         let exporter = ProjectExporter()
         let output = store.pendingExportURL(projectID: project.id)
         let task = Task { @MainActor in
-            try await exporter.export(plan: ProjectExportPlan.make(project: project, store: store), to: output)
+            try await exporter.export(
+                plan: try await persistedExportPlan(projectID: project.id, store: store),
+                to: output
+            )
         }
         for _ in 0..<10_000 where !exporter.isActive { await Task.yield() }
 
@@ -494,5 +490,49 @@ final class ProjectExporterTests: XCTestCase {
         context.interpolationQuality = .medium
         context.draw(image, in: CGRect(x: 0, y: 0, width: 1, height: 1))
         return (pixel[0], pixel[1], pixel[2])
+    }
+
+    private func persistedExportPlan(
+        projectID: UUID,
+        store: ProjectStore
+    ) async throws -> ProjectExportPlan {
+        let snapshot = try await TimelineEditor(
+            projectID: projectID,
+            projectStore: store
+        ).snapshot()
+        return try ProjectExportPlan(snapshot: snapshot)
+    }
+
+    private func fixtureSnapshot(
+        projectID: UUID,
+        format: ProjectFormat,
+        sources: [(takeID: UUID, url: URL, selection: TakeRange)]
+    ) -> ExportSnapshot {
+        var cursor: TimeInterval = 0
+        let clips = sources.map { source in
+            let start = cursor
+            cursor += source.selection.duration
+            return ExportSnapshot.Clip(
+                id: TimelineClip.ID(),
+                takeID: source.takeID,
+                mediaURL: source.url,
+                sourceRange: source.selection,
+                availableRange: source.selection,
+                selection: source.selection,
+                projectTimeRange: ProjectTimeRange(
+                    start: ProjectTime(seconds: start),
+                    end: ProjectTime(seconds: cursor)
+                ),
+                approvedCaptions: nil
+            )
+        }
+        return ExportSnapshot(
+            projectID: projectID,
+            revision: .zero,
+            format: format,
+            captionConfiguration: nil,
+            clips: clips,
+            duration: ProjectTime(seconds: cursor)
+        )
     }
 }

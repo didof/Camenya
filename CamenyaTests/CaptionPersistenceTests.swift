@@ -221,7 +221,7 @@ final class CaptionPersistenceTests: XCTestCase {
         }
     }
 
-    func testOnlyApprovedCaptionsEnterTheImmutableExportPlan() throws {
+    func testOnlyApprovedCaptionsEnterTheImmutableExportPlan() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = ProjectStore(projectsRoot: root)
@@ -254,18 +254,18 @@ final class CaptionPersistenceTests: XCTestCase {
         _ = try store.setCaptionConfiguration(projectID: project.id, configuration: configuration)
         let withDraft = try store.recordCaptionDraft(projectID: project.id, takeID: takeID, draft: draft)
 
-        let unreviewedPlan = try ProjectExportPlan.make(project: withDraft, store: store)
+        let unreviewedPlan = try await exportPlan(projectID: withDraft.id, store: store)
         XCTAssertNil(unreviewedPlan.sources.first?.captions)
 
         let approved = try store.approveCaptions(projectID: project.id, takeID: takeID)
-        let approvedPlan = try ProjectExportPlan.make(project: approved, store: store)
+        let approvedPlan = try await exportPlan(projectID: approved.id, store: store)
 
         XCTAssertEqual(approvedPlan.captionConfiguration, configuration)
         XCTAssertEqual(approvedPlan.sources.first?.captions?.reviewState, .approved)
         XCTAssertEqual(approvedPlan.sources.first?.captions?.cues, [cue])
     }
 
-    func testDraftCannotInjectApprovalAtThePersistenceBoundary() throws {
+    func testDraftCannotInjectApprovalAtThePersistenceBoundary() async throws {
         let fixture = try makeCaptionedProject(
             sourceRange: TakeRange(startSeconds: 0, endSeconds: 10)
         )
@@ -282,10 +282,11 @@ final class CaptionPersistenceTests: XCTestCase {
         )
 
         XCTAssertEqual(saved.takes.first?.captions?.reviewState, .needsReview)
-        XCTAssertNil(try ProjectExportPlan.make(project: saved, store: fixture.store).sources.first?.captions)
+        let plan = try await exportPlan(projectID: saved.id, store: fixture.store)
+        XCTAssertNil(plan.sources.first?.captions)
     }
 
-    func testLocaleStaleTrackCannotBeReapprovedOrExported() throws {
+    func testLocaleStaleTrackCannotBeReapprovedOrExported() async throws {
         let fixture = try makeCaptionedProject(
             sourceRange: TakeRange(startSeconds: 0, endSeconds: 10)
         )
@@ -299,10 +300,11 @@ final class CaptionPersistenceTests: XCTestCase {
             projectID: fixture.projectID,
             takeID: fixture.takeID
         ))
-        XCTAssertNil(try ProjectExportPlan.make(project: changed, store: fixture.store).sources.first?.captions)
+        let plan = try await exportPlan(projectID: changed.id, store: fixture.store)
+        XCTAssertNil(plan.sources.first?.captions)
     }
 
-    func testChangingTheEffectiveRangeMakesApprovedCaptionsStale() throws {
+    func testChangingTheEffectiveRangeMakesApprovedCaptionsStale() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = ProjectStore(projectsRoot: root)
@@ -345,13 +347,13 @@ final class CaptionPersistenceTests: XCTestCase {
             takeID: takeID,
             decision: .useSelection(TakeRange(startSeconds: 2, endSeconds: 8))
         )
-        let exportPlan = try ProjectExportPlan.make(project: trimmed, store: store)
+        let exportPlan = try await exportPlan(projectID: trimmed.id, store: store)
 
         XCTAssertEqual(trimmed.takes.first?.captions?.reviewState, .stale)
         XCTAssertNil(exportPlan.sources.first?.captions)
     }
 
-    func testResettingTrimMakesCaptionsForTheTrimmedRangeStale() throws {
+    func testResettingTrimMakesCaptionsForTheTrimmedRangeStale() async throws {
         let fixture = try makeCaptionedProject(
             sourceRange: TakeRange(startSeconds: 2, endSeconds: 8),
             trimDecision: .useSelection(TakeRange(startSeconds: 2, endSeconds: 8))
@@ -364,10 +366,11 @@ final class CaptionPersistenceTests: XCTestCase {
         )
 
         XCTAssertEqual(reset.takes.first?.captions?.reviewState, .stale)
-        XCTAssertNil(try ProjectExportPlan.make(project: reset, store: fixture.store).sources.first?.captions)
+        let plan = try await exportPlan(projectID: reset.id, store: fixture.store)
+        XCTAssertNil(plan.sources.first?.captions)
     }
 
-    func testChangingCaptionLanguageMakesExistingTracksStale() throws {
+    func testChangingCaptionLanguageMakesExistingTracksStale() async throws {
         let fixture = try makeCaptionedProject(
             sourceRange: TakeRange(startSeconds: 0, endSeconds: 10)
         )
@@ -379,7 +382,8 @@ final class CaptionPersistenceTests: XCTestCase {
         )
 
         XCTAssertEqual(changed.takes.first?.captions?.reviewState, .stale)
-        XCTAssertNil(try ProjectExportPlan.make(project: changed, store: fixture.store).sources.first?.captions)
+        let plan = try await exportPlan(projectID: changed.id, store: fixture.store)
+        XCTAssertNil(plan.sources.first?.captions)
     }
 
     func testCaptionDraftRejectsOverlappingCuesAndOutOfRangeTimedSpans() throws {
@@ -480,6 +484,17 @@ final class CaptionPersistenceTests: XCTestCase {
         )
         _ = try store.approveCaptions(projectID: project.id, takeID: takeID)
         return (root, store, project.id, takeID)
+    }
+
+    private func exportPlan(
+        projectID: UUID,
+        store: ProjectStore
+    ) async throws -> ProjectExportPlan {
+        let snapshot = try await TimelineEditor(
+            projectID: projectID,
+            projectStore: store
+        ).snapshot()
+        return try ProjectExportPlan(snapshot: snapshot)
     }
 
     private func makeSelectionTake(

@@ -166,9 +166,10 @@ struct ProjectTake: Codable, Equatable, Hashable, Identifiable, Sendable {
 }
 
 struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
-    static let currentSchemaVersion = 3
+    static let currentSchemaVersion = 4
 
     var schemaVersion: Int
+    var manifestRevision: UInt64
     let id: UUID
     let createdAt: Date
     var modifiedAt: Date
@@ -176,11 +177,13 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
     var format: ProjectFormat?
     var note: String
     var takes: [ProjectTake]
+    var primaryStoryline: PrimaryStoryline
     var recoveryState: ProjectRecoveryState?
     var captionConfiguration: ProjectCaptionConfiguration?
 
     init(
         schemaVersion: Int = ProjectManifest.currentSchemaVersion,
+        manifestRevision: UInt64 = 0,
         id: UUID = UUID(),
         createdAt: Date,
         modifiedAt: Date,
@@ -188,10 +191,12 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
         format: ProjectFormat? = nil,
         note: String = "",
         takes: [ProjectTake] = [],
+        primaryStoryline: PrimaryStoryline? = nil,
         recoveryState: ProjectRecoveryState? = .clean,
         captionConfiguration: ProjectCaptionConfiguration? = nil
     ) {
         self.schemaVersion = schemaVersion
+        self.manifestRevision = manifestRevision
         self.id = id
         self.createdAt = createdAt
         self.modifiedAt = modifiedAt
@@ -199,11 +204,49 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
         self.format = format
         self.note = note
         self.takes = takes
+        self.primaryStoryline = primaryStoryline ?? .migrating(takes: takes)
         self.recoveryState = recoveryState
         self.captionConfiguration = captionConfiguration
     }
 
     var approximateDuration: TimeInterval {
-        takes.reduce(0) { $0 + $1.effectiveDuration }
+        primaryStoryline.clips.reduce(0) { $0 + $1.selection.duration }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case manifestRevision
+        case id
+        case createdAt
+        case modifiedAt
+        case name
+        case format
+        case note
+        case takes
+        case primaryStoryline
+        case recoveryState
+        case captionConfiguration
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        manifestRevision = try container.decodeIfPresent(UInt64.self, forKey: .manifestRevision) ?? 0
+        id = try container.decode(UUID.self, forKey: .id)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        modifiedAt = try container.decode(Date.self, forKey: .modifiedAt)
+        name = try container.decode(String.self, forKey: .name)
+        format = try container.decodeIfPresent(ProjectFormat.self, forKey: .format)
+        note = try container.decodeIfPresent(String.self, forKey: .note) ?? ""
+        takes = try container.decodeIfPresent([ProjectTake].self, forKey: .takes) ?? []
+        primaryStoryline = try container.decodeIfPresent(
+            PrimaryStoryline.self,
+            forKey: .primaryStoryline
+        ) ?? .migrating(takes: takes)
+        recoveryState = try container.decodeIfPresent(ProjectRecoveryState.self, forKey: .recoveryState)
+        captionConfiguration = try container.decodeIfPresent(
+            ProjectCaptionConfiguration.self,
+            forKey: .captionConfiguration
+        )
     }
 }

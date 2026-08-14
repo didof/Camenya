@@ -6,7 +6,13 @@ import UIKit
 
 @MainActor
 final class AppModel: ObservableObject {
-    @Published private(set) var project: ProjectManifest
+    @Published private(set) var project: ProjectManifest {
+        didSet {
+            exportSnapshot = nil
+            refreshExportSnapshot()
+        }
+    }
+    @Published private(set) var exportSnapshot: ExportSnapshot?
     @Published private(set) var phase: RecorderPhase = .configuring
     @Published private(set) var selectedCamera: CameraPosition = .front
     @Published private(set) var elapsed: TimeInterval = 0
@@ -38,7 +44,7 @@ final class AppModel: ObservableObject {
     private let logger = Logger(subsystem: "org.camenya.app", category: "AppModel")
     private let projectStore: ProjectStore
     private let store: TakeManifestStore
-    private let recordingCoordinator: ProjectRecordingCoordinator
+    private let timelineEditor: TimelineEditor
     private let finalizer = TakeFinalizer()
     private let validator = SegmentValidator()
     private let projectExporter = ProjectExporter()
@@ -65,6 +71,8 @@ final class AppModel: ObservableObject {
     private var thumbnailTasks: [UUID: Task<Void, Never>] = [:]
     private var trimAnalysisTask: Task<Void, Never>?
     private var captionTranscriptionTask: Task<Void, Never>?
+    private var exportSnapshotTask: Task<Void, Never>?
+    private var exportSnapshotRequestID = 0
 
     init(
         project: ProjectManifest,
@@ -72,9 +80,10 @@ final class AppModel: ObservableObject {
         onProjectChanged: @escaping @MainActor (ProjectManifest) -> Void = { _ in }
     ) {
         self.project = project
+        self.exportSnapshot = nil
         self.projectStore = projectStore
         self.store = projectStore.takeManifestStore(projectID: project.id)
-        self.recordingCoordinator = ProjectRecordingCoordinator(projectID: project.id, projectStore: projectStore)
+        self.timelineEditor = TimelineEditor(projectID: project.id, projectStore: projectStore)
         self.onProjectChanged = onProjectChanged
         self.projectNote = ProjectNoteStore(text: project.note)
         self.trimReviewTakeIDs = project.takes.compactMap { take in
@@ -106,6 +115,7 @@ final class AppModel: ObservableObject {
                 self.errorMessage = "The Project Note couldn't be saved. Copy it before leaving this Project."
             }
         }
+        refreshExportSnapshot()
     }
 
     func configure() {
@@ -348,22 +358,8 @@ final class AppModel: ObservableObject {
         projectStore.takeThumbnailURL(projectID: project.id, takeID: take.id)
     }
 
-    var timelineMovieURLs: [URL] {
-        project.takes.map { movieURL(for: $0) }
-    }
-
     var timelinePlaybackSources: [TimelinePlaybackSource]? {
-        var sources: [TimelinePlaybackSource] = []
-        for take in project.takes {
-            let selection: TakeRange?
-            switch take.effectiveRange {
-            case let .selection(range): selection = range
-            case .original: selection = nil
-            case .invalid: return nil
-            }
-            sources.append(TimelinePlaybackSource(url: movieURL(for: take), selection: selection))
-        }
-        return sources
+        exportSnapshot.map(TimelinePlaybackSource.make(snapshot:))
     }
 
     var trimReviewTakes: [ProjectTake] {
@@ -471,6 +467,7 @@ final class AppModel: ObservableObject {
             return
         }
         isTranscribingCaptions = true
+        let expectedStorylineRevision = project.primaryStoryline.revision
         captionTranscriptionProgress = 0
         captionTranscriptionStatus = "Preparing on-device captions…"
         captionReviewTakeIDs = []
@@ -494,7 +491,8 @@ final class AppModel: ObservableObject {
                     let updated = try projectStore.recordCaptionDraft(
                         projectID: project.id,
                         takeID: take.id,
-                        draft: draft
+                        draft: draft,
+                        expectedStorylineRevision: expectedStorylineRevision
                     )
                     project = updated
                     onProjectChanged(updated)
@@ -606,6 +604,7 @@ final class AppModel: ObservableObject {
             return
         }
         isAnalyzingTrim = true
+        let expectedStorylineRevision = project.primaryStoryline.revision
         trimAnalysisProgress = 0
         trimAnalysisStatus = "Preparing edge cleanup…"
         trimAnalysisSummary = nil
@@ -627,7 +626,8 @@ final class AppModel: ObservableObject {
                         projectID: project.id,
                         takeID: take.id,
                         result: output.result,
-                        envelope: output.envelope.isEmpty ? nil : output.envelope
+                        envelope: output.envelope.isEmpty ? nil : output.envelope,
+                        expectedStorylineRevision: expectedStorylineRevision
                     )
                     project = updated
                     onProjectChanged(updated)
@@ -648,7 +648,8 @@ final class AppModel: ObservableObject {
                     if let updated = try? projectStore.recordTrimAnalysis(
                         projectID: project.id,
                         takeID: take.id,
-                        result: .failed(.decodingFailed)
+                        result: .failed(.decodingFailed),
+                        expectedStorylineRevision: expectedStorylineRevision
                     ) {
                         project = updated
                         onProjectChanged(updated)
@@ -696,67 +697,6 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func moveTake(id: UUID, toIndex: Int) {
-        guard phase == .idle, !isExportingProject, !isAnalyzingTrim else {
-            errorMessage = "Finish the current recording operation before editing the Timeline."
-            return
-        }
-        do {
-            let updated = try projectStore.moveTake(projectID: project.id, takeID: id, toIndex: toIndex)
-            project = updated
-            onProjectChanged(updated)
-        } catch {
-            errorMessage = "The Timeline couldn't be reordered."
-        }
-    }
-
-    func moveTake(id: UUID, before targetID: UUID) {
-        guard phase == .idle, !isExportingProject, !isAnalyzingTrim else {
-            errorMessage = "Finish the current operation before editing the Timeline."
-            return
-        }
-        do {
-            let updated = try projectStore.moveTake(projectID: project.id, takeID: id, before: targetID)
-            project = updated
-            onProjectChanged(updated)
-        } catch {
-            errorMessage = "The Timeline couldn't be reordered."
-        }
-    }
-
-    func moveTakes(fromOffsets sourceOffsets: IndexSet, toOffset destination: Int) {
-        guard canManageTakes else {
-            errorMessage = "Finish the current operation before editing the Timeline."
-            return
-        }
-        do {
-            let updated = try projectStore.moveTakes(
-                projectID: project.id,
-                fromOffsets: sourceOffsets,
-                toOffset: destination
-            )
-            project = updated
-            onProjectChanged(updated)
-        } catch {
-            errorMessage = "The Timeline couldn't be reordered."
-        }
-    }
-
-    func deleteTake(id: UUID) {
-        guard phase == .idle, !isExportingProject, !isAnalyzingTrim else {
-            errorMessage = "Finish the current recording operation before deleting a Take."
-            return
-        }
-        do {
-            let updated = try projectStore.deleteTake(projectID: project.id, takeID: id)
-            project = updated
-            trimReviewTakeIDs.removeAll { $0 == id }
-            onProjectChanged(updated)
-        } catch {
-            errorMessage = "The Take couldn't be deleted."
-        }
-    }
-
     var canManageTakes: Bool {
         phase == .idle && !isExportingProject && !isAnalyzingTrim && !isTranscribingCaptions
     }
@@ -774,7 +714,10 @@ final class AppModel: ObservableObject {
             return
         }
         do {
-            let plan = try ProjectExportPlan.make(project: project, store: projectStore)
+            guard let exportSnapshot else {
+                throw TimelineEditorError.corruptPrimaryStoryline
+            }
+            let plan = try ProjectExportPlan(snapshot: exportSnapshot)
             beginProjectExport(plan: plan)
         } catch {
             errorMessage = error.localizedDescription
@@ -979,20 +922,54 @@ final class AppModel: ObservableObject {
     }
 
     private func storeFinalTake(_ url: URL) {
-        do {
-            guard let currentTake else { throw FinalizationError.exportFailed("Take metadata is unavailable.") }
-            let takeID = currentTake.id
-            let updated = try recordingCoordinator.complete(take: currentTake, finalizedMovieAt: url)
-            project = updated
-            onProjectChanged(updated)
-            completedTakeForReview = updated.takes.first(where: { $0.id == takeID })
-            try machine.apply(.takeStored)
-            haptic(.success)
-            resetToIdle()
-            generateThumbnail(for: takeID)
-        } catch {
-            logger.error("Project Take save failed: \(error.localizedDescription, privacy: .public)")
-            errorMessage = "Couldn't add the Take to this Project. Your recording has been kept."
+        Task {
+            do {
+                guard let currentTake else { throw FinalizationError.exportFailed("Take metadata is unavailable.") }
+                let takeID = currentTake.id
+                let playableDuration = try await validator.validate(url)
+                let completion = try await timelineEditor.completeFinalizedTake(
+                    FinalizedTake(
+                        id: takeID,
+                        movieURL: url,
+                        orientation: currentTake.orientation,
+                        duration: playableDuration,
+                        createdAt: currentTake.createdAt
+                    ),
+                    expectedRevision: project.primaryStoryline.revision
+                )
+                project = completion.project
+                exportSnapshot = completion.snapshot
+                onProjectChanged(completion.project)
+                completedTakeForReview = completion.take
+                try machine.apply(.takeStored)
+                haptic(.success)
+                resetToIdle()
+                generateThumbnail(for: takeID)
+            } catch {
+                logger.error("Project Take save failed: \(error.localizedDescription, privacy: .public)")
+                errorMessage = "Couldn't add the Take to this Project. Your recording has been kept."
+            }
+        }
+    }
+
+    private func refreshExportSnapshot() {
+        exportSnapshotRequestID += 1
+        let requestID = exportSnapshotRequestID
+        exportSnapshotTask?.cancel()
+        exportSnapshotTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let snapshot = try await timelineEditor.snapshot()
+                try Task.checkCancellation()
+                guard requestID == exportSnapshotRequestID else { return }
+                exportSnapshot = snapshot
+            } catch is CancellationError {
+                return
+            } catch {
+                guard requestID == exportSnapshotRequestID else { return }
+                exportSnapshot = nil
+                logger.error("Export Snapshot refresh failed: \(error.localizedDescription, privacy: .public)")
+            }
         }
     }
 

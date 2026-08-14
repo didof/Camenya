@@ -79,8 +79,6 @@ struct TakeListScreen: View {
     let onRequestProjectAction: (TakeListProjectAction) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var reviewingTake: ProjectTake?
-    @State private var deletingTake: ProjectTake?
-    @State private var editMode: EditMode = .inactive
 
     var body: some View {
         NavigationStack {
@@ -89,13 +87,6 @@ struct TakeListScreen: View {
                     ForEach(Array(model.project.takes.enumerated()), id: \.element.id) { index, take in
                         let cleanup = TakeEdgeCleanupPresentation(take: take)
                         takeRow(take, index: index)
-                            .moveDisabled(!model.canManageTakes)
-                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                Button("Delete", systemImage: "trash", role: .destructive) {
-                                    deletingTake = take
-                                }
-                                .disabled(!model.canManageTakes)
-                            }
                             .swipeActions(edge: .leading, allowsFullSwipe: false) {
                                 Button(cleanup.actionTitle, systemImage: "waveform.badge.magnifyingglass") {
                                     requestSilenceTrim(for: take)
@@ -103,36 +94,20 @@ struct TakeListScreen: View {
                                 .tint(.indigo)
                                 .disabled(!model.canManageTakes)
                             }
-                            .accessibilityAction(named: "Move Earlier") {
-                                if index > 0 { model.moveTake(id: take.id, toIndex: index - 1) }
-                            }
-                            .accessibilityAction(named: "Move Later") {
-                                if index < model.project.takes.count - 1 {
-                                    model.moveTake(id: take.id, toIndex: index + 1)
-                                }
-                            }
                     }
-                    .onMove(perform: model.moveTakes)
                 } header: {
-                    Text("Timeline order")
+                    Text("Recorded Takes")
                 } footer: {
-                    Text("Tap to play. Swipe right for Silence Trim, left to delete, or use Reorder to move Takes.")
+                    Text("Each finalized Take is kept as source media and currently appears once in Project order.")
                 }
 
             }
-            .environment(\.editMode, $editMode)
             .navigationTitle("Takes")
             .navigationBarTitleDisplayMode(.inline)
             .accessibilityIdentifier("take-list")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { dismiss() }
-                }
-                ToolbarItem(placement: .primaryAction) {
-                    Button(editMode == .active ? "Done Reordering" : "Reorder") {
-                        withAnimation { editMode = editMode == .active ? .inactive : .active }
-                    }
-                        .disabled(!model.canManageTakes || model.project.takes.count < 2)
                 }
             }
             .safeAreaInset(edge: .bottom) {
@@ -145,23 +120,6 @@ struct TakeListScreen: View {
                 title: "Take \((model.project.takes.firstIndex(of: take) ?? 0) + 1)",
                 format: model.project.format ?? .portrait
             )
-        }
-        .confirmationDialog("Delete Take?", isPresented: Binding(
-            get: { deletingTake != nil },
-            set: { if !$0 { deletingTake = nil } }
-        ), titleVisibility: .visible) {
-            if let take = deletingTake {
-                Button("Delete \(duration(take.duration)) Permanently", role: .destructive) {
-                    model.deleteTake(id: take.id)
-                    deletingTake = nil
-                }
-                .disabled(!model.canManageTakes)
-            }
-            Button("Cancel", role: .cancel) { deletingTake = nil }
-        } message: {
-            if let take = deletingTake {
-                Text("The Take and \(ByteCountFormatter.string(fromByteCount: model.storageBytes(for: take), countStyle: .file)) of media it owns will be removed. This cannot be undone.")
-            }
         }
     }
 
@@ -220,29 +178,12 @@ struct TakeListScreen: View {
                     onRequestProjectAction(.manageCaptions(takeID: take.id))
                 }
                 .disabled(!model.canManageTakes)
-                if index > 0 {
-                    Button("Move Earlier", systemImage: "arrow.up") {
-                        model.moveTake(id: take.id, toIndex: index - 1)
-                    }
-                    .disabled(!model.canManageTakes)
-                }
-                if index < model.project.takes.count - 1 {
-                    Button("Move Later", systemImage: "arrow.down") {
-                        model.moveTake(id: take.id, toIndex: index + 1)
-                    }
-                    .disabled(!model.canManageTakes)
-                }
                 if cleanup.canReset {
                     Button("Reset Edge Cleanup", systemImage: "arrow.counterclockwise") {
                         model.resetTrim(takeID: take.id)
                     }
                     .disabled(!model.canManageTakes)
                 }
-                Divider()
-                Button("Delete Take", systemImage: "trash", role: .destructive) {
-                    deletingTake = take
-                }
-                .disabled(!model.canManageTakes)
             } label: {
                 Image(systemName: "ellipsis.circle")
                     .font(.title3)
