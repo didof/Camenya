@@ -128,12 +128,12 @@ private struct TrimReviewEditor: View {
 
                     HStack {
                         Label(
-                            "Remove \(RecordingDurationFormatter.clock(editor.leadingRemoval)) start",
+                            "Remove \(RecordingDurationFormatter.editingClock(editor.leadingRemoval)) start",
                             systemImage: "arrow.right.to.line"
                         )
                         Spacer()
                         Label(
-                            "Remove \(RecordingDurationFormatter.clock(editor.trailingRemoval)) end",
+                            "Remove \(RecordingDurationFormatter.editingClock(editor.trailingRemoval)) end",
                             systemImage: "arrow.left.to.line"
                         )
                     }
@@ -343,7 +343,7 @@ private struct TrimWaveform: View {
         )
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(label)
-        .accessibilityValue(RecordingDurationFormatter.clock(value))
+        .accessibilityValue(RecordingDurationFormatter.editingClock(value))
         .accessibilityHint("Swipe up or down to adjust")
         .accessibilityAdjustableAction { direction in
             let step = max(0.1, duration / 100)
