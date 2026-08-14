@@ -2,6 +2,83 @@ import XCTest
 @testable import Camenya
 
 final class SilenceTrimEditorStateTests: XCTestCase {
+    func testNudgeMovesTheStartEarlierByExactlyOneTenth() {
+        var state = SilenceTrimEditorState(
+            duration: 10,
+            suggestion: TakeRange(startSeconds: 1, endSeconds: 9)
+        )
+
+        state.nudge(.start, direction: .earlier)
+
+        XCTAssertEqual(state.selection.start.seconds, 0.9, accuracy: 0.001)
+    }
+
+    func testNudgeMovesTheStartLaterByExactlyOneTenth() {
+        var state = SilenceTrimEditorState(
+            duration: 10,
+            suggestion: TakeRange(startSeconds: 1, endSeconds: 9)
+        )
+
+        state.nudge(.start, direction: .later)
+
+        XCTAssertEqual(state.selection.start.seconds, 1.1, accuracy: 0.001)
+    }
+
+    func testNudgeMovesTheEndEarlierByExactlyOneTenth() {
+        var state = SilenceTrimEditorState(
+            duration: 10,
+            suggestion: TakeRange(startSeconds: 1, endSeconds: 9)
+        )
+
+        state.nudge(.end, direction: .earlier)
+
+        XCTAssertEqual(state.selection.end.seconds, 8.9, accuracy: 0.001)
+    }
+
+    func testNudgeMovesTheEndLaterByExactlyOneTenth() {
+        var state = SilenceTrimEditorState(
+            duration: 10,
+            suggestion: TakeRange(startSeconds: 1, endSeconds: 9)
+        )
+
+        state.nudge(.end, direction: .later)
+
+        XCTAssertEqual(state.selection.end.seconds, 9.1, accuracy: 0.001)
+    }
+
+    func testRepeatedNudgesRemainTenthSecondSteps() {
+        var state = SilenceTrimEditorState(
+            duration: 10,
+            suggestion: TakeRange(startSeconds: 1, endSeconds: 9)
+        )
+
+        state.nudge(.start, direction: .later)
+        state.nudge(.start, direction: .later)
+        state.nudge(.start, direction: .later)
+
+        XCTAssertEqual(state.selection.start.seconds, 1.3, accuracy: 0.001)
+    }
+
+    func testSourceBoundariesRejectOutwardNudges() {
+        let state = SilenceTrimEditorState(
+            duration: 10,
+            suggestion: TakeRange(startSeconds: 0, endSeconds: 10)
+        )
+
+        XCTAssertNil(state.selectionAfterNudge(.start, direction: .earlier))
+        XCTAssertNil(state.selectionAfterNudge(.end, direction: .later))
+    }
+
+    func testMinimumDurationRejectsInwardNudges() {
+        let state = SilenceTrimEditorState(
+            duration: 10,
+            suggestion: TakeRange(startSeconds: 4, endSeconds: 5)
+        )
+
+        XCTAssertNil(state.selectionAfterNudge(.start, direction: .later))
+        XCTAssertNil(state.selectionAfterNudge(.end, direction: .earlier))
+    }
+
     func testSuggestionIsExpressedAsLeadingAndTrailingRemoval() {
         let suggestion = TakeRange(startSeconds: 1.25, endSeconds: 8.5)
 

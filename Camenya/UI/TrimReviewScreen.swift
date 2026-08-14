@@ -126,6 +126,11 @@ private struct TrimReviewEditor: View {
                     )
                     .frame(height: 108)
 
+                    VStack(spacing: 8) {
+                        nudgeControls(for: .start)
+                        nudgeControls(for: .end)
+                    }
+
                     HStack {
                         Label(
                             "Remove \(RecordingDurationFormatter.editingClock(editor.leadingRemoval)) start",
@@ -228,6 +233,42 @@ private struct TrimReviewEditor: View {
     private func updateEnd(_ value: TimeInterval) {
         editor.setSelectionEnd(value)
         playback.updateSelection(editor.selection)
+    }
+
+    private func nudgeControls(for boundary: SilenceTrimBoundary) -> some View {
+        let value = boundary == .start
+            ? editor.selection.start.seconds
+            : editor.selection.end.seconds
+        return HStack(spacing: 8) {
+            Text("\(boundary == .start ? "Start" : "End") \(RecordingDurationFormatter.editingClock(value))")
+                .font(.caption.monospacedDigit().weight(.semibold))
+            Spacer()
+            nudgeButton(for: boundary, direction: .earlier)
+            nudgeButton(for: boundary, direction: .later)
+        }
+    }
+
+    private func nudgeButton(
+        for boundary: SilenceTrimBoundary,
+        direction: SilenceTrimNudgeDirection
+    ) -> some View {
+        let presentation = SilenceTrimNudgePresentation(
+            editor: editor,
+            boundary: boundary,
+            direction: direction
+        )
+        return Button(
+            presentation.title,
+            systemImage: direction == .earlier ? "minus" : "plus"
+        ) {
+            guard editor.nudge(boundary, direction: direction) else { return }
+            playback.updateSelection(editor.selection)
+        }
+        .buttonStyle(.bordered)
+        .frame(minHeight: 44)
+        .disabled(!presentation.isEnabled)
+        .accessibilityLabel(presentation.accessibilityLabel)
+        .accessibilityValue(presentation.accessibilityValue)
     }
 
     private var decisionBar: some View {

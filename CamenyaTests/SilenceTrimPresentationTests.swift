@@ -2,6 +2,40 @@ import XCTest
 @testable import Camenya
 
 final class SilenceTrimPresentationTests: XCTestCase {
+    func testNudgePresentationDescribesTheStepAndPreciseResult() {
+        let editor = SilenceTrimEditorState(
+            duration: 10,
+            suggestion: TakeRange(startSeconds: 1, endSeconds: 9)
+        )
+
+        let presentation = SilenceTrimNudgePresentation(
+            editor: editor,
+            boundary: .start,
+            direction: .earlier
+        )
+
+        XCTAssertEqual(presentation.title, "Earlier")
+        XCTAssertEqual(presentation.accessibilityLabel, "Trim start earlier by 0.1 seconds")
+        XCTAssertEqual(presentation.accessibilityValue, "Result 00:00.9")
+        XCTAssertTrue(presentation.isEnabled)
+    }
+
+    func testUnavailableNudgePresentationExplainsTheCurrentBoundary() {
+        let editor = SilenceTrimEditorState(
+            duration: 10,
+            suggestion: TakeRange(startSeconds: 0, endSeconds: 10)
+        )
+
+        let presentation = SilenceTrimNudgePresentation(
+            editor: editor,
+            boundary: .start,
+            direction: .earlier
+        )
+
+        XCTAssertEqual(presentation.accessibilityValue, "Unavailable at 00:00.0")
+        XCTAssertFalse(presentation.isEnabled)
+    }
+
     func testAnalyzerSuggestionPresentationExplainsTheNonDestructiveResult() {
         let editor = SilenceTrimEditorState(
             duration: 10,
