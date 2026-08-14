@@ -1,113 +1,146 @@
 # Camenya domain glossary
 
-## Camenya
+## Product
 
-The official project and product identity. Camenya is a local-first iPhone recording tool that helps one person assemble a story from multiple Takes and camera perspectives without uploading unfinished media. The name replaces the historical FlipCam codename.
+**Camenya**:
+A local-first iPhone narrative recorder that helps one person construct a story from multiple recordings and camera perspectives without uploading unfinished media.
 
-## Local Signing Configuration
+**Project**:
+One local-only recording workspace that owns its Takes, Primary Storyline, caption configuration, and supporting media. A Project remains available until explicitly deleted and may produce one finished movie through Project Export.
 
-An untracked, machine-local plist containing the Apple Development Team, physical iPhone destination, and unique bundle identifier selected by the person building Camenya. It is input to a local build and never part of the Project, app data, repository, release artifacts, support logs, or contributor identity.
+**Project Library**:
+The collection of all Projects currently owned by the app, ordered by most recent modification.
 
-## Project
+**Project Format**:
+The portrait or landscape presentation shared by every Take, Storyline Item, and exported movie in one Project.
 
-One ephemeral, local-only editable recording workspace. A Project owns an ordered collection of Takes and all supporting media, which never synchronize and are excluded from device and cloud backups. A Project never expires automatically: it remains available only inside the app until the user explicitly deletes the Project or an individual Take. Deleting a Project permanently deletes every Take and supporting media it owns. A Project may be exported as one final movie.
+**Project Name**:
+The editable label used to distinguish a Project. A new Project receives a date-and-time-based name automatically.
 
-## Project Library
+**Project Note**:
+One persistent, local-only block of text owned by a Project and available while recording its Takes. It is never part of captured or exported media.
+_Avoid_: Note
 
-The collection of all Projects currently owned by the app. It is the user's entry point and orders Projects by their most recent modification.
+## Recorded sources
 
-## Take
+**Take**:
+One finalized, immutable recording source owned by a Project. A Take begins when Record is confirmed, ends when Stop completes finalization, and may contain several Segments.
+_Avoid_: Clip, Timeline item
 
-One user-visible clip within a Project. A Take begins when Record is confirmed and ends when Stop completes its in-app finalization or the user discards it. A Take may contain several Segments.
+**Source Range**:
+The complete playable interval of a finalized Take. It remains unchanged by Storyline editing.
+_Avoid_: Original Range, Effective Range
 
-## Original Range
+**Segment**:
+One uninterrupted camera recording between Record or Resume and Pause or Stop. A Segment uses exactly one camera position and contains no paused time.
 
-The complete playable interval of a Take's finalized movie. It remains available and unchanged regardless of later cleanup decisions.
+**Pause**:
+A Take state in which no Segment is active. The preview remains live, the recording timer is frozen, and the user may edit the Project Note, Flip, Resume, or Stop.
 
-## Trim Suggestion
-
-A proposed retained interval near the first and last sustained audio activity in a Take. It has no effect on playback or Project Export until the user reviews it.
-
-## Take Selection
-
-The retained interval that the user explicitly approves for a Take. A Take without a Take Selection uses its Original Range.
-
-## Trim Review
-
-The optional Project workflow in which the user compares a Trim Suggestion with the Original Range, adjusts its boundaries, and either approves a Take Selection or keeps the Original Range.
-
-## Effective Duration
-
-The duration used by Timeline playback and Project Export: the Take Selection's duration when one is approved, otherwise the Original Range's duration.
-
-## Segment
-
-One uninterrupted camera recording between Record/Resume and Pause/Stop. A Segment uses exactly one camera position and contains no paused time.
-
-## Pause
-
-A logical Take state in which no Segment is active. The preview remains live, the recording timer is frozen, and the user may edit the Project Note, Flip, Resume, or Stop.
-
-## Flip
-
+**Flip**:
 A change of the selected camera while no Segment is active. Repeated Flips during one Pause affect only which camera the next Segment uses.
 
-## Finalization
+**Finalization**:
+The process that validates and orders a Take's Segments and produces exactly one immutable in-app movie without paused time.
 
-The process that validates and orders a Take's Segments and produces exactly one in-app movie without paused time.
+**Recovery**:
+Reconstructing and finalizing an unfinished Take from its valid completed Segments within the Project that owns it.
 
-## Project Export
+**Unused Take**:
+A recoverable Take that is not referenced by any active Timeline Clip. It may still be referenced by Removed Clips and remains owned by its Project until added to the Primary Storyline or safely deleted.
 
-The explicit process that orders a Project's Takes and produces one final movie that may be saved to Photos. In-app Takes remain independent from the exported movie.
+## Storyline editing
 
-## Timeline
+**Primary Storyline**:
+The single ordered sequence of Storyline Items that defines the Project's video narrative and duration. Items meet with hard cuts and share one Project Time.
+_Avoid_: Video track, multitrack timeline
 
-The single ordered collection of every Take currently owned by a Project. Every Take in the Timeline is included in Project Export; unwanted Takes are removed rather than hidden or disabled.
+**Storyline Item**:
+One ordered, duration-bearing member of the Primary Storyline. Timeline Clip is the initial type; Title Card is an accepted post-core type.
 
-## Project Format
+**Timeline Clip**:
+One editable occurrence of a Take in the Primary Storyline. It has its own Available Range, Clip Selection, mute state, and Storyline position while leaving the referenced Take unchanged.
+_Avoid_: Take
 
-The portrait or landscape presentation shared by every Take in a Project and by its exported movie. The first Take establishes the Project Format; later Takes must match it.
+**Available Range**:
+The recoverable source-time bounds assigned to one Timeline Clip. Reset Trim restores the Clip Selection to these bounds rather than to the whole Take.
 
-## Project Name
+**Clip Selection**:
+The interval within a Timeline Clip's Available Range that currently contributes picture, duration, and optionally source audio to the Primary Storyline.
+_Avoid_: Take Selection, Effective Range
 
-The editable label used to distinguish a Project. A new Project receives a date-and-time-based name automatically, so naming never blocks recording.
+**Project Time**:
+The shared clock produced by the ordered durations of the Primary Storyline. Timed presentation and Project Export are evaluated against this clock.
 
-## Project Note
+**Timeline**:
+The time-based editor and visual representation of the Primary Storyline.
+_Avoid_: Take list
 
-One persistent, local-only block of text owned by a Project and available while recording its Takes. It is never part of captured or exported media.
+**Playhead**:
+The current Project Time used for seeking, preview, and time-based editing actions.
 
-## Take Deletion
+**Split**:
+An edit that replaces one Timeline Clip with two adjacent Timeline Clips at the Playhead while preserving the immediate output and the recoverable outer ranges of both results.
 
-The explicit, permanent removal of one Take and its supporting media from a Project. The user is shown the Take's duration and storage impact and must confirm the destructive action.
+**Removed Clip**:
+A recoverable Timeline Clip excluded from the Primary Storyline while retaining its Take reference, ranges, mute state, and prior placement context.
 
-## Project Deletion
+**Removed Clip Deletion**:
+The explicit, permanent discard of one Removed Clip's edit metadata. It does not delete its Take, but may remove the final reference that prevents an Unused Take from being deleted.
 
-The explicit, permanent removal of a Project and every Take and supporting media it owns. Before deletion, the user is shown the number of Takes and storage that will be removed and must confirm the destructive action. There is no Recently Deleted state or automatic expiration.
+**Mute**:
+A Timeline Clip state that excludes its source audio without changing its picture or Take.
 
-## Recovery
+**Session Edit History**:
+The reversible sequence of Timeline edits available during the current editing session. It is not durable recovery storage.
 
-Reconstructing and finalizing an unfinished Take from its persisted manifest and valid completed Segments within the Project that owns it. Legacy recoverable Takes without a Project are adopted by a Project named Recovered.
+**Trim Suggestion**:
+A proposed Clip Selection derived from audio activity within a Timeline Clip's Available Range. It does not affect playback or Project Export until approved.
 
-## Caption Configuration
+**Trim Review**:
+The optional workflow in which the user compares a Trim Suggestion with a Timeline Clip's Available Range and approves or adjusts its Clip Selection.
 
-The Project-owned explicit transcription locale plus shared visual style and normalized placement inherited by its captions.
+**Title Card**:
+A Storyline Item that presents text for an explicit duration without referencing a Take.
 
-## Caption Track
+**Text Overlay**:
+A timed text element attached to one Timeline Clip and positioned within the Project's safe presentation region.
 
-The Take-owned, non-destructive collection of timed Caption Cues produced from one Effective Range and then reviewed by the user. A Caption Track may need review, be approved, or become stale.
+## Captions
 
-## Caption Cue
+**Caption Configuration**:
+The Project-owned transcription locale plus shared visual style and normalized placement inherited by its captions.
 
-One editable, optionally enabled text interval within a Caption Track. It preserves recognized text, alternatives, confidence, and only the timing granularity actually supplied by recognition or review.
+**Caption Track**:
+The Take-owned, source-relative collection of timed Caption Cues. Text corrections are shared by every Timeline Clip that references the Take.
 
-## Stale Caption Track
+**Caption Cue**:
+One editable, optionally enabled text interval within a Caption Track. It preserves recognized text, alternatives, confidence, and only the timing granularity supplied by recognition or review.
 
-A Caption Track whose source Effective Range or Project locale no longer matches current Project metadata. Stale captions remain recoverable for review but cannot enter preview approval or Project Export.
+**Caption Projection**:
+The portion of a Take's Caption Track that maps through a Timeline Clip's Clip Selection into Project Time.
 
-## Captioned Export
+**Caption Timeline Issue**:
+A review requirement created when a structural Storyline edit makes a Caption Cue semantically unsafe to project. The affected caption stays out of export until explicitly reapproved.
 
-A Project Export whose immutable export snapshot contains approved Caption Tracks and renders them into the finalized movie.
+**Stale Caption Track**:
+A Caption Track whose Take source or Project locale no longer matches current Project metadata. It remains recoverable for review but cannot enter approved preview or Project Export.
 
-## Note
+## Export and deletion
 
-Deprecated term for Project Note.
+**Project Export**:
+The explicit process that renders one immutable snapshot of the Primary Storyline into a finished movie that may be saved to Photos. In-app Takes remain independent from the exported movie.
+
+**Export Snapshot**:
+The fixed Storyline, media ranges, mute states, and approved timed presentation used by one Project Export.
+
+**Take Deletion**:
+The explicit, permanent removal of one Unused Take and its supporting media from a Project. A Take referenced by any active or Removed Clip cannot be deleted independently.
+
+**Project Deletion**:
+The explicit, permanent removal of a Project and every Take, Storyline Item, caption, and supporting media it owns. It is the only operation that may cascade through referenced Takes.
+
+## Development support
+
+**Local Signing Configuration**:
+An untracked, machine-local plist containing the Apple Development Team, physical iPhone destination, and unique bundle identifier selected by the person building Camenya. It is never part of app data, the repository, release artifacts, support logs, or contributor identity.
