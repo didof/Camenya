@@ -2,6 +2,102 @@ import XCTest
 @testable import Camenya
 
 final class CaptionEditorStateTests: XCTestCase {
+    func testNudgeMovesCueStartEarlierByExactlyOneTenth() throws {
+        let cueID = UUID()
+        var editor = makeNudgeEditor(cueID: cueID)
+
+        try editor.nudge(cueID: cueID, boundary: .start, direction: .earlier)
+
+        XCTAssertEqual(editor.track.cues[0].range.start.seconds, 0.9, accuracy: 0.001)
+    }
+
+    func testNudgeMovesCueStartLaterByExactlyOneTenth() throws {
+        let cueID = UUID()
+        var editor = makeNudgeEditor(cueID: cueID)
+
+        try editor.nudge(cueID: cueID, boundary: .start, direction: .later)
+
+        XCTAssertEqual(editor.track.cues[0].range.start.seconds, 1.1, accuracy: 0.001)
+    }
+
+    func testNudgeMovesCueEndEarlierByExactlyOneTenth() throws {
+        let cueID = UUID()
+        var editor = makeNudgeEditor(cueID: cueID)
+
+        try editor.nudge(cueID: cueID, boundary: .end, direction: .earlier)
+
+        XCTAssertEqual(editor.track.cues[0].range.end.seconds, 2.9, accuracy: 0.001)
+    }
+
+    func testNudgeMovesCueEndLaterByExactlyOneTenth() throws {
+        let cueID = UUID()
+        var editor = makeNudgeEditor(cueID: cueID)
+
+        try editor.nudge(cueID: cueID, boundary: .end, direction: .later)
+
+        XCTAssertEqual(editor.track.cues[0].range.end.seconds, 3.1, accuracy: 0.001)
+    }
+
+    func testRepeatedCueNudgesRemainTenthSecondSteps() throws {
+        let cueID = UUID()
+        var editor = makeNudgeEditor(cueID: cueID)
+
+        try editor.nudge(cueID: cueID, boundary: .start, direction: .later)
+        try editor.nudge(cueID: cueID, boundary: .start, direction: .later)
+        try editor.nudge(cueID: cueID, boundary: .start, direction: .later)
+
+        XCTAssertEqual(editor.track.cues[0].range.start.seconds, 1.3, accuracy: 0.001)
+    }
+
+    func testCueNudgesStopAtTheSourceBoundaries() throws {
+        let cueID = UUID()
+        let editor = makeNudgeEditor(
+            cueID: cueID,
+            range: TakeRange(startSeconds: 0, endSeconds: 5)
+        )
+
+        XCTAssertNil(try editor.rangeAfterNudge(cueID: cueID, boundary: .start, direction: .earlier))
+        XCTAssertNil(try editor.rangeAfterNudge(cueID: cueID, boundary: .end, direction: .later))
+    }
+
+    func testCueNudgesStopAtAdjacentCueBoundaries() throws {
+        let targetID = UUID()
+        let editor = CaptionEditorState(track: TakeCaptionTrack(
+            localeIdentifier: "it-IT",
+            sourceRange: TakeRange(startSeconds: 0, endSeconds: 5),
+            recognizer: .speechRecognizerIOS18,
+            reviewState: .approved,
+            cues: [
+                makeCue(range: TakeRange(startSeconds: 0, endSeconds: 1)),
+                makeCue(id: targetID, range: TakeRange(startSeconds: 1, endSeconds: 3)),
+                makeCue(range: TakeRange(startSeconds: 3, endSeconds: 5))
+            ]
+        ))
+
+        XCTAssertNil(try editor.rangeAfterNudge(cueID: targetID, boundary: .start, direction: .earlier))
+        XCTAssertNil(try editor.rangeAfterNudge(cueID: targetID, boundary: .end, direction: .later))
+    }
+
+    func testCueNudgesPreserveTheMinimumDuration() throws {
+        let cueID = UUID()
+        let editor = makeNudgeEditor(
+            cueID: cueID,
+            range: TakeRange(startSeconds: 1, endSeconds: 1.1)
+        )
+
+        XCTAssertNil(try editor.rangeAfterNudge(cueID: cueID, boundary: .start, direction: .later))
+        XCTAssertNil(try editor.rangeAfterNudge(cueID: cueID, boundary: .end, direction: .earlier))
+    }
+
+    func testSuccessfulCueNudgeMarksTheTrackAsNeedingReview() throws {
+        let cueID = UUID()
+        var editor = makeNudgeEditor(cueID: cueID)
+
+        try editor.nudge(cueID: cueID, boundary: .start, direction: .earlier)
+
+        XCTAssertEqual(editor.track.reviewState, .needsReview)
+    }
+
     func testDraftCheckpointTracksOnlyChangesAfterTheLastSuccessfulSave() {
         let cueID = UUID()
         let track = TakeCaptionTrack(
@@ -250,5 +346,30 @@ final class CaptionEditorStateTests: XCTestCase {
         XCTAssertEqual(editor.nextUncertainCue(after: firstID)?.id, lastID)
         XCTAssertEqual(editor.nextUncertainCue(after: lastID)?.id, firstID)
         XCTAssertEqual(editor.nextUncertainCue(after: certainID)?.id, lastID)
+    }
+
+    private func makeNudgeEditor(
+        cueID: UUID,
+        range: TakeRange = TakeRange(startSeconds: 1, endSeconds: 3)
+    ) -> CaptionEditorState {
+        CaptionEditorState(track: TakeCaptionTrack(
+            localeIdentifier: "it-IT",
+            sourceRange: TakeRange(startSeconds: 0, endSeconds: 5),
+            recognizer: .speechRecognizerIOS18,
+            reviewState: .approved,
+            cues: [makeCue(id: cueID, range: range)]
+        ))
+    }
+
+    private func makeCue(id: UUID = UUID(), range: TakeRange) -> CaptionCue {
+        CaptionCue(
+            id: id,
+            range: range,
+            recognizedText: "Ciao",
+            text: "Ciao",
+            confidence: nil,
+            alternatives: [],
+            timedSpans: []
+        )
     }
 }

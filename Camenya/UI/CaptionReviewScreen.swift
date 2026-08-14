@@ -496,8 +496,21 @@ private struct CaptionReviewEditor: View {
         let lower = isStart ? previousEnd : cue.range.start.seconds + 0.1
         let upper = isStart ? cue.range.end.seconds - 0.1 : nextStart
         return VStack(alignment: .leading, spacing: 4) {
-            Text("\(isStart ? "Start" : "End") \(RecordingDurationFormatter.editingClock(value))")
-                .font(.caption.monospacedDigit())
+            HStack(spacing: 6) {
+                Text("\(isStart ? "Start" : "End") \(RecordingDurationFormatter.editingClock(value))")
+                    .font(.caption.monospacedDigit())
+                Spacer()
+                cueNudgeButton(
+                    cueID: cueID,
+                    boundary: isStart ? .start : .end,
+                    direction: .earlier
+                )
+                cueNudgeButton(
+                    cueID: cueID,
+                    boundary: isStart ? .start : .end,
+                    direction: .later
+                )
+            }
             Slider(value: Binding(
                 get: { isStart ? currentCue(cueID)!.range.start.seconds : currentCue(cueID)!.range.end.seconds },
                 set: { newValue in
@@ -511,6 +524,48 @@ private struct CaptionReviewEditor: View {
             .accessibilityLabel(isStart ? "Caption start" : "Caption end")
             .accessibilityValue(RecordingDurationFormatter.editingClock(value))
         }
+    }
+
+    private func cueNudgeButton(
+        cueID: UUID,
+        boundary: CaptionCueBoundary,
+        direction: CaptionCueNudgeDirection
+    ) -> some View {
+        let cue = currentCue(cueID)!
+        let currentValue = boundary == .start
+            ? cue.range.start.seconds
+            : cue.range.end.seconds
+        let candidate = try? editor.rangeAfterNudge(
+            cueID: cueID,
+            boundary: boundary,
+            direction: direction
+        )
+        let resultValue = candidate.map {
+            boundary == .start ? $0.start.seconds : $0.end.seconds
+        }
+        let boundaryName = boundary == .start ? "start" : "end"
+        let directionName = direction == .earlier ? "earlier" : "later"
+        let stepDescription = String(format: "%.1f seconds", CaptionEditorState.nudgeStep)
+        return Button(
+            direction == .earlier ? "Earlier" : "Later",
+            systemImage: direction == .earlier ? "minus" : "plus"
+        ) {
+            guard (try? editor.nudge(
+                cueID: cueID,
+                boundary: boundary,
+                direction: direction
+            )) == true,
+            let updatedCue = currentCue(cueID) else { return }
+            playback.seek(to: updatedCue.range.start.seconds)
+        }
+        .buttonStyle(.bordered)
+        .frame(minHeight: 44)
+        .disabled(candidate == nil)
+        .accessibilityLabel("Caption \(boundaryName) \(directionName) by \(stepDescription)")
+        .accessibilityValue(
+            resultValue.map { "Result \(RecordingDurationFormatter.editingClock($0))" }
+                ?? "Unavailable at \(RecordingDurationFormatter.editingClock(currentValue))"
+        )
     }
 
     private func focus(_ cue: CaptionCue, using proxy: ScrollViewProxy) {
