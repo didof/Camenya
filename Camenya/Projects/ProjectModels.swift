@@ -64,10 +64,7 @@ struct TakeRange: Codable, Equatable, Hashable, Sendable {
               originalDuration.isFinite else {
             return false
         }
-        let quantizedOriginalEnd = MediaTime(
-            seconds: originalDuration,
-            preferredTimescale: end.timescale
-        ).seconds
+        let quantizedOriginalEnd = MediaTime(seconds: originalDuration).seconds
         return startSeconds >= 0
             && endSeconds <= quantizedOriginalEnd
             && duration >= minimumDuration

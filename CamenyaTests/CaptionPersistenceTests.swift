@@ -183,6 +183,44 @@ final class CaptionPersistenceTests: XCTestCase {
         }
     }
 
+    func testCaptionDraftRejectsCoarseTimescaleRangeBeyondPersistedTakeEnd() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let takeID = UUID()
+        _ = try store.addTake(
+            projectID: project.id,
+            takeID: takeID,
+            movieAt: makeMovie(),
+            orientation: .portrait,
+            duration: 12.6,
+            createdAt: Date()
+        )
+        _ = try store.setCaptionConfiguration(
+            projectID: project.id,
+            configuration: ProjectCaptionConfiguration(localeIdentifier: "it-IT", placement: .lower)
+        )
+        let outsideDraft = TakeCaptionTrack(
+            localeIdentifier: "it-IT",
+            sourceRange: TakeRange(
+                start: MediaTime(value: 0, timescale: 1),
+                end: MediaTime(value: 13, timescale: 1)
+            ),
+            recognizer: .speechAnalyzerIOS26,
+            reviewState: .needsReview,
+            cues: []
+        )
+
+        XCTAssertThrowsError(try store.recordCaptionDraft(
+            projectID: project.id,
+            takeID: takeID,
+            draft: outsideDraft
+        )) { error in
+            XCTAssertEqual(error as? ProjectStoreError, .invalidCaptionRange(takeID))
+        }
+    }
+
     func testOnlyApprovedCaptionsEnterTheImmutableExportPlan() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
