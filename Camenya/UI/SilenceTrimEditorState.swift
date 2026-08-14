@@ -1,6 +1,18 @@
 import Foundation
 
+enum SilenceTrimBoundary: Equatable, Sendable {
+    case start
+    case end
+}
+
+enum SilenceTrimNudgeDirection: Equatable, Sendable {
+    case earlier
+    case later
+}
+
 struct SilenceTrimEditorState: Equatable, Sendable {
+    static let nudgeStep: TimeInterval = 0.1
+
     let duration: TimeInterval
     let suggestion: TakeRange
     private(set) var leadingRemoval: TimeInterval
@@ -56,6 +68,47 @@ struct SilenceTrimEditorState: Equatable, Sendable {
 
     mutating func setSelectionEnd(_ value: TimeInterval) {
         setTrailingRemoval(duration - value)
+    }
+
+    func selectionAfterNudge(
+        _ boundary: SilenceTrimBoundary,
+        direction: SilenceTrimNudgeDirection
+    ) -> TakeRange? {
+        let start = selection.start.seconds
+        let end = selection.end.seconds
+        let candidate: TakeRange
+        switch (boundary, direction) {
+        case (.start, .earlier):
+            candidate = TakeRange(startSeconds: start - Self.nudgeStep, endSeconds: end)
+        case (.start, .later):
+            candidate = TakeRange(startSeconds: start + Self.nudgeStep, endSeconds: end)
+        case (.end, .earlier):
+            candidate = TakeRange(startSeconds: start, endSeconds: end - Self.nudgeStep)
+        case (.end, .later):
+            candidate = TakeRange(startSeconds: start, endSeconds: end + Self.nudgeStep)
+        }
+        guard candidate != selection,
+              candidate.isValid(inside: duration, minimumDuration: minimumKeptDuration) else {
+            return nil
+        }
+        return candidate
+    }
+
+    @discardableResult
+    mutating func nudge(
+        _ boundary: SilenceTrimBoundary,
+        direction: SilenceTrimNudgeDirection
+    ) -> Bool {
+        guard let candidate = selectionAfterNudge(boundary, direction: direction) else {
+            return false
+        }
+        switch boundary {
+        case .start:
+            setSelectionStart(candidate.start.seconds)
+        case .end:
+            setSelectionEnd(candidate.end.seconds)
+        }
+        return true
     }
 
     mutating func resetToSuggestion() {
