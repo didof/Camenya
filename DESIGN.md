@@ -1,72 +1,45 @@
 ---
 name: Camenya
-description: A calm, tactile camera interface for one continuous multi-camera Take.
+description: A calm, native iPhone narrative recorder with a bounded Primary Storyline.
 colors:
-  ink: "#090A0D"
-  paper: "#F6F6F1"
-  recording: "#FF453B"
-  warning: "#FFC738"
+  foreground: "UIColor.label"
+  secondaryForeground: "UIColor.secondaryLabel"
+  background: "UIColor.systemBackground"
+  secondaryBackground: "UIColor.secondarySystemBackground"
+  groupedBackground: "UIColor.systemGroupedBackground"
+  separator: "UIColor.separator"
+  tint: "SwiftUI.Color.tint"
+  recording: "UIColor.systemRed"
+  warning: "UIColor.systemYellow"
 typography:
   headline:
-    fontFamily: "SF Pro, system-ui, sans-serif"
-    fontSize: "17px"
-    fontWeight: 600
-    lineHeight: 1.2
+    swiftUI: "Font.headline"
   title:
-    fontFamily: "SF Pro, system-ui, sans-serif"
-    fontSize: "20px"
-    fontWeight: 600
-    lineHeight: 1.25
+    swiftUI: "Font.title3.weight(.semibold)"
   body:
-    fontFamily: "SF Pro, system-ui, sans-serif"
-    fontSize: "17px"
-    fontWeight: 400
-    lineHeight: 1.35
+    swiftUI: "Font.body"
   label:
-    fontFamily: "SF Pro, system-ui, sans-serif"
-    fontSize: "12px"
-    fontWeight: 600
-    lineHeight: 1.15
+    swiftUI: "Font.caption.weight(.semibold)"
   timer:
-    fontFamily: "SF Mono, ui-monospace, monospace"
-    fontSize: "17px"
-    fontWeight: 600
-    lineHeight: 1
-rounded:
-  control: "15px"
-  panel: "24px"
-  shelf: "30px"
-  pill: "999px"
+    swiftUI: "Font.body.monospacedDigit().weight(.semibold)"
 spacing:
-  xs: "6px"
-  sm: "10px"
-  md: "16px"
-  lg: "24px"
+  compact: "8pt"
+  standard: "16pt"
+  section: "24pt"
 components:
   button-primary:
-    backgroundColor: "{colors.paper}"
-    textColor: "{colors.ink}"
-    typography: "{typography.headline}"
-    rounded: "{rounded.pill}"
-    padding: "0 20px"
-    height: "56px"
+    swiftUI: "Button with .buttonStyle(.borderedProminent)"
+    minimumTarget: "44pt"
   button-utility:
-    backgroundColor: "{colors.ink}"
-    textColor: "{colors.paper}"
-    typography: "{typography.label}"
-    rounded: "{rounded.control}"
-    size: "46px"
+    swiftUI: "Button with Label and a native bordered or plain style"
+    minimumTarget: "44pt"
   record-button:
     backgroundColor: "{colors.recording}"
-    textColor: "{colors.paper}"
-    rounded: "{rounded.pill}"
     size: "72px"
-  status-pill:
-    backgroundColor: "{colors.ink}"
-    textColor: "{colors.paper}"
-    typography: "{typography.label}"
-    rounded: "{rounded.pill}"
-    height: "38px"
+  timeline-clip:
+    selectionColor: "{colors.tint}"
+    minimumHeight: "52pt"
+    minimumInteractiveTarget: "44pt"
 ---
 
 # Design System: Camenya
@@ -75,118 +48,149 @@ components:
 
 **Creative North Star: "The Pocket Slate"**
 
-Camenya is used one-handed in unpredictable light while the live camera image changes constantly. Its interface behaves like a compact physical recording tool: dark, steady framing around the preview; off-white tactile controls; signal colors reserved for recording, warnings, and destructive actions.
+Camenya is used on an iPhone in two concrete scenes. During capture, one person may be holding the phone in changing ambient light and needs the preview and recording truth at a glance. During editing, the phone is steadier, often held in two hands, and the user needs to shape a spoken story without learning a professional editor.
 
-The preview remains the largest surface and the user's next valid action remains visually dominant. The system explicitly rejects a professional camera control deck, a social-video creator interface, and a decorative glass dashboard.
+The interface should feel like it belongs beside Apple's focused first-party utilities: semantic system colors, SF typography, SF Symbols, standard navigation, native menus and confirmation patterns, predictable gestures, and restrained feedback. Familiarity is the desired character. Custom UI is reserved for the filmstrip, playhead, trim handles, and other controls that have no adequate system equivalent.
 
 **Key Characteristics:**
 
-- Restrained signal palette over an arbitrary live image.
-- One primary action per recorder state.
-- Visible icon and label pairs for recognition under pressure.
-- Opaque tonal surfaces and hairlines, never ornamental glass.
-- Native typography, Dynamic Type, and 44-point minimum targets.
+- Semantic system colors that adapt to appearance and accessibility settings.
+- One primary action per recorder state and one selected editing target at a time.
+- Visible labels or accessible names for every action.
+- Native containers and materials only when they improve hierarchy or legibility.
+- Dynamic Type, VoiceOver, Reduce Motion, and 44-point minimum targets from the first implementation.
 
 ## 2. Colors
 
-The palette is almost neutral so the camera preview can carry the scene; red and yellow communicate state rather than decorate.
+Use Apple's semantic colors rather than fixed light and dark swatches. The recorder must remain legible over arbitrary imagery; the editor follows the current system appearance and lets video thumbnails provide most of the color.
 
 ### Primary
 
-- **Signal Red:** Record affordance, active recording state, Stop, and destructive emphasis.
+- **System Red:** Record affordance, active recording state, Stop, and destructive emphasis.
 
 ### Secondary
 
-- **Slate Ink:** Stable chrome, panels, scrims, and high-contrast framing around the preview.
+- **System Tint:** Current selection, enabled primary editing actions, focus, and linked controls.
 
 ### Tertiary
 
-- **Caution Yellow:** Interruption and recovery only.
+- **System Yellow:** Interruption and recovery attention only.
 
 ### Neutral
 
-- **Soft Paper:** Primary actions, text, icons, and recording-ring contrast.
+- **Semantic Neutrals:** Label, secondaryLabel, systemBackground, secondarySystemBackground, grouped backgrounds, and separator.
 
 ### Named Rules
 
-**The Signal Rule.** Red means capture or destruction; yellow means attention. Neither color is decorative.
+**The Signal Rule.** Red means capture or destruction; yellow means attention; tint means selection or an enabled action. None is decorative.
 
-**The Preview Rule.** The live image supplies all other color. Interface chrome stays neutral.
+**The Semantic Color Rule.** Do not hard-code black, white, or custom neutral hex values. Start with semantic system colors and verify contrast in Light Mode, Dark Mode, Increase Contrast, and over representative video frames.
+
+**The Preview Rule.** The live image and filmstrip supply all other color. Recorder chrome stays restrained and editor chrome follows the system appearance.
 
 ## 3. Typography
 
-**Display Font:** SF Pro with the native system fallback  
-**Body Font:** SF Pro with the native system fallback  
-**Label/Mono Font:** SF Mono for elapsed time only
+Use SwiftUI semantic text styles so size, leading, weight, and accessibility scaling stay native. Use `monospacedDigit()` for elapsed time and timecode only; do not introduce a display face.
 
 **Character:** Native, compact, and immediately familiar. Weight and case communicate priority without introducing a display face.
 
 ### Hierarchy
 
-- **Headline** (semibold, 17px, 1.2): Primary action labels and operational states.
-- **Title** (semibold, 20px, 1.25): Pause note and recovery headings.
-- **Body** (regular, 17px, 1.35): Notes and explanatory copy.
-- **Label** (semibold, 12px, 1.15): Utility-control captions and status text.
-- **Timer** (semibold monospaced, 17px, 1): Stable elapsed-time measurement.
+- **Title / Title 3:** Screen and inspector hierarchy.
+- **Headline:** Primary actions and operational states.
+- **Body:** Notes, explanations, and empty-state guidance.
+- **Callout / Caption:** Secondary metadata and compact Timeline labels.
+- **Monospaced digits:** Elapsed time and precise edit values only.
 
 ### Named Rules
 
-**The Native Voice Rule.** Use the system typeface everywhere; monospacing is reserved for time.
+**The Native Voice Rule.** Use semantic system styles everywhere. Never freeze essential text at a pixel size, and allow labels to wrap before truncating meaning.
 
 ## 4. Elevation
 
-Camenya is flat by default. Depth comes from opaque tonal layering, preview scrims, and a restrained one-point hairline; no drop shadows are used over the camera image.
+Camenya is flat by default. Hierarchy comes from system background levels, separators, toolbars, safe-area placement, selection outlines, and native sheets. The recorder may use an opaque or system material scrim only when it materially protects legibility over the preview.
 
 ### Named Rules
 
-**The No Floating Glass Rule.** Panels may cover the changing preview for legibility, but blur and shadow never become decoration.
+**The No Floating Glass Rule.** Materials may solve contrast in a native toolbar or sheet, but blur and shadow never become decoration.
 
 ## 5. Components
 
-### Buttons
+### Native Controls First
 
-- **Shape:** Tactile continuous curves for utility controls (15px) and capsules for primary actions.
-- **Primary:** Soft Paper fill, Slate Ink text, 56px height, one per state.
-- **Press / Focus:** A short scale-and-opacity response; native accessibility behavior remains intact.
-- **Utility:** Icon above visible label, minimum 64px footprint, muted tonal fill behind the icon.
-- **Destructive:** Signal Red icon and label with a low-opacity red field; never the filled primary action.
+- Use `NavigationStack`, `Toolbar`, `Button`, `Label`, `Menu`, `Toggle`, `Slider`, `confirmationDialog`, and system sheets where their behavior fits.
+- Use SF Symbols with text labels in inspectors and menus. An icon-only toolbar action still requires a precise accessibility label and hint.
+- Keep primary and destructive roles semantic so native tint, disabled, pressed, focus, and accessibility states remain coherent.
+- Use system back navigation and swipe-to-go-back. Do not recreate them.
+- Destructive confirmation belongs in `confirmationDialog`; ordinary choices remain inline or in a `Menu`.
 
-### Cards / Containers
+### Recorder
 
-- **Corner Style:** Continuous 24px pause panels and 30px control shelves.
-- **Background:** Opaque Slate Ink tonal layers so content survives any preview frame.
-- **Shadow Strategy:** None.
-- **Border:** One-point Soft Paper hairline at low opacity.
-- **Internal Padding:** 16px to 24px according to content density.
+- The live preview is the dominant surface.
+- Record is the dominant idle action. Pause or Resume is primary once a Take exists; Flip and Stop remain clearly secondary and state-aware.
+- Status, camera position, and elapsed time stay readable without creating a dashboard of equal-weight pills.
+- Flip remains unavailable while a Segment is recording and becomes available only while idle or paused.
 
-### Inputs / Fields
+### Timeline Editor
 
-- **Style:** Native TextEditor on the secondary system background, with a real instructional empty state.
-- **Focus:** Keyboard focus begins when the pause-note sheet opens.
-- **Disabled:** Native semantics and reduced opacity; no custom focus invention.
+- Use a standard navigation bar, a large viewer, one global playhead, a horizontally zoomable filmstrip, one selected Timeline Clip, and a compact contextual inspector.
+- The filmstrip is a continuous primary storyline, not a grid of cards and not an ornamental waveform dashboard.
+- Selection uses system tint plus shape or stroke, never color alone. Non-selected Clips remain quiet.
+- The fixed playhead is visually distinct from Clip bounds. Seeking moves Project Time; trim handles change the selected Clip range.
+- Trim handles and short Clips preserve 44-point interactive hit regions even when their visible geometry is smaller.
+- Split, trim, reorder, remove, restore, mute, undo, and redo always have named controls. Gestures may accelerate them but are never the only route.
+- After Split, keep the playhead at the cut, select the right Clip, keep playback paused, and announce the result through accessibility.
+- Dragging a trim handle previews continuously but commits one edit on release. Reorder presents clear lift, destination, and cancellation feedback.
+- `Removed & Unused` is a discrete management destination, not a permanent media-library pane.
 
-### Navigation
+### Inspector and Editing Values
 
-The camera surface has no persistent navigation. Status and time occupy compact top pills; the bottom shelf changes controls according to recorder state.
+- Prefer a bottom safe-area inspector or native sheet presentation that leaves the selected Clip and viewer context visible.
+- Show the current operation, its value, and its recovery action. Do not expose internal IDs or source-time math.
+- Use explicit minus and plus controls for 0.1-second nudges. Each control exposes its resulting value to VoiceOver and remains usable with Dynamic Type.
+- Disabled actions explain why through visible state, nearby copy, or accessibility hints. Do not rely on unexplained dimming.
 
-### Record Shutter
+### Empty, Loading, and Error States
 
-A 72px Soft Paper ring contains a 58px Signal Red disc. It is the sole primary affordance before a Take starts and visibly dims until capture is ready.
+- An empty Storyline explains that recording a Take adds it automatically and that export requires at least one playable item.
+- Persisted edits succeed independently from thumbnail generation. Placeholder frames may appear while thumbnails load without blocking the editing result.
+- Export and persisted mutations show one unambiguous busy owner. Timeline structure cannot change during Project Export.
+- Recovery copy names what remains safe and presents the next valid action.
 
-## 6. Do's and Don'ts
+## 6. Accessibility and Adaptation
+
+- Support Dynamic Type through accessibility sizes without hiding the selected Clip, current time, or commit action.
+- Give the Timeline a logical VoiceOver order: viewer state, playhead time, selected Clip summary, editing actions, then Storyline items.
+- Each Clip exposes source date, selected duration, mute state, and position in the current Storyline.
+- Provide non-drag alternatives for trim and reorder. Do not make precision depend on a gesture.
+- Respect Reduce Motion. Preserve state with opacity, selection, and concise announcements when spatial animation is reduced.
+- Use native haptics sparingly for committed cuts, valid reorder placement, and destructive confirmation, never for decorative motion.
+- Verify compact iPhone widths, Dynamic Type accessibility sizes, portrait and landscape Project Formats, Light Mode, Dark Mode, and Increase Contrast.
+
+## 7. Motion
+
+- Keep ordinary feedback between 150 and 250 milliseconds with native or ease-out timing.
+- Animate transforms and opacity, not layout metrics.
+- Motion explains selection, insertion, removal, or restored position. It does not choreograph screen entry.
+- Thumbnail loading and analysis progress do not move committed Clip boundaries.
+
+## 8. Do's and Don'ts
 
 ### Do:
 
-- **Do** keep the preview primary and use Slate Ink scrims only where text or controls need dependable contrast.
-- **Do** show one filled Soft Paper action for the next valid workflow step.
-- **Do** pair every bottom-control icon with a visible label and a minimum 44-point target.
+- **Do** use native controls and semantic system colors before creating a custom component.
+- **Do** keep the preview primary during capture and the viewer plus selected Clip primary during editing.
+- **Do** show one visually dominant action for the next valid workflow step.
+- **Do** pair media-specific gestures with named controls and a minimum 44-point target.
 - **Do** state when completed segments are safe during interruptions and recovery.
-- **Do** use Signal Red only for recording and destructive actions, and Caution Yellow only for attention.
+- **Do** use System Red only for recording and destructive actions, and System Yellow only for attention.
 
 ### Don't:
 
 - **Don't** turn Camenya into a professional camera control deck packed with exposure, lens, waveform, and codec controls.
 - **Don't** imitate a social-video creator interface filled with filters, stickers, feeds, trends, and promotional prompts.
+- **Don't** imitate a desktop editor with arbitrary tracks, tiny unlabeled tools, or permanent inspectors.
 - **Don't** create a decorative glass dashboard whose effects compete with the live preview.
-- **Don't** add gradient text, decorative blur, side-stripe borders, or display fonts.
+- **Don't** add gradient text, decorative blur, side-stripe borders, nested cards, or display fonts.
 - **Don't** make Pause, Resume, Flip, and Stop compete with equal visual weight.
+- **Don't** hide essential editing actions behind gestures, context menus, or ambiguous icons alone.
