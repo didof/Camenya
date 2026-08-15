@@ -85,6 +85,13 @@ struct ProjectLibraryScreen: View {
                         storageBytes: model.storageBytes(for: project)
                     )
                 }
+                .accessibilityAction(named: "Rename") {
+                    draftName = project.name
+                    renamingProject = project
+                }
+                .accessibilityAction(named: "Delete") {
+                    deletingProject = project
+                }
                 .contextMenu {
                     Button {
                         draftName = project.name
@@ -126,6 +133,14 @@ private struct ProjectRow: View {
     let thumbnailURL: URL?
     let storageBytes: Int64
 
+    private var presentation: ProjectRowPresentation {
+        ProjectRowPresentation(
+            project: project,
+            storageBytes: storageBytes,
+            modifiedAtDescription: project.modifiedAt.formatted(date: .abbreviated, time: .shortened)
+        )
+    }
+
     var body: some View {
         HStack(spacing: 14) {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -139,6 +154,7 @@ private struct ProjectRow: View {
                     )
                     .font(.title2)
                 }
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 5) {
                 Text(project.name).font(.headline).lineLimit(1)
                 HStack(spacing: 8) {
@@ -155,7 +171,10 @@ private struct ProjectRow: View {
             }
         }
         .padding(.vertical, 4)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(presentation.accessibilityLabel)
+        .accessibilityValue(presentation.accessibilityValue)
+        .accessibilityHint(presentation.accessibilityHint)
     }
 
 }
