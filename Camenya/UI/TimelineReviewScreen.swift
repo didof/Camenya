@@ -477,6 +477,7 @@ struct TimelineReviewScreen: View {
     @State private var isCommittingEdit = false
     @State private var editErrorMessage: String?
     @State private var editRecoveryGeneration = 0
+    @State private var sessionHistory = TimelineSessionHistory()
     let title: String
     let format: ProjectFormat
 
@@ -545,7 +546,7 @@ struct TimelineReviewScreen: View {
                         RemovedUnusedScreen(
                             model: model,
                             onTimelineEdit: commit,
-                            onDeleteTake: model.deleteUnusedTakePermanently
+                            onDeleteTake: deleteTakePermanently
                         )
                     } label: {
                         Label("Removed & Unused", systemImage: "archivebox")
@@ -556,6 +557,25 @@ struct TimelineReviewScreen: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                         .disabled(isCommittingEdit || model.isEditingTimeline)
+                }
+                ToolbarItemGroup(placement: .bottomBar) {
+                    Button("Undo", systemImage: "arrow.uturn.backward") {
+                        applyHistory(.undo)
+                    }
+                    .disabled(!sessionHistory.canUndo || isCommittingEdit || model.isEditingTimeline)
+                    .accessibilityHint(sessionHistory.canUndo
+                        ? "Reverses the most recent edit from this editing session."
+                        : "No edit is available to undo in this editing session.")
+
+                    Spacer()
+
+                    Button("Redo", systemImage: "arrow.uturn.forward") {
+                        applyHistory(.redo)
+                    }
+                    .disabled(!sessionHistory.canRedo || isCommittingEdit || model.isEditingTimeline)
+                    .accessibilityHint(sessionHistory.canRedo
+                        ? "Reapplies the most recently undone edit."
+                        : "No edit is available to redo in this editing session.")
                 }
             }
         }
@@ -712,6 +732,7 @@ struct TimelineReviewScreen: View {
         let projectTime = playback.state.playhead
         let expectedRevision = playback.state.revision
         let originalSnapshot = playback.currentSnapshot
+        let beforeState = TimelineSessionState(project: model.project)
         playback.send(.pause)
         isCommittingEdit = true
         Task {
@@ -721,6 +742,7 @@ struct TimelineReviewScreen: View {
                     edit,
                     expectedRevision: expectedRevision
                 )
+                recordSessionEdit(edit, before: beforeState, outcome: outcome)
                 let animatesStructure: Bool
                 switch edit {
                 case .move, .remove, .restore, .addFullTakeToStoryline:
@@ -825,6 +847,115 @@ struct TimelineReviewScreen: View {
             selectedClipID: outcome.focus?.clipID ?? selectedClipID,
             projectTime: outcome.focus?.projectTime ?? projectTime
         )
+    }
+
+    private enum HistoryDirection {
+        case undo
+        case redo
+    }
+
+    private func applyHistory(_ direction: HistoryDirection) {
+        guard !isCommittingEdit else { return }
+        let target = direction == .undo
+            ? sessionHistory.undoTarget
+            : sessionHistory.redoTarget
+        guard let target else { return }
+        let originalSnapshot = playback.currentSnapshot
+        let selectedClipID = playback.state.selectedClipID
+        let projectTime = playback.state.playhead
+        let expectedRevision = playback.state.revision
+        playback.send(.pause)
+        isCommittingEdit = true
+        Task {
+            defer { isCommittingEdit = false }
+            do {
+                let outcome = try await model.restoreTimelineSessionState(
+                    target.state,
+                    expectedRevision: expectedRevision,
+                    focusClipID: target.focusClipID
+                )
+                if reduceMotion {
+                    replacePlaybackSnapshot(
+                        outcome,
+                        selectedClipID: selectedClipID,
+                        projectTime: projectTime
+                    )
+                } else {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        replacePlaybackSnapshot(
+                            outcome,
+                            selectedClipID: selectedClipID,
+                            projectTime: projectTime
+                        )
+                    }
+                }
+                switch direction {
+                case .undo: sessionHistory.didUndo()
+                case .redo: sessionHistory.didRedo()
+                }
+                UISelectionFeedbackGenerator().selectionChanged()
+                UIAccessibility.post(
+                    notification: .announcement,
+                    argument: direction == .undo ? "Undo complete." : "Redo complete."
+                )
+            } catch {
+                playback.replaceSnapshot(
+                    originalSnapshot,
+                    selectedClipID: selectedClipID,
+                    projectTime: projectTime
+                )
+                editRecoveryGeneration += 1
+                editErrorMessage = direction == .undo
+                    ? "Camenya couldn't undo that edit. The current Storyline is unchanged."
+                    : "Camenya couldn't redo that edit. The current Storyline is unchanged."
+            }
+        }
+    }
+
+    private func recordSessionEdit(
+        _ edit: TimelineEdit,
+        before: TimelineSessionState,
+        outcome: TimelineEditOutcome
+    ) {
+        if case .deleteRemovedClipPermanently = edit {
+            sessionHistory.removeAll()
+            return
+        }
+        let after = TimelineSessionState(project: outcome.project)
+        let targetClipID = clipID(for: edit)
+        let undoFocusClipID = targetClipID.flatMap { id in
+            before.clips.contains(where: { $0.id == id }) ? id : nil
+        }
+        let redoFocusClipID = outcome.focus?.clipID ?? targetClipID.flatMap { id in
+            after.clips.contains(where: { $0.id == id }) ? id : nil
+        }
+        sessionHistory.record(
+            before: before,
+            after: after,
+            undoFocusClipID: undoFocusClipID,
+            redoFocusClipID: redoFocusClipID
+        )
+    }
+
+    private func clipID(for edit: TimelineEdit) -> TimelineClip.ID? {
+        switch edit {
+        case let .trim(clipID, _),
+             let .resetTrim(clipID),
+             let .split(clipID, _),
+             let .move(clipID, _),
+             let .remove(clipID),
+             let .restore(clipID),
+             let .deleteRemovedClipPermanently(clipID),
+             let .nudgeTrim(clipID, _, _):
+            clipID
+        case .addFullTakeToStoryline:
+            nil
+        }
+    }
+
+    private func deleteTakePermanently(_ takeID: UUID) async throws {
+        try await model.deleteUnusedTakePermanently(takeID)
+        sessionHistory.removeAll()
     }
 }
 

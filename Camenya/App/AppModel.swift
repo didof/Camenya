@@ -410,6 +410,33 @@ final class AppModel: ObservableObject {
         onProjectChanged(updated)
     }
 
+    func restoreTimelineSessionState(
+        _ state: TimelineSessionState,
+        expectedRevision: StorylineRevision,
+        focusClipID: TimelineClip.ID?
+    ) async throws -> TimelineEditOutcome {
+        guard phase == .idle, !isExportingProject else {
+            throw TimelineEditorError.editingUnavailable
+        }
+        guard timelineEditActivity.begin() else {
+            throw TimelineEditorError.editingUnavailable
+        }
+        isEditingTimeline = true
+        defer {
+            timelineEditActivity.finish()
+            isEditingTimeline = false
+        }
+        let outcome = try await timelineEditor.restoreSessionState(
+            state,
+            expectedRevision: expectedRevision,
+            focusClipID: focusClipID
+        )
+        project = outcome.project
+        exportSnapshot = outcome.snapshot
+        onProjectChanged(outcome.project)
+        return outcome
+    }
+
     var trimReviewTakes: [ProjectTake] {
         trimReviewTakeIDs.compactMap { id in project.takes.first(where: { $0.id == id }) }
     }

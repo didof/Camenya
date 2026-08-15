@@ -174,6 +174,84 @@ struct TimelineEditFocus: Equatable, Sendable {
     let projectTime: ProjectTime
 }
 
+struct TimelineSessionState: Equatable, Sendable {
+    let clips: [TimelineClip]
+    let removedClips: [RemovedTimelineClip]
+
+    init(clips: [TimelineClip], removedClips: [RemovedTimelineClip]) {
+        self.clips = clips
+        self.removedClips = removedClips
+    }
+
+    init(project: ProjectManifest) {
+        clips = project.primaryStoryline.clips
+        removedClips = project.removedClips
+    }
+}
+
+struct TimelineSessionHistoryTarget: Equatable, Sendable {
+    let state: TimelineSessionState
+    let focusClipID: TimelineClip.ID?
+}
+
+struct TimelineSessionHistory: Equatable, Sendable {
+    private struct Entry: Equatable, Sendable {
+        let before: TimelineSessionState
+        let after: TimelineSessionState
+        let undoFocusClipID: TimelineClip.ID?
+        let redoFocusClipID: TimelineClip.ID?
+    }
+
+    private var undoEntries: [Entry] = []
+    private var redoEntries: [Entry] = []
+
+    var canUndo: Bool { !undoEntries.isEmpty }
+    var canRedo: Bool { !redoEntries.isEmpty }
+
+    var undoTarget: TimelineSessionHistoryTarget? {
+        undoEntries.last.map {
+            TimelineSessionHistoryTarget(state: $0.before, focusClipID: $0.undoFocusClipID)
+        }
+    }
+
+    var redoTarget: TimelineSessionHistoryTarget? {
+        redoEntries.last.map {
+            TimelineSessionHistoryTarget(state: $0.after, focusClipID: $0.redoFocusClipID)
+        }
+    }
+
+    mutating func record(
+        before: TimelineSessionState,
+        after: TimelineSessionState,
+        undoFocusClipID: TimelineClip.ID?,
+        redoFocusClipID: TimelineClip.ID?
+    ) {
+        guard before != after else { return }
+        undoEntries.append(Entry(
+            before: before,
+            after: after,
+            undoFocusClipID: undoFocusClipID,
+            redoFocusClipID: redoFocusClipID
+        ))
+        redoEntries.removeAll()
+    }
+
+    mutating func didUndo() {
+        guard let entry = undoEntries.popLast() else { return }
+        redoEntries.append(entry)
+    }
+
+    mutating func didRedo() {
+        guard let entry = redoEntries.popLast() else { return }
+        undoEntries.append(entry)
+    }
+
+    mutating func removeAll() {
+        undoEntries.removeAll()
+        redoEntries.removeAll()
+    }
+}
+
 enum TimelineEditorError: Error, Equatable {
     case projectNotFound(UUID)
     case mediaNotFound(URL)
@@ -461,6 +539,47 @@ actor TimelineEditor {
         )
     }
 
+    func restoreSessionState(
+        _ state: TimelineSessionState,
+        expectedRevision: StorylineRevision,
+        focusClipID: TimelineClip.ID?,
+        modifiedAt: Date = Date()
+    ) throws -> TimelineEditOutcome {
+        var project = try projectStore.load(id: projectID)
+        guard project.primaryStoryline.revision == expectedRevision else {
+            throw TimelineEditorError.staleRevision(
+                expected: expectedRevision,
+                actual: project.primaryStoryline.revision
+            )
+        }
+        guard Self.sessionStateIsValid(state, in: project) else {
+            throw TimelineEditorError.corruptPrimaryStoryline
+        }
+
+        project.primaryStoryline.clips = state.clips
+        project.removedClips = state.removedClips
+        project.primaryStoryline.revision = try project.primaryStoryline.revision.incremented()
+        project.modifiedAt = modifiedAt
+        do {
+            try projectStore.persist(project, expectedRevision: expectedRevision)
+        } catch let ProjectStoreError.staleRevision(expected, actual) {
+            throw TimelineEditorError.staleRevision(expected: expected, actual: actual)
+        }
+
+        let committed = try projectStore.load(id: projectID)
+        let committedSnapshot = try makeSnapshot(project: committed)
+        let focus = focusClipID.flatMap { clipID in
+            committedSnapshot.clips.first(where: { $0.id == clipID }).map {
+                TimelineEditFocus(clipID: clipID, projectTime: $0.projectTimeRange.start)
+            }
+        }
+        return TimelineEditOutcome(
+            project: committed,
+            snapshot: committedSnapshot,
+            focus: focus
+        )
+    }
+
     private nonisolated static func resolveSnapshot(
         project: ProjectManifest,
         projectStore: ProjectStore
@@ -578,6 +697,23 @@ actor TimelineEditor {
         for clip: TimelineClip
     ) -> Bool {
         TimelineTrimRules.isValid(selection, inside: clip.availableRange)
+    }
+
+    private nonisolated static func sessionStateIsValid(
+        _ state: TimelineSessionState,
+        in project: ProjectManifest
+    ) -> Bool {
+        let allClips = state.clips + state.removedClips.map(\.clip)
+        guard Set(allClips.map(\.id)).count == allClips.count,
+              state.removedClips.allSatisfy({ $0.placement.originalIndex >= 0 }) else {
+            return false
+        }
+        let takesByID = Dictionary(uniqueKeysWithValues: project.takes.map { ($0.id, $0) })
+        return allClips.allSatisfy { clip in
+            guard let take = takesByID[clip.takeID] else { return false }
+            return clip.availableRange.isValid(inside: take.duration, minimumDuration: 0.001)
+                && selectionIsValid(clip.selection, for: clip)
+        }
     }
 }
 

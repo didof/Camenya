@@ -13,6 +13,221 @@ final class TimelineEditorTests: XCTestCase {
         XCTAssertTrue(activity.begin())
     }
 
+    func testSessionHistoryKeepsCommandBoundariesAndNewEditClearsRedo() {
+        let first = TimelineClip(
+            takeID: UUID(),
+            availableRange: TakeRange(startSeconds: 0, endSeconds: 3),
+            selection: TakeRange(startSeconds: 0, endSeconds: 3)
+        )
+        let second = TimelineClip(
+            takeID: UUID(),
+            availableRange: TakeRange(startSeconds: 0, endSeconds: 3),
+            selection: TakeRange(startSeconds: 0, endSeconds: 3)
+        )
+        let third = TimelineClip(
+            takeID: UUID(),
+            availableRange: TakeRange(startSeconds: 0, endSeconds: 3),
+            selection: TakeRange(startSeconds: 0, endSeconds: 3)
+        )
+        let initial = TimelineSessionState(clips: [first], removedClips: [])
+        let afterFirstCommand = TimelineSessionState(clips: [first, second], removedClips: [])
+        let afterSecondCommand = TimelineSessionState(clips: [second, first], removedClips: [])
+        let replacement = TimelineSessionState(clips: [first, third], removedClips: [])
+        var history = TimelineSessionHistory()
+
+        history.record(
+            before: initial,
+            after: afterFirstCommand,
+            undoFocusClipID: first.id,
+            redoFocusClipID: second.id
+        )
+        history.record(
+            before: afterFirstCommand,
+            after: afterSecondCommand,
+            undoFocusClipID: second.id,
+            redoFocusClipID: second.id
+        )
+
+        XCTAssertEqual(history.undoTarget?.state, afterFirstCommand)
+        XCTAssertTrue(history.canUndo)
+        XCTAssertFalse(history.canRedo)
+
+        history.didUndo()
+
+        XCTAssertEqual(history.redoTarget?.state, afterSecondCommand)
+        XCTAssertEqual(history.undoTarget?.state, initial)
+        XCTAssertTrue(history.canRedo)
+
+        history.didRedo()
+
+        XCTAssertFalse(history.canRedo)
+        XCTAssertEqual(history.undoTarget?.state, afterFirstCommand)
+
+        history.didUndo()
+
+        history.record(
+            before: afterFirstCommand,
+            after: replacement,
+            undoFocusClipID: first.id,
+            redoFocusClipID: third.id
+        )
+
+        XCTAssertFalse(history.canRedo)
+        XCTAssertEqual(history.undoTarget?.state, afterFirstCommand)
+
+        history.removeAll()
+
+        XCTAssertFalse(history.canUndo)
+        XCTAssertFalse(history.canRedo)
+    }
+
+    func testFreshSessionHistoryDoesNotPersistPriorSessionCommands() {
+        let clip = TimelineClip(
+            takeID: UUID(),
+            availableRange: TakeRange(startSeconds: 0, endSeconds: 2),
+            selection: TakeRange(startSeconds: 0, endSeconds: 2)
+        )
+        var priorSession = TimelineSessionHistory()
+        priorSession.record(
+            before: TimelineSessionState(clips: [clip], removedClips: []),
+            after: TimelineSessionState(clips: [], removedClips: []),
+            undoFocusClipID: clip.id,
+            redoFocusClipID: nil
+        )
+
+        let reopenedSession = TimelineSessionHistory()
+
+        XCTAssertTrue(priorSession.canUndo)
+        XCTAssertFalse(reopenedSession.canUndo)
+        XCTAssertFalse(reopenedSession.canRedo)
+    }
+
+    func testSessionRestoreUndoesAndRedoesSplitWithExactClipIdentityAndNewRevisions() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let editor = TimelineEditor(projectID: project.id, projectStore: store)
+        let completed = try await editor.completeFinalizedTake(
+            FinalizedTake(
+                id: UUID(),
+                movieURL: try makeMovie(in: root),
+                orientation: .portrait,
+                duration: 8,
+                createdAt: Date(timeIntervalSince1970: 1)
+            ),
+            expectedRevision: .zero
+        )
+        let before = TimelineSessionState(project: completed.project)
+        let split = try await editor.perform(
+            .split(clipID: completed.clip.id, at: ProjectTime(seconds: 3)),
+            expectedRevision: completed.snapshot.revision
+        )
+        let after = TimelineSessionState(project: split.project)
+
+        let undone = try await editor.restoreSessionState(
+            before,
+            expectedRevision: split.snapshot.revision,
+            focusClipID: completed.clip.id
+        )
+
+        XCTAssertEqual(undone.snapshot.revision, StorylineRevision(rawValue: 3))
+        XCTAssertEqual(undone.project.primaryStoryline.clips, [completed.clip])
+        XCTAssertEqual(undone.focus, TimelineEditFocus(clipID: completed.clip.id, projectTime: .zero))
+
+        let redone = try await editor.restoreSessionState(
+            after,
+            expectedRevision: undone.snapshot.revision,
+            focusClipID: split.focus?.clipID
+        )
+
+        XCTAssertEqual(redone.snapshot.revision, StorylineRevision(rawValue: 4))
+        XCTAssertEqual(redone.project.primaryStoryline.clips, split.project.primaryStoryline.clips)
+        XCTAssertEqual(redone.focus?.clipID, split.focus?.clipID)
+        XCTAssertEqual(try store.load(id: project.id), redone.project)
+    }
+
+    func testSessionRestoreIncludesRemovedClipCollectionWithoutPersistingHistory() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let editor = TimelineEditor(projectID: project.id, projectStore: store)
+        let completed = try await editor.completeFinalizedTake(
+            FinalizedTake(
+                id: UUID(),
+                movieURL: try makeMovie(in: root),
+                orientation: .portrait,
+                duration: 5,
+                createdAt: Date(timeIntervalSince1970: 1)
+            ),
+            expectedRevision: .zero
+        )
+        let active = TimelineSessionState(project: completed.project)
+        let removed = try await editor.perform(
+            .remove(clipID: completed.clip.id),
+            expectedRevision: completed.snapshot.revision
+        )
+        let removedState = TimelineSessionState(project: removed.project)
+
+        let undone = try await editor.restoreSessionState(
+            active,
+            expectedRevision: removed.snapshot.revision,
+            focusClipID: completed.clip.id
+        )
+        let redone = try await editor.restoreSessionState(
+            removedState,
+            expectedRevision: undone.snapshot.revision,
+            focusClipID: nil
+        )
+
+        XCTAssertEqual(undone.project.primaryStoryline.clips, [completed.clip])
+        XCTAssertTrue(undone.project.removedClips.isEmpty)
+        XCTAssertTrue(redone.project.primaryStoryline.clips.isEmpty)
+        XCTAssertEqual(redone.project.removedClips, removed.project.removedClips)
+        XCTAssertEqual(redone.snapshot.duration, .zero)
+    }
+
+    func testSessionRestoreRejectsDuplicateClipIdentityWithoutAdvancingRevision() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let editor = TimelineEditor(projectID: project.id, projectStore: store)
+        let completed = try await editor.completeFinalizedTake(
+            FinalizedTake(
+                id: UUID(),
+                movieURL: try makeMovie(in: root),
+                orientation: .portrait,
+                duration: 5,
+                createdAt: Date(timeIntervalSince1970: 1)
+            ),
+            expectedRevision: .zero
+        )
+        let invalid = TimelineSessionState(
+            clips: [completed.clip, completed.clip],
+            removedClips: []
+        )
+
+        do {
+            _ = try await editor.restoreSessionState(
+                invalid,
+                expectedRevision: completed.snapshot.revision,
+                focusClipID: completed.clip.id
+            )
+            XCTFail("Expected duplicate Clip identity to be rejected")
+        } catch {
+            XCTAssertEqual(error as? TimelineEditorError, .corruptPrimaryStoryline)
+        }
+
+        let persisted = try store.load(id: project.id)
+        XCTAssertEqual(persisted.primaryStoryline.revision, completed.snapshot.revision)
+        XCTAssertEqual(persisted.primaryStoryline.clips, [completed.clip])
+    }
+
     func testTrimRulesRejectNudgesThatWouldCrossMinimumDuration() {
         let available = TakeRange(startSeconds: 0, endSeconds: 10)
         let selection = TakeRange(startSeconds: 2, endSeconds: 3.05)
