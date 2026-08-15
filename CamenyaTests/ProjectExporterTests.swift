@@ -76,8 +76,7 @@ final class ProjectExporterTests: XCTestCase {
             availableRange: range,
             selection: range,
             isMuted: true,
-            projectTimeRange: ProjectTimeRange(start: .zero, end: ProjectTime(seconds: 2)),
-            approvedCaptions: nil
+            projectTimeRange: ProjectTimeRange(start: .zero, end: ProjectTime(seconds: 2))
         )
         let audible = ExportSnapshot.Clip(
             id: TimelineClip.ID(),
@@ -90,8 +89,7 @@ final class ProjectExporterTests: XCTestCase {
             projectTimeRange: ProjectTimeRange(
                 start: ProjectTime(seconds: 2),
                 end: ProjectTime(seconds: 4)
-            ),
-            approvedCaptions: nil
+            )
         )
         let snapshot = ExportSnapshot(
             projectID: UUID(),
@@ -679,8 +677,7 @@ final class ProjectExporterTests: XCTestCase {
                 projectTimeRange: ProjectTimeRange(
                     start: ProjectTime(seconds: start),
                     end: ProjectTime(seconds: cursor)
-                ),
-                approvedCaptions: nil
+                )
             )
         }
         return ExportSnapshot(

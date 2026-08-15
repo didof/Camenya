@@ -8,7 +8,6 @@ struct ProjectExportSource: Equatable, Sendable {
     let url: URL
     let selection: TakeRange?
     let duration: TimeInterval
-    let captions: TakeCaptionTrack?
     let isMuted: Bool
 
     init(
@@ -16,14 +15,12 @@ struct ProjectExportSource: Equatable, Sendable {
         url: URL,
         selection: TakeRange?,
         duration: TimeInterval,
-        captions: TakeCaptionTrack?,
         isMuted: Bool = false
     ) {
         self.takeID = takeID
         self.url = url
         self.selection = selection
         self.duration = duration
-        self.captions = captions
         self.isMuted = isMuted
     }
 }
@@ -32,6 +29,7 @@ struct ProjectExportPlan: Equatable, Sendable {
     let sources: [ProjectExportSource]
     let format: ProjectFormat
     let captionConfiguration: ProjectCaptionConfiguration?
+    let captionTimeline: ProjectCaptionExportTimeline?
     let revision: StorylineRevision
 
     var urls: [URL] { sources.map(\.url) }
@@ -40,11 +38,13 @@ struct ProjectExportPlan: Equatable, Sendable {
         sources: [ProjectExportSource],
         format: ProjectFormat,
         captionConfiguration: ProjectCaptionConfiguration?,
+        captionTimeline: ProjectCaptionExportTimeline? = nil,
         revision: StorylineRevision = .zero
     ) {
         self.sources = sources
         self.format = format
         self.captionConfiguration = captionConfiguration
+        self.captionTimeline = captionTimeline
         self.revision = revision
     }
 
@@ -57,12 +57,12 @@ struct ProjectExportPlan: Equatable, Sendable {
                 url: clip.mediaURL,
                 selection: clip.selection,
                 duration: clip.selection.duration,
-                captions: clip.approvedCaptions,
                 isMuted: clip.isMuted
             )
         }
         self.format = format
         captionConfiguration = snapshot.captionConfiguration
+        captionTimeline = snapshot.captionTimeline
         revision = snapshot.revision
     }
 
@@ -176,7 +176,7 @@ final class ProjectExporter {
             track: compositionVideo,
             descriptions: descriptions,
             format: plan.format,
-            captions: ProjectCaptionExportTimeline.make(plan: plan)
+            captions: plan.captionTimeline
         )
         let outputDirectory = outputURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)

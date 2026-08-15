@@ -594,7 +594,12 @@ final class TimelineEditorTests: XCTestCase {
                 text: "one continuous thought",
                 confidence: 0.9,
                 alternatives: [],
-                timedSpans: []
+                timedSpans: [CaptionTimedSpan(
+                    range: TakeRange(startSeconds: 3.5, endSeconds: 4.5),
+                    text: "continuous",
+                    granularity: .word,
+                    confidence: 0.9
+                )]
             )]
         )
         var seeded = try store.load(id: project.id)
@@ -610,14 +615,84 @@ final class TimelineEditorTests: XCTestCase {
             expectedRevision: completed.snapshot.revision
         )
 
-        XCTAssertEqual(outcome.snapshot.clips.map(\.approvedCaptions), [captions, captions])
-        let captionTimeline = ProjectCaptionExportTimeline.make(
-            plan: try ProjectExportPlan(snapshot: outcome.snapshot)
-        )
+        let captionTimeline = outcome.snapshot.captionTimeline
         XCTAssertEqual(captionTimeline?.cues.map(\.range), [
-            TakeRange(startSeconds: 3, endSeconds: 4),
-            TakeRange(startSeconds: 4, endSeconds: 7)
+            TakeRange(startSeconds: 3, endSeconds: 7)
         ])
+        XCTAssertEqual(captionTimeline?.cues.first?.timedSpans.map(\.range), [
+            TakeRange(startSeconds: 3.5, endSeconds: 4.5)
+        ])
+        XCTAssertTrue(outcome.project.captionTimelineIssues.isEmpty)
+        XCTAssertEqual(
+            try ProjectExportPlan(snapshot: outcome.snapshot).captionTimeline,
+            outcome.snapshot.captionTimeline
+        )
+    }
+
+    func testSeparatingSplitFragmentsCreatesDiscontinuousCaptionIssue() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let editor = TimelineEditor(projectID: project.id, projectStore: store)
+        let first = try await editor.completeFinalizedTake(
+            FinalizedTake(
+                id: UUID(),
+                movieURL: try makeMovie(in: root),
+                orientation: .portrait,
+                duration: 10,
+                createdAt: Date(timeIntervalSince1970: 1)
+            ),
+            expectedRevision: .zero
+        )
+        var seeded = try store.load(id: project.id)
+        seeded.captionConfiguration = ProjectCaptionConfiguration(
+            localeIdentifier: "en-US",
+            placement: .lower
+        )
+        seeded.takes[0].captions = TakeCaptionTrack(
+            localeIdentifier: "en-US",
+            sourceRange: TakeRange(startSeconds: 0, endSeconds: 10),
+            recognizer: .speechRecognizerIOS18,
+            reviewState: .approved,
+            cues: [CaptionCue(
+                range: TakeRange(startSeconds: 3, endSeconds: 7),
+                recognizedText: "keep this continuous",
+                text: "keep this continuous",
+                confidence: 0.9,
+                alternatives: [],
+                timedSpans: []
+            )]
+        )
+        try store.persist(seeded, expectedRevision: first.snapshot.revision)
+        let second = try await editor.completeFinalizedTake(
+            FinalizedTake(
+                id: UUID(),
+                movieURL: try makeMovie(in: root),
+                orientation: .portrait,
+                duration: 3,
+                createdAt: Date(timeIntervalSince1970: 2)
+            ),
+            expectedRevision: first.snapshot.revision
+        )
+        let split = try await editor.perform(
+            .split(clipID: first.clip.id, at: ProjectTime(seconds: 4)),
+            expectedRevision: second.snapshot.revision
+        )
+        let rightFragmentID = split.snapshot.clips[1].id
+
+        let separated = try await editor.perform(
+            .move(clipID: rightFragmentID, toIndex: 2),
+            expectedRevision: split.snapshot.revision
+        )
+
+        XCTAssertEqual(separated.project.captionTimelineIssues.count, 1)
+        XCTAssertEqual(separated.project.captionTimelineIssues.first?.reason, .discontinuousProjection)
+        XCTAssertEqual(separated.project.captionTimelineIssues.first?.reviewState, .needsReview)
+        XCTAssertFalse(separated.snapshot.captionTimeline?.cues.contains(where: {
+            $0.text == "keep this continuous"
+        }) ?? true)
     }
 
     func testMoveClipAtomicallyReordersStorylineAndRecalculatesProjectTime() async throws {
@@ -985,14 +1060,29 @@ final class TimelineEditorTests: XCTestCase {
             sourceRange: TakeRange(startSeconds: 0, endSeconds: 10),
             recognizer: .speechRecognizerIOS18,
             reviewState: .approved,
-            cues: [CaptionCue(
-                range: TakeRange(startSeconds: 3, endSeconds: 7),
-                recognizedText: "unsafe after trim",
-                text: "unsafe after trim",
-                confidence: 0.9,
-                alternatives: [],
-                timedSpans: []
-            )]
+            cues: [
+                CaptionCue(
+                    range: TakeRange(startSeconds: 3, endSeconds: 7),
+                    recognizedText: "unsafe after trim",
+                    text: "unsafe after trim",
+                    confidence: 0.9,
+                    alternatives: [],
+                    timedSpans: [CaptionTimedSpan(
+                        range: TakeRange(startSeconds: 4, endSeconds: 5.5),
+                        text: "unsafe",
+                        granularity: .word,
+                        confidence: 0.9
+                    )]
+                ),
+                CaptionCue(
+                    range: TakeRange(startSeconds: 8, endSeconds: 9),
+                    recognizedText: "still safe",
+                    text: "still safe",
+                    confidence: 0.9,
+                    alternatives: [],
+                    timedSpans: []
+                )
+            ]
         )
         try store.persist(seeded, expectedRevision: completed.snapshot.revision)
 
@@ -1004,11 +1094,73 @@ final class TimelineEditorTests: XCTestCase {
             expectedRevision: completed.snapshot.revision
         )
 
-        XCTAssertNil(outcome.snapshot.clips[0].approvedCaptions)
-        XCTAssertEqual(
-            ProjectCaptionExportTimeline.make(plan: try ProjectExportPlan(snapshot: outcome.snapshot))?.cues,
-            []
+        let issue = try XCTUnwrap(outcome.project.captionTimelineIssues.first)
+        XCTAssertEqual(issue.reason, .boundaryCut)
+        XCTAssertEqual(issue.reviewState, .needsReview)
+        XCTAssertEqual(outcome.snapshot.captionTimeline?.cues.map(\.text), ["still safe"])
+        XCTAssertEqual(outcome.snapshot.captionTimeline?.cues.map(\.range), [
+            TakeRange(startSeconds: 3, endSeconds: 4)
+        ])
+
+        let approved = try await editor.perform(
+            .approveCaptionTimelineIssue(issueID: issue.id),
+            expectedRevision: outcome.snapshot.revision
         )
+
+        XCTAssertEqual(approved.project.captionTimelineIssues.first?.reviewState, .approved)
+        XCTAssertEqual(approved.snapshot.captionTimeline?.cues.map(\.text), [
+            "unsafe after trim", "still safe"
+        ])
+        XCTAssertEqual(approved.snapshot.captionTimeline?.cues.first?.range, TakeRange(startSeconds: 0, endSeconds: 2))
+        XCTAssertEqual(approved.snapshot.captionTimeline?.cues.first?.timedSpans, [])
+
+        let undoneApproval = try await editor.restoreSessionState(
+            TimelineSessionState(project: outcome.project),
+            expectedRevision: approved.snapshot.revision,
+            focusClipID: completed.clip.id
+        )
+        XCTAssertEqual(undoneApproval.project.captionTimelineIssues.first?.reviewState, .needsReview)
+        XCTAssertEqual(undoneApproval.snapshot.captionTimeline?.cues.map(\.text), ["still safe"])
+
+        let redoneApproval = try await editor.restoreSessionState(
+            TimelineSessionState(project: approved.project),
+            expectedRevision: undoneApproval.snapshot.revision,
+            focusClipID: completed.clip.id
+        )
+        XCTAssertEqual(redoneApproval.project.captionTimelineIssues.first?.reviewState, .approved)
+        XCTAssertEqual(redoneApproval.snapshot.captionTimeline?.cues.map(\.text), [
+            "unsafe after trim", "still safe"
+        ])
+
+        let changedGeometry = try await editor.perform(
+            .trim(
+                clipID: completed.clip.id,
+                selection: TakeRange(startSeconds: 6, endSeconds: 10)
+            ),
+            expectedRevision: redoneApproval.snapshot.revision
+        )
+
+        XCTAssertEqual(changedGeometry.project.captionTimelineIssues.first?.id, issue.id)
+        XCTAssertEqual(changedGeometry.project.captionTimelineIssues.first?.reviewState, .needsReview)
+        XCTAssertEqual(changedGeometry.snapshot.captionTimeline?.cues.map(\.text), ["still safe"])
+
+        let safelyRestored = try await editor.perform(
+            .resetTrim(clipID: completed.clip.id),
+            expectedRevision: changedGeometry.snapshot.revision
+        )
+        XCTAssertEqual(safelyRestored.project.captionTimelineIssues.first?.id, issue.id)
+        XCTAssertEqual(safelyRestored.project.captionTimelineIssues.first?.reviewState, .needsReview)
+        XCTAssertEqual(safelyRestored.project.captionTimelineIssues.first?.fragments, [])
+        XCTAssertEqual(safelyRestored.snapshot.captionTimeline?.cues.map(\.text), ["still safe"])
+
+        let approvedReturn = try await editor.perform(
+            .approveCaptionTimelineIssue(issueID: issue.id),
+            expectedRevision: safelyRestored.snapshot.revision
+        )
+        XCTAssertTrue(approvedReturn.project.captionTimelineIssues.isEmpty)
+        XCTAssertEqual(approvedReturn.snapshot.captionTimeline?.cues.map(\.text), [
+            "unsafe after trim", "still safe"
+        ])
     }
 
     func testCompletingFinalizedTakeCreatesDistinctFullRangeClip() async throws {

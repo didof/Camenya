@@ -115,6 +115,73 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertTrue(migrated.removedClips.isEmpty)
     }
 
+    func testSchemaFiveProjectMigratesCaptionTimelineIssueBaseline() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let projectID = UUID()
+        let cue = CaptionCue(
+            range: TakeRange(startSeconds: 3, endSeconds: 7),
+            recognizedText: "legacy unsafe caption",
+            text: "legacy unsafe caption",
+            confidence: 0.9,
+            alternatives: [],
+            timedSpans: []
+        )
+        let take = ProjectTake(
+            id: UUID(),
+            createdAt: Date(timeIntervalSince1970: 0),
+            duration: 10,
+            captions: TakeCaptionTrack(
+                localeIdentifier: "en-US",
+                sourceRange: TakeRange(startSeconds: 0, endSeconds: 10),
+                recognizer: .speechRecognizerIOS18,
+                reviewState: .approved,
+                cues: [cue]
+            )
+        )
+        let clip = TimelineClip(
+            takeID: take.id,
+            availableRange: TakeRange(startSeconds: 0, endSeconds: 10),
+            selection: TakeRange(startSeconds: 5, endSeconds: 10)
+        )
+        let legacy = ProjectManifest(
+            schemaVersion: 5,
+            id: projectID,
+            createdAt: Date(timeIntervalSince1970: 0),
+            modifiedAt: Date(timeIntervalSince1970: 1),
+            name: "Schema Five",
+            format: .portrait,
+            takes: [take],
+            primaryStoryline: PrimaryStoryline(clips: [clip]),
+            captionConfiguration: ProjectCaptionConfiguration(
+                localeIdentifier: "en-US",
+                placement: .lower
+            )
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoder.encode(legacy)) as? [String: Any]
+        )
+        object.removeValue(forKey: "captionTimelineIssues")
+        let directory = store.projectDirectory(id: projectID)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: object).write(
+            to: directory.appendingPathComponent("project.json")
+        )
+
+        let migrated = try store.load(id: projectID)
+
+        XCTAssertEqual(migrated.schemaVersion, ProjectManifest.currentSchemaVersion)
+        XCTAssertEqual(migrated.captionTimelineIssues.count, 1)
+        XCTAssertEqual(migrated.captionTimelineIssues.first?.takeID, take.id)
+        XCTAssertEqual(migrated.captionTimelineIssues.first?.cueID, cue.id)
+        XCTAssertEqual(migrated.captionTimelineIssues.first?.reason, .boundaryCut)
+        XCTAssertEqual(migrated.captionTimelineIssues.first?.reviewState, .needsReview)
+    }
+
     func testUnreviewedTrimSuggestionPersistsWithoutChangingEffectiveDuration() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }

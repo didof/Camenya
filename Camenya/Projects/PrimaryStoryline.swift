@@ -132,7 +132,6 @@ struct ExportSnapshot: Equatable, Sendable {
         let trimSuggestion: TakeRange?
         let isMuted: Bool
         let projectTimeRange: ProjectTimeRange
-        let approvedCaptions: TakeCaptionTrack?
 
         init(
             id: TimelineClip.ID,
@@ -145,8 +144,7 @@ struct ExportSnapshot: Equatable, Sendable {
             selection: TakeRange,
             trimSuggestion: TakeRange? = nil,
             isMuted: Bool = false,
-            projectTimeRange: ProjectTimeRange,
-            approvedCaptions: TakeCaptionTrack?
+            projectTimeRange: ProjectTimeRange
         ) {
             self.id = id
             self.takeID = takeID
@@ -159,7 +157,6 @@ struct ExportSnapshot: Equatable, Sendable {
             self.trimSuggestion = trimSuggestion
             self.isMuted = isMuted
             self.projectTimeRange = projectTimeRange
-            self.approvedCaptions = approvedCaptions
         }
     }
 
@@ -167,8 +164,27 @@ struct ExportSnapshot: Equatable, Sendable {
     let revision: StorylineRevision
     let format: ProjectFormat?
     let captionConfiguration: ProjectCaptionConfiguration?
+    let captionTimeline: ProjectCaptionExportTimeline?
     let clips: [Clip]
     let duration: ProjectTime
+
+    init(
+        projectID: UUID,
+        revision: StorylineRevision,
+        format: ProjectFormat?,
+        captionConfiguration: ProjectCaptionConfiguration?,
+        captionTimeline: ProjectCaptionExportTimeline? = nil,
+        clips: [Clip],
+        duration: ProjectTime
+    ) {
+        self.projectID = projectID
+        self.revision = revision
+        self.format = format
+        self.captionConfiguration = captionConfiguration
+        self.captionTimeline = captionTimeline
+        self.clips = clips
+        self.duration = duration
+    }
 
     func position(at projectTime: ProjectTime) -> StorylinePosition? {
         let seconds = projectTime.seconds

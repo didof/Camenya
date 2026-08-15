@@ -287,8 +287,7 @@ final class PlaybackControllerTests: XCTestCase {
             availableRange: range,
             selection: range,
             isMuted: true,
-            projectTimeRange: ProjectTimeRange(start: .zero, end: ProjectTime(seconds: 3)),
-            approvedCaptions: nil
+            projectTimeRange: ProjectTimeRange(start: .zero, end: ProjectTime(seconds: 3))
         )
         let snapshot = ExportSnapshot(
             projectID: UUID(),
@@ -622,8 +621,7 @@ final class PlaybackControllerTests: XCTestCase {
                 projectTimeRange: ProjectTimeRange(
                     start: ProjectTime(seconds: projectStart),
                     end: ProjectTime(seconds: projectStart + duration)
-                ),
-                approvedCaptions: nil
+                )
             )
         }
         return ExportSnapshot(
@@ -649,8 +647,7 @@ final class PlaybackControllerTests: XCTestCase {
                 projectTimeRange: ProjectTimeRange(
                     start: ProjectTime(seconds: Double(index)),
                     end: ProjectTime(seconds: Double(index + 1))
-                ),
-                approvedCaptions: nil
+                )
             )
         }
         return ExportSnapshot(
@@ -707,8 +704,7 @@ final class PlaybackControllerTests: XCTestCase {
             projectTimeRange: ProjectTimeRange(
                 start: .zero,
                 end: ProjectTime(seconds: selectedRange.duration)
-            ),
-            approvedCaptions: nil
+            )
         )
         return ExportSnapshot(
             projectID: UUID(),

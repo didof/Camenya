@@ -166,7 +166,7 @@ struct ProjectTake: Codable, Equatable, Hashable, Identifiable, Sendable {
 }
 
 struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
-    static let currentSchemaVersion = 5
+    static let currentSchemaVersion = 6
 
     var schemaVersion: Int
     var manifestRevision: UInt64
@@ -181,6 +181,7 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
     var removedClips: [RemovedTimelineClip]
     var recoveryState: ProjectRecoveryState?
     var captionConfiguration: ProjectCaptionConfiguration?
+    var captionTimelineIssues: [CaptionTimelineIssue]
 
     init(
         schemaVersion: Int = ProjectManifest.currentSchemaVersion,
@@ -195,7 +196,8 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
         primaryStoryline: PrimaryStoryline? = nil,
         removedClips: [RemovedTimelineClip] = [],
         recoveryState: ProjectRecoveryState? = .clean,
-        captionConfiguration: ProjectCaptionConfiguration? = nil
+        captionConfiguration: ProjectCaptionConfiguration? = nil,
+        captionTimelineIssues: [CaptionTimelineIssue] = []
     ) {
         self.schemaVersion = schemaVersion
         self.manifestRevision = manifestRevision
@@ -210,6 +212,7 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
         self.removedClips = removedClips
         self.recoveryState = recoveryState
         self.captionConfiguration = captionConfiguration
+        self.captionTimelineIssues = captionTimelineIssues
     }
 
     var approximateDuration: TimeInterval {
@@ -235,6 +238,7 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
         case removedClips
         case recoveryState
         case captionConfiguration
+        case captionTimelineIssues
     }
 
     init(from decoder: Decoder) throws {
@@ -261,5 +265,9 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
             ProjectCaptionConfiguration.self,
             forKey: .captionConfiguration
         )
+        captionTimelineIssues = try container.decodeIfPresent(
+            [CaptionTimelineIssue].self,
+            forKey: .captionTimelineIssues
+        ) ?? []
     }
 }

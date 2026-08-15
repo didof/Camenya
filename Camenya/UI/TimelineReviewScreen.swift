@@ -515,6 +515,7 @@ struct TimelineReviewScreen: View {
                     else if playback.state.phase == .empty { emptyState }
                     else {
                         playbackStatus
+                        if !pendingCaptionIssues.isEmpty { captionIssuesLink }
                         projectTimeSlider
                         TimelineFilmstrip(
                             playback: playback,
@@ -601,28 +602,111 @@ struct TimelineReviewScreen: View {
     }
 
     private var viewer: some View {
-        ZStack {
-            PlayerLayerView(player: playback.player)
-                .background(Color(uiColor: .systemBackground))
-            if playback.state.phase == .preparing {
-                Rectangle()
-                    .fill(.ultraThinMaterial)
-                    .overlay {
-                        Text("Preparing Preview…")
-                            .font(.callout.weight(.semibold))
-                            .foregroundStyle(.primary)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 10)
-                            .background(.regularMaterial, in: Capsule())
-                    }
+        GeometryReader { geometry in
+            ZStack {
+                PlayerLayerView(player: playback.player)
+                    .background(Color(uiColor: .systemBackground))
+                if let activeCaption {
+                    projectCaptionOverlay(activeCaption, canvas: geometry.size)
+                }
+                if playback.state.phase == .preparing {
+                    Rectangle()
+                        .fill(.ultraThinMaterial)
+                        .overlay {
+                            Text("Preparing Preview…")
+                                .font(.callout.weight(.semibold))
+                                .foregroundStyle(.primary)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 10)
+                                .background(.regularMaterial, in: Capsule())
+                        }
+                }
             }
         }
         .aspectRatio(format == .portrait ? 9 / 16 : 16 / 9, contentMode: .fit)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Project Viewer")
-        .accessibilityValue(phaseLabel)
+        .accessibilityValue(viewerAccessibilityValue)
         .accessibilitySortPriority(6)
+    }
+
+    private var pendingCaptionIssues: [CaptionTimelineIssue] {
+        model.project.captionTimelineIssues.filter { $0.reviewState == .needsReview }
+    }
+
+    private var captionIssuesLink: some View {
+        NavigationLink {
+            CaptionTimelineIssuesScreen(
+                issues: pendingCaptionIssues,
+                takes: model.project.takes,
+                isCommitting: isCommittingEdit || model.isEditingTimeline,
+                onApprove: { commit(.approveCaptionTimelineIssue(issueID: $0)) }
+            )
+        } label: {
+            Label(
+                "\(pendingCaptionIssues.count) Caption \(pendingCaptionIssues.count == 1 ? "Issue" : "Issues")",
+                systemImage: "captions.bubble.fill"
+            )
+            .font(.headline)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+        }
+        .buttonStyle(.bordered)
+        .disabled(isCommittingEdit || model.isEditingTimeline)
+        .accessibilityHint("Review captions omitted from the Storyline after an edit.")
+    }
+
+    private var activeCaption: ActiveProjectCaptionPresentation? {
+        guard let timeline = playback.currentSnapshot.captionTimeline else { return nil }
+        return ProjectCaptionOverlayResolver.active(
+            in: timeline,
+            at: playback.state.playhead.seconds
+        )
+    }
+
+    private var viewerAccessibilityValue: String {
+        guard let activeCaption else { return phaseLabel }
+        return "\(phaseLabel). Caption: \(activeCaption.cue.text)"
+    }
+
+    @ViewBuilder
+    private func projectCaptionOverlay(
+        _ active: ActiveProjectCaptionPresentation,
+        canvas: CGSize
+    ) -> some View {
+        let metrics = CaptionPresentationLayout.metrics(for: canvas)
+        let maximumWidth = canvas.width * (1 - CaptionPresentationLayout.horizontalInsetFraction * 2)
+        projectCaptionText(active)
+            .font(.system(size: metrics.fontSize, weight: .bold))
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: max(1, maximumWidth - metrics.padding * 2))
+            .padding(metrics.padding)
+            .background(
+                .black.opacity(0.76),
+                in: RoundedRectangle(cornerRadius: metrics.cornerRadius)
+            )
+            .fixedSize(horizontal: false, vertical: true)
+            .position(
+                x: canvas.width / 2,
+                y: canvas.height * CaptionPresentationLayout.centerYFraction(
+                    for: playback.currentSnapshot.captionTimeline?.placement ?? .lower
+                )
+            )
+            .accessibilityHidden(true)
+    }
+
+    private func projectCaptionText(_ active: ActiveProjectCaptionPresentation) -> Text {
+        guard !active.cue.timedSpans.isEmpty else {
+            return Text(active.cue.text).foregroundColor(.white)
+        }
+        return active.cue.timedSpans.enumerated().reduce(Text("")) { result, item in
+            let (index, span) = item
+            let prefix = index == 0 ? "" : " "
+            let isActive = span == active.timedSpan
+            return result + Text(prefix + span.text)
+                .foregroundColor(isActive ? .yellow : .white)
+                .fontWeight(isActive ? .heavy : .bold)
+        }
     }
 
     private var failureState: some View {
@@ -756,7 +840,8 @@ struct TimelineReviewScreen: View {
                 switch edit {
                 case .move, .remove, .restore, .addFullTakeToStoryline:
                     animatesStructure = true
-                case .trim, .resetTrim, .split, .deleteRemovedClipPermanently, .setMuted, .nudgeTrim:
+                case .trim, .resetTrim, .split, .deleteRemovedClipPermanently, .setMuted,
+                     .nudgeTrim, .approveCaptionTimelineIssue:
                     animatesStructure = false
                 }
                 if animatesStructure, !reduceMotion {
@@ -844,6 +929,12 @@ struct TimelineReviewScreen: View {
                                 ? "Source audio muted for Clip \($0) of \(outcome.snapshot.clips.count)."
                                 : "Source audio on for Clip \($0) of \(outcome.snapshot.clips.count)."
                         } ?? (isMuted ? "Source audio muted." : "Source audio on.")
+                    )
+                } else if case .approveCaptionTimelineIssue = edit {
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                    UIAccessibility.post(
+                        notification: .announcement,
+                        argument: "Caption approved for the current Storyline. Preview and export now use the same caption timing."
                     )
                 }
             } catch {
@@ -970,7 +1061,7 @@ struct TimelineReviewScreen: View {
              let .setMuted(clipID, _),
              let .nudgeTrim(clipID, _, _):
             clipID
-        case .addFullTakeToStoryline:
+        case .addFullTakeToStoryline, .approveCaptionTimelineIssue:
             nil
         }
     }
@@ -978,6 +1069,81 @@ struct TimelineReviewScreen: View {
     private func deleteTakePermanently(_ takeID: UUID) async throws {
         try await model.deleteUnusedTakePermanently(takeID)
         sessionHistory.removeAll()
+    }
+}
+
+private struct CaptionTimelineIssuesScreen: View {
+    let issues: [CaptionTimelineIssue]
+    let takes: [ProjectTake]
+    let isCommitting: Bool
+    let onApprove: (CaptionTimelineIssue.ID) -> Void
+
+    var body: some View {
+        Group {
+            if issues.isEmpty {
+                ContentUnavailableView {
+                    Label("Captions Ready", systemImage: "checkmark.circle")
+                } description: {
+                    Text("No Storyline edits need caption review.")
+                }
+            } else {
+                List(issues) { issue in
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text(cueText(for: issue))
+                            .font(.headline)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Label(reasonText(for: issue), systemImage: "exclamationmark.triangle")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(reviewDetail(for: issue))
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button("Approve Caption for Storyline") {
+                            onApprove(issue.id)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        .disabled(isCommitting)
+                        .accessibilityHint("Uses only the caption source time that remains in the current Storyline.")
+                    }
+                    .padding(.vertical, 6)
+                }
+            }
+        }
+        .navigationTitle("Caption Issues")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func cueText(for issue: CaptionTimelineIssue) -> String {
+        takes.first(where: { $0.id == issue.takeID })?
+            .captions?.cues.first(where: { $0.id == issue.cueID })?.text
+            ?? "Caption unavailable"
+    }
+
+    private func reasonText(for issue: CaptionTimelineIssue) -> String {
+        if issue.fragments.isEmpty {
+            return "The current Storyline contains this caption safely again."
+        }
+        return switch issue.reason {
+        case .boundaryCut:
+            "A trim cuts through this caption."
+        case .discontinuousProjection:
+            "This caption crosses Clips that are no longer next to each other."
+        }
+    }
+
+    private func reviewDetail(for issue: CaptionTimelineIssue) -> String {
+        guard !issue.fragments.isEmpty else {
+            return "It stays out of preview and export until you approve its return after the earlier edit."
+        }
+        let duration = issue.fragments.reduce(0) { $0 + $1.sourceRange.duration }
+        let durationText = String(format: "%.1f", duration)
+        let fragmentText = issue.fragments.count == 1
+            ? "\(durationText) seconds of source time remains."
+            : "\(issue.fragments.count) separated parts remain, totaling \(durationText) seconds."
+        return "\(fragmentText) The caption stays out of preview and export until you approve it. Camenya does not guess timing."
     }
 }
 

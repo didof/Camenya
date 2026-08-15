@@ -33,6 +33,7 @@ struct ProjectStore: Sendable {
         var project = try decoder.decode(ProjectManifest.self, from: Data(contentsOf: manifestURL(id: id)))
         if project.schemaVersion < ProjectManifest.currentSchemaVersion {
             let expectedRevision = project.primaryStoryline.revision
+            project.captionTimelineIssues = CaptionTimelineProjection.reconciledIssues(in: project)
             project.schemaVersion = ProjectManifest.currentSchemaVersion
             try save(project, expectedRevision: expectedRevision)
         }
@@ -91,6 +92,7 @@ struct ProjectStore: Sendable {
             }
         }
         project.captionConfiguration = configuration
+        project.captionTimelineIssues = CaptionTimelineProjection.reconciledIssues(in: project)
         project.modifiedAt = modifiedAt
         try save(project, expectedRevision: expectedRevision)
         return project
@@ -128,6 +130,7 @@ struct ProjectStore: Sendable {
         var persistedDraft = draft
         persistedDraft.reviewState = .needsReview
         project.takes[index].captions = persistedDraft
+        project.captionTimelineIssues = CaptionTimelineProjection.reconciledIssues(in: project)
         project.modifiedAt = modifiedAt
         try save(project, expectedRevision: expectedRevision)
         return project
@@ -157,6 +160,7 @@ struct ProjectStore: Sendable {
         }
         captions.reviewState = .approved
         project.takes[index].captions = captions
+        project.captionTimelineIssues = CaptionTimelineProjection.reconciledIssues(in: project)
         project.modifiedAt = modifiedAt
         try save(project, expectedRevision: expectedRevision)
         return project
@@ -313,6 +317,7 @@ struct ProjectStore: Sendable {
         }
 
         project.takes.remove(at: index)
+        project.captionTimelineIssues.removeAll { $0.takeID == takeID }
         project.modifiedAt = modifiedAt
         do {
             try save(project, expectedRevision: expectedRevision)
