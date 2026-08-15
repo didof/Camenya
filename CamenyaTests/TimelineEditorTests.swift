@@ -244,6 +244,10 @@ final class TimelineEditorTests: XCTestCase {
         XCTAssertEqual(exportPlan.revision, sharedSnapshot.revision)
         XCTAssertEqual(previewSession.state.revision, sharedSnapshot.revision)
         XCTAssertEqual(previewSession.state.clips.map(\.id), sharedSnapshot.clips.map(\.id))
+        XCTAssertEqual(previewSession.state.clips.map(\.thumbnailURL), [
+            store.takeThumbnailURL(projectID: project.id, takeID: first.take.id)
+        ])
+        XCTAssertEqual(previewSession.state.clips.map(\.sourceCreatedAt), [first.take.createdAt])
         XCTAssertEqual(exportPlan.urls, sharedSnapshot.clips.map(\.mediaURL))
         XCTAssertEqual(exportPlan.sources.map(\.selection), sharedSnapshot.clips.map(\.selection))
         XCTAssertEqual(exportPlan.sources.count, 1)

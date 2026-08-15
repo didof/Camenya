@@ -30,6 +30,33 @@ final class PlaybackControllerTests: XCTestCase {
         XCTAssertFalse(session.state.isPlaying)
     }
 
+    func testScrubbingAnActivePreviewPausesAndCommittedSeekStaysPaused() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let movieURL = root.appendingPathComponent("scrub.mov")
+        try await makeMovie(at: movieURL)
+        let session = TimelinePlaybackSession(snapshot: makeSnapshot(mediaURL: movieURL))
+        await waitForPhase(.paused, in: session)
+        session.send(.togglePlayback)
+        XCTAssertEqual(session.state.phase, .playing)
+
+        session.send(.previewSeek(ProjectTime(seconds: 0.6)))
+
+        XCTAssertEqual(session.state.phase, .paused)
+        XCTAssertEqual(session.state.playhead.seconds, 0.6, accuracy: 0.001)
+        XCTAssertFalse(session.state.isPlaying)
+
+        session.send(.seek(session.state.playhead))
+        await waitForPhase(.paused, in: session)
+        await waitUntil("The player should seek to the committed local time") {
+            abs(session.player.currentTime().seconds - 0.6) < 0.04
+        }
+        XCTAssertEqual(session.state.playhead.seconds, 0.6, accuracy: 0.001)
+        XCTAssertEqual(session.player.currentTime().seconds, 0.6, accuracy: 0.04)
+        XCTAssertFalse(session.state.isPlaying)
+    }
+
     func testPlaybackSessionNamedClipNavigationSeeksToClipStart() {
         let snapshot = makeSnapshot(durations: [2, 3, 4])
         let session = TimelinePlaybackSession(snapshot: snapshot)
@@ -40,6 +67,26 @@ final class PlaybackControllerTests: XCTestCase {
         XCTAssertEqual(session.state.playhead.seconds, 2, accuracy: 0.001)
         XCTAssertTrue(session.state.canSelectPreviousClip)
         XCTAssertTrue(session.state.canSelectNextClip)
+    }
+
+    func testPlaybackSessionSelectsAnyClipAndEndpointNavigationStaysBounded() {
+        let snapshot = makeSnapshot(durations: [2, 3, 4])
+        let session = TimelinePlaybackSession(snapshot: snapshot)
+
+        session.send(.selectClip(snapshot.clips[2].id))
+
+        XCTAssertEqual(session.state.selectedClipID, snapshot.clips[2].id)
+        XCTAssertEqual(session.state.playhead.seconds, 5, accuracy: 0.001)
+        XCTAssertTrue(session.state.canSelectPreviousClip)
+        XCTAssertFalse(session.state.canSelectNextClip)
+
+        session.send(.selectNextClip)
+        XCTAssertEqual(session.state.selectedClipID, snapshot.clips[2].id)
+        XCTAssertEqual(session.state.playhead.seconds, 5, accuracy: 0.001)
+
+        session.send(.selectPreviousClip)
+        XCTAssertEqual(session.state.selectedClipID, snapshot.clips[1].id)
+        XCTAssertEqual(session.state.playhead.seconds, 2, accuracy: 0.001)
     }
 
     func testPlaybackSessionZoomClampsWithoutChangingProjectPosition() {
@@ -59,6 +106,78 @@ final class PlaybackControllerTests: XCTestCase {
         XCTAssertEqual(session.state.filmstripPointsPerSecond, minimumZoom)
         XCTAssertEqual(session.state.playhead.seconds, 2.5, accuracy: 0.001)
         XCTAssertEqual(session.state.selectedClipID, selectedClipID)
+    }
+
+    func testPlaybackSessionIgnoresInvalidMagnificationAndKeepsProjectPosition() {
+        let snapshot = makeSnapshot(durations: [2, 3])
+        let session = TimelinePlaybackSession(snapshot: snapshot)
+        session.send(.seek(ProjectTime(seconds: 2.5)))
+        let originalZoom = session.state.filmstripPointsPerSecond
+
+        session.send(.magnify(.nan))
+        session.send(.magnify(.infinity))
+        session.send(.magnify(0))
+        session.send(.magnify(-2))
+
+        XCTAssertEqual(session.state.filmstripPointsPerSecond, originalZoom)
+        XCTAssertEqual(session.state.playhead.seconds, 2.5, accuracy: 0.001)
+        XCTAssertEqual(session.state.selectedClipID, snapshot.clips[1].id)
+    }
+
+    func testPlaybackSessionClampsFiniteSeeksAndIgnoresNonfiniteProjectTime() {
+        let snapshot = makeSnapshot(durations: [2, 3])
+        let session = TimelinePlaybackSession(snapshot: snapshot)
+
+        session.send(.seek(ProjectTime(seconds: -4)))
+        XCTAssertEqual(session.state.playhead, .zero)
+        XCTAssertEqual(session.state.selectedClipID, snapshot.clips[0].id)
+
+        session.send(.seek(ProjectTime(seconds: 40)))
+        XCTAssertEqual(session.state.playhead, snapshot.duration)
+        XCTAssertEqual(session.state.selectedClipID, snapshot.clips[1].id)
+        XCTAssertEqual(session.state.phase, .completed)
+
+        session.send(.seek(ProjectTime(seconds: .nan)))
+        XCTAssertEqual(session.state.playhead, snapshot.duration)
+        XCTAssertEqual(session.state.selectedClipID, snapshot.clips[1].id)
+        XCTAssertEqual(session.state.phase, .completed)
+    }
+
+    func testPlaybackSessionCarriesImmutableFilmstripPresentationMetadata() {
+        let thumbnailURL = URL(fileURLWithPath: "/tmp/clip-thumbnail.jpg")
+        let sourceCreatedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let range = TakeRange(startSeconds: 0, endSeconds: 3)
+        let clip = ExportSnapshot.Clip(
+            id: TimelineClip.ID(),
+            takeID: UUID(),
+            mediaURL: URL(fileURLWithPath: "/tmp/clip.mov"),
+            thumbnailURL: thumbnailURL,
+            sourceCreatedAt: sourceCreatedAt,
+            sourceRange: range,
+            availableRange: range,
+            selection: range,
+            projectTimeRange: ProjectTimeRange(start: .zero, end: ProjectTime(seconds: 3)),
+            approvedCaptions: nil
+        )
+        let snapshot = ExportSnapshot(
+            projectID: UUID(),
+            revision: StorylineRevision(rawValue: 9),
+            format: .landscape,
+            captionConfiguration: nil,
+            clips: [clip],
+            duration: ProjectTime(seconds: 3)
+        )
+
+        let session = TimelinePlaybackSession(snapshot: snapshot)
+
+        XCTAssertEqual(session.state.clips, [
+            TimelinePlaybackSession.FilmstripClip(
+                id: clip.id,
+                projectTimeRange: clip.projectTimeRange,
+                thumbnailURL: thumbnailURL,
+                sourceCreatedAt: sourceCreatedAt
+            )
+        ])
     }
 
     func testEmptyPlaybackSessionIgnoresPlaybackAndSeekIntents() {
@@ -115,6 +234,32 @@ final class PlaybackControllerTests: XCTestCase {
         await waitForPhase(.playing, in: session)
         XCTAssertEqual(session.state.playhead.seconds, 0, accuracy: 0.001)
         XCTAssertEqual(session.state.selectedClipOrdinal, 1)
+    }
+
+    func testPlaybackTransitionSelectsFollowingClipAtItsProjectTimeStart() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let movieURL = root.appendingPathComponent("transition.mov")
+        try await makeMovie(at: movieURL)
+        let snapshot = makeSnapshot(mediaURLs: [movieURL, movieURL])
+        let session = TimelinePlaybackSession(snapshot: snapshot)
+        await waitForItemCount(2, in: session)
+        session.send(.togglePlayback)
+        let completedItem = try XCTUnwrap(session.player.currentItem)
+
+        session.player.advanceToNextItem()
+        NotificationCenter.default.post(name: .AVPlayerItemDidPlayToEndTime, object: completedItem)
+        await waitUntil("Playback should advance coherently to the following clip") {
+            session.player.currentItem !== completedItem
+                && session.state.selectedClipID == snapshot.clips[1].id
+        }
+
+        XCTAssertEqual(session.state.phase, .playing)
+        XCTAssertTrue(session.player.currentItem !== completedItem)
+        XCTAssertEqual(session.state.selectedClipID, snapshot.clips[1].id)
+        XCTAssertEqual(session.state.selectedClipOrdinal, 2)
+        XCTAssertEqual(session.state.playhead.seconds, 1, accuracy: 0.001)
     }
 
     func testTakeReturnsToStartAfterNaturalCompletion() async {
@@ -179,6 +324,29 @@ final class PlaybackControllerTests: XCTestCase {
         XCTAssertGreaterThan(color.green, color.blue)
     }
 
+    func testTimelineCreatesAudioTrackMatchingTrimmedClipDuration() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let movieURL = root.appendingPathComponent("trimmed-audio.mov")
+        try await makeMovie(at: movieURL, includeAudio: true)
+        let session = TimelinePlaybackSession(snapshot: makeSnapshot(
+            mediaURL: movieURL,
+            sourceRange: TakeRange(startSeconds: 0, endSeconds: 1),
+            selection: TakeRange(startSeconds: 0.25, endSeconds: 0.75)
+        ))
+
+        await waitForCurrentItem(in: session)
+
+        let item = try XCTUnwrap(session.player.currentItem)
+        let audioTracks = try await item.asset.loadTracks(withMediaType: .audio)
+        let audioTrack = try XCTUnwrap(audioTracks.first)
+        let audioRange = try await audioTrack.load(.timeRange)
+        XCTAssertEqual(audioTracks.count, 1)
+        XCTAssertEqual(audioRange.start.seconds, 0, accuracy: 0.04)
+        XCTAssertEqual(audioRange.duration.seconds, 0.5, accuracy: 0.04)
+    }
+
     func testTimelineReportsPreparationFailureWithoutSubstitutingTheWholeTake() async {
         let session = TimelinePlaybackSession(snapshot: makeSnapshot(
             mediaURL: URL(fileURLWithPath: "/tmp/missing-trimmed.mov"),
@@ -224,6 +392,28 @@ final class PlaybackControllerTests: XCTestCase {
         XCTAssertEqual(session.state.selectedClipOrdinal, 1)
     }
 
+    func testTimelineRetryResumesPreparationFromFailedSelectedClip() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let firstURL = root.appendingPathComponent("missing-first.mov")
+        let secondURL = root.appendingPathComponent("retry-second.mov")
+        let snapshot = makeSnapshot(mediaURLs: [firstURL, secondURL])
+        let session = TimelinePlaybackSession(snapshot: snapshot)
+        session.send(.selectClip(snapshot.clips[1].id))
+        await waitForPhase(.failed, in: session)
+        XCTAssertEqual(session.state.playhead.seconds, 1, accuracy: 0.001)
+        XCTAssertEqual(session.state.selectedClipID, snapshot.clips[1].id)
+
+        try await makeMovie(at: secondURL)
+        session.send(.retryPreparation)
+        await waitForPhase(.paused, in: session)
+
+        XCTAssertEqual(session.player.items().count, 1)
+        XCTAssertEqual(session.state.playhead.seconds, 1, accuracy: 0.001)
+        XCTAssertEqual(session.state.selectedClipID, snapshot.clips[1].id)
+    }
+
     private func waitForCurrentItem(in session: TimelinePlaybackSession) async {
         for _ in 0..<10_000 where session.player.currentItem == nil {
             await Task.yield()
@@ -261,11 +451,57 @@ final class PlaybackControllerTests: XCTestCase {
         )
     }
 
+    private func makeSnapshot(mediaURLs: [URL]) -> ExportSnapshot {
+        let clips = mediaURLs.enumerated().map { index, mediaURL in
+            let range = TakeRange(startSeconds: 0, endSeconds: 1)
+            return ExportSnapshot.Clip(
+                id: TimelineClip.ID(),
+                takeID: UUID(),
+                mediaURL: mediaURL,
+                sourceRange: range,
+                availableRange: range,
+                selection: range,
+                projectTimeRange: ProjectTimeRange(
+                    start: ProjectTime(seconds: Double(index)),
+                    end: ProjectTime(seconds: Double(index + 1))
+                ),
+                approvedCaptions: nil
+            )
+        }
+        return ExportSnapshot(
+            projectID: UUID(),
+            revision: StorylineRevision(rawValue: 5),
+            format: .portrait,
+            captionConfiguration: nil,
+            clips: clips,
+            duration: ProjectTime(seconds: Double(mediaURLs.count))
+        )
+    }
+
     private func waitForPhase(_ phase: TimelinePlaybackSession.Phase, in session: TimelinePlaybackSession) async {
         for _ in 0..<10_000 where session.state.phase != phase {
             await Task.yield()
         }
         XCTAssertEqual(session.state.phase, phase)
+    }
+
+    private func waitForItemCount(_ count: Int, in session: TimelinePlaybackSession) async {
+        for _ in 0..<10_000 where session.player.items().count != count {
+            await Task.yield()
+        }
+        XCTAssertEqual(session.player.items().count, count)
+    }
+
+    private func waitUntil(
+        _ message: String,
+        timeout: TimeInterval = 2,
+        predicate: () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !predicate(), Date() < deadline {
+            await Task.yield()
+        }
+        XCTAssertTrue(predicate(), message)
     }
 
     private func makeSnapshot(
@@ -297,7 +533,7 @@ final class PlaybackControllerTests: XCTestCase {
         )
     }
 
-    private func makeMovie(at url: URL) async throws {
+    private func makeMovie(at url: URL, includeAudio: Bool = false) async throws {
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
             AVVideoCodecKey: AVVideoCodecType.h264,
@@ -315,8 +551,22 @@ final class PlaybackControllerTests: XCTestCase {
         )
         XCTAssertTrue(writer.canAdd(input))
         writer.add(input)
+        let audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: 44_100,
+            AVNumberOfChannelsKey: 1,
+            AVEncoderBitRateKey: 64_000
+        ])
+        if includeAudio {
+            XCTAssertTrue(writer.canAdd(audioInput))
+            writer.add(audioInput)
+        }
         XCTAssertTrue(writer.startWriting())
         writer.startSession(atSourceTime: .zero)
+        if includeAudio {
+            XCTAssertTrue(audioInput.append(try silentAudioSampleBuffer(duration: 1)))
+            audioInput.markAsFinished()
+        }
         let context = PlaybackMovieWriterContext(writer: writer, input: input, adaptor: adaptor)
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -354,6 +604,70 @@ final class PlaybackControllerTests: XCTestCase {
                 }
             }
         }
+    }
+
+    private func silentAudioSampleBuffer(duration: TimeInterval) throws -> CMSampleBuffer {
+        let sampleCount = Int((44_100 * duration).rounded())
+        let byteCount = sampleCount * MemoryLayout<Int16>.size
+        var stream = AudioStreamBasicDescription(
+            mSampleRate: 44_100,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kLinearPCMFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: 2,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: 2,
+            mChannelsPerFrame: 1,
+            mBitsPerChannel: 16,
+            mReserved: 0
+        )
+        var format: CMAudioFormatDescription?
+        let formatStatus = CMAudioFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            asbd: &stream,
+            layoutSize: 0,
+            layout: nil,
+            magicCookieSize: 0,
+            magicCookie: nil,
+            extensions: nil,
+            formatDescriptionOut: &format
+        )
+        guard formatStatus == noErr, let format else { throw CocoaError(.fileWriteUnknown) }
+
+        var block: CMBlockBuffer?
+        let blockStatus = CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault,
+            memoryBlock: nil,
+            blockLength: byteCount,
+            blockAllocator: kCFAllocatorDefault,
+            customBlockSource: nil,
+            offsetToData: 0,
+            dataLength: byteCount,
+            flags: 0,
+            blockBufferOut: &block
+        )
+        guard blockStatus == kCMBlockBufferNoErr, let block else { throw CocoaError(.fileWriteUnknown) }
+        CMBlockBufferFillDataBytes(
+            with: 0,
+            blockBuffer: block,
+            offsetIntoDestination: 0,
+            dataLength: byteCount
+        )
+
+        var sampleBuffer: CMSampleBuffer?
+        let sampleStatus = CMAudioSampleBufferCreateWithPacketDescriptions(
+            allocator: kCFAllocatorDefault,
+            dataBuffer: block,
+            dataReady: true,
+            makeDataReadyCallback: nil,
+            refcon: nil,
+            formatDescription: format,
+            sampleCount: sampleCount,
+            presentationTimeStamp: .zero,
+            packetDescriptions: nil,
+            sampleBufferOut: &sampleBuffer
+        )
+        guard sampleStatus == noErr, let sampleBuffer else { throw CocoaError(.fileWriteUnknown) }
+        return sampleBuffer
     }
 
     private nonisolated static func paintGreen(_ pixelBuffer: CVPixelBuffer) -> Bool {
