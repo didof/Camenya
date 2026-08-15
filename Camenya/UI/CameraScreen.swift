@@ -353,10 +353,20 @@ struct CameraScreen: View {
             case .paused where model.isInterrupted:
                 interruptedControls
             case .paused:
-                HStack(spacing: 10) {
-                    utilityButton("Flip", systemImage: "camera.rotate") { model.flip() }
-                    destructiveUtilityButton("Stop", systemImage: "stop.fill", action: model.stop)
-                    primaryActionButton("Resume", systemImage: "play.fill", action: model.resume)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 10) {
+                        utilityButton("Flip", systemImage: "camera.rotate") { model.flip() }
+                        destructiveUtilityButton("Stop", systemImage: "stop.fill", action: model.stop)
+                        primaryActionButton("Resume", systemImage: "play.fill", action: model.resume)
+                    }
+                    VStack(spacing: 10) {
+                        HStack(spacing: 10) {
+                            utilityButton("Flip", systemImage: "camera.rotate") { model.flip() }
+                            destructiveUtilityButton("Stop", systemImage: "stop.fill", action: model.stop)
+                        }
+                        primaryActionButton("Resume", systemImage: "play.fill", action: model.resume)
+                            .frame(maxWidth: .infinity)
+                    }
                 }
             case .storingTake where model.canRetrySave:
                 primaryActionButton("Retry Add", systemImage: "arrow.clockwise", action: model.retrySave)
@@ -697,12 +707,12 @@ private struct CameraPressStyle: ButtonStyle {
 }
 
 private enum CamenyaStyle {
-    static let ink = Color(red: 0.035, green: 0.039, blue: 0.051)
-    static let paper = Color(red: 0.965, green: 0.965, blue: 0.945)
-    static let recording = Color(red: 1, green: 0.27, blue: 0.23)
-    static let warning = Color(red: 1, green: 0.78, blue: 0.22)
-    static let chrome = ink.opacity(0.84)
-    static let panel = ink.opacity(0.94)
-    static let muted = paper.opacity(0.68)
-    static let hairline = paper.opacity(0.16)
+    static let ink = Color(uiColor: .systemBackground)
+    static let paper = Color(uiColor: .label)
+    static let recording = Color(uiColor: .systemRed)
+    static let warning = Color(uiColor: .systemYellow)
+    static let chrome = Color(uiColor: .systemBackground).opacity(0.88)
+    static let panel = Color(uiColor: .systemBackground).opacity(0.96)
+    static let muted = Color(uiColor: .secondaryLabel)
+    static let hairline = Color(uiColor: .separator)
 }

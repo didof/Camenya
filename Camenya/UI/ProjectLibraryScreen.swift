@@ -129,7 +129,7 @@ private struct ProjectRow: View {
     var body: some View {
         HStack(spacing: 14) {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color.black.gradient)
+                .fill(Color(uiColor: .secondarySystemBackground).gradient)
                 .frame(width: 76, height: 58)
                 .overlay {
                     TakeThumbnailView(

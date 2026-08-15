@@ -146,7 +146,10 @@ struct TakeListScreen: View {
                     cornerRadius: 10
                 )
                 .frame(width: 92, height: 58)
-                .background(Color.black, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .background(
+                    Color(uiColor: .secondarySystemBackground),
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                )
 
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(alignment: .firstTextBaseline) {
@@ -199,45 +202,18 @@ struct TakeListScreen: View {
 
     private var projectControls: some View {
         VStack(spacing: 8) {
-            HStack(spacing: 8) {
-                Button {
-                    onRequestProjectAction(.playProject)
-                } label: {
-                    Label("Play", systemImage: "play.rectangle.fill")
-                        .frame(maxWidth: .infinity, minHeight: 44)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    playProjectButton
+                    cleanEdgesMenu
+                    captionsMenu
                 }
-                Menu {
-                    if !model.trimReviewTakeIDs.isEmpty {
-                        Button("Review Pending Trims", systemImage: "slider.horizontal.3") {
-                            onRequestProjectAction(.reviewEdges)
-                        }
+                VStack(spacing: 8) {
+                    playProjectButton
+                    HStack(spacing: 8) {
+                        cleanEdgesMenu
+                        captionsMenu
                     }
-                    Button("Analyze Take Edges", systemImage: "waveform.badge.magnifyingglass") {
-                        onRequestProjectAction(.analyzeEdges)
-                    }
-                    .disabled(!model.hasTakesNeedingEdgeAnalysis)
-                } label: {
-                    Label(
-                        "Clean Edges",
-                        systemImage: "waveform.badge.magnifyingglass"
-                    )
-                    .frame(maxWidth: .infinity, minHeight: 44)
-                }
-                Menu {
-                    if model.hasReviewableCaptions {
-                        Button("Review & Edit Captions", systemImage: "text.bubble") {
-                            onRequestProjectAction(.reviewCaptions)
-                        }
-                    }
-                    Button("Language, Position & Regenerate", systemImage: "gearshape") {
-                        onRequestProjectAction(.captionSettings)
-                    }
-                } label: {
-                    Label(
-                        "Captions",
-                        systemImage: "captions.bubble.fill"
-                    )
-                    .frame(maxWidth: .infinity, minHeight: 44)
                 }
             }
             .frame(maxWidth: .infinity)
@@ -267,6 +243,48 @@ struct TakeListScreen: View {
         .frame(maxWidth: .infinity)
         .background(.bar)
         .accessibilityIdentifier("take-project-controls")
+    }
+
+    private var playProjectButton: some View {
+        Button {
+            onRequestProjectAction(.playProject)
+        } label: {
+            Label("Play", systemImage: "play.rectangle.fill")
+                .frame(maxWidth: .infinity, minHeight: 44)
+        }
+    }
+
+    private var cleanEdgesMenu: some View {
+        Menu {
+            if !model.trimReviewTakeIDs.isEmpty {
+                Button("Review Pending Trims", systemImage: "slider.horizontal.3") {
+                    onRequestProjectAction(.reviewEdges)
+                }
+            }
+            Button("Analyze Take Edges", systemImage: "waveform.badge.magnifyingglass") {
+                onRequestProjectAction(.analyzeEdges)
+            }
+            .disabled(!model.hasTakesNeedingEdgeAnalysis)
+        } label: {
+            Label("Clean Edges", systemImage: "waveform.badge.magnifyingglass")
+                .frame(maxWidth: .infinity, minHeight: 44)
+        }
+    }
+
+    private var captionsMenu: some View {
+        Menu {
+            if model.hasReviewableCaptions {
+                Button("Review & Edit Captions", systemImage: "text.bubble") {
+                    onRequestProjectAction(.reviewCaptions)
+                }
+            }
+            Button("Language, Position & Regenerate", systemImage: "gearshape") {
+                onRequestProjectAction(.captionSettings)
+            }
+        } label: {
+            Label("Captions", systemImage: "captions.bubble.fill")
+                .frame(maxWidth: .infinity, minHeight: 44)
+        }
     }
 
     private func duration(_ interval: TimeInterval) -> String {

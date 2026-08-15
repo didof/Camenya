@@ -323,8 +323,8 @@ private struct TrimWaveform: View {
                             )
                         }
                     }
-                    Color.black.opacity(0.58).frame(width: max(0, startX))
-                    Color.black.opacity(0.58)
+                    Color(uiColor: .systemGray).opacity(0.58).frame(width: max(0, startX))
+                    Color(uiColor: .systemGray).opacity(0.58)
                         .frame(width: max(0, width - endX))
                         .offset(x: endX)
                 }
@@ -366,9 +366,9 @@ private struct TrimWaveform: View {
         return ZStack {
             Color.clear
             Capsule()
-                .fill(Color.white)
+                .fill(Color(uiColor: .systemBackground))
                 .frame(width: 10, height: 86)
-                .overlay(Capsule().stroke(Color.black.opacity(0.35), lineWidth: 1))
+                .overlay(Capsule().stroke(Color(uiColor: .separator), lineWidth: 1))
                 .shadow(radius: 2)
                 .offset(x: position - hitCenter)
         }

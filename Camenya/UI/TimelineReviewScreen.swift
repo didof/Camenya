@@ -1206,25 +1206,9 @@ private struct TimelineTrimInspector: View {
                 VStack(spacing: 8) { nudgeStartControls; nudgeEndControls }
             }
 
-            HStack(spacing: 8) {
-                if let suggestion = clip.trimSuggestion,
-                   suggestion != clip.selection {
-                    Button("Use Silence Trim", systemImage: "waveform.badge.minus") {
-                        onCommit(.trim(clipID: clip.id, selection: suggestion))
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .frame(minHeight: 44)
-                    .disabled(isCommitting)
-                }
-                Button("Reset Trim", systemImage: "arrow.counterclockwise") {
-                    onCommit(.resetTrim(clipID: clip.id))
-                }
-                .buttonStyle(.bordered)
-                .frame(minHeight: 44)
-                .disabled(clip.selection == clip.availableRange || isCommitting)
-                .accessibilityHint(clip.selection == clip.availableRange
-                    ? "This Clip already uses its full Available Range."
-                    : "Restores this Clip to its full Available Range.")
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) { trimRecoveryControls }
+                VStack(alignment: .leading, spacing: 8) { trimRecoveryControls }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -1312,6 +1296,28 @@ private struct TimelineTrimInspector: View {
                 direction: .later
             )
         }
+    }
+
+    @ViewBuilder
+    private var trimRecoveryControls: some View {
+        if let suggestion = clip.trimSuggestion,
+           suggestion != clip.selection {
+            Button("Use Silence Trim", systemImage: "waveform.badge.minus") {
+                onCommit(.trim(clipID: clip.id, selection: suggestion))
+            }
+            .buttonStyle(.borderedProminent)
+            .frame(minHeight: 44)
+            .disabled(isCommitting)
+        }
+        Button("Reset Trim", systemImage: "arrow.counterclockwise") {
+            onCommit(.resetTrim(clipID: clip.id))
+        }
+        .buttonStyle(.bordered)
+        .frame(minHeight: 44)
+        .disabled(clip.selection == clip.availableRange || isCommitting)
+        .accessibilityHint(clip.selection == clip.availableRange
+            ? "This Clip already uses its full Available Range."
+            : "Restores this Clip to its full Available Range.")
     }
 
     private var reorderControls: some View {
