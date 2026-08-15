@@ -1,9 +1,39 @@
 import Foundation
 
+struct ProjectCaptionTextRange: Equatable, Sendable {
+    let location: Int
+    let length: Int
+
+    fileprivate var foundationRange: NSRange {
+        NSRange(location: location, length: length)
+    }
+}
+
 struct ProjectCaptionExportCue: Equatable, Sendable {
     let range: TakeRange
     let text: String
     let timedSpans: [CaptionTimedSpan]
+    let timedSpanTextRanges: [ProjectCaptionTextRange?]
+
+    init(
+        range: TakeRange,
+        text: String,
+        timedSpans: [CaptionTimedSpan],
+        timedSpanTextRanges: [ProjectCaptionTextRange?]? = nil
+    ) {
+        self.range = range
+        self.text = text
+        self.timedSpans = timedSpans
+        if let timedSpanTextRanges,
+           timedSpanTextRanges.count == timedSpans.count {
+            self.timedSpanTextRanges = timedSpanTextRanges
+        } else {
+            self.timedSpanTextRanges = CaptionTextOccurrenceResolver.ranges(
+                in: text,
+                for: timedSpans
+            )
+        }
+    }
 }
 
 struct ProjectCaptionExportTimeline: Equatable, Sendable {
@@ -99,23 +129,32 @@ enum CaptionTimelineProjection {
                 if issueByCue[key]?.reviewState == .needsReview { continue }
                 for run in runs.compactMap({ projection(of: cue.range, through: $0) }) {
                     guard run.isComplete || issueByCue[key]?.reviewState == .approved else { continue }
-                    let spans = (!cue.wasEdited && !cue.timingWasEdited)
-                        ? cue.timedSpans.compactMap { span -> CaptionTimedSpan? in
+                    let sourceTextRanges = CaptionTextOccurrenceResolver.ranges(
+                        in: cue.text,
+                        for: cue.timedSpans
+                    )
+                    let projectedTiming: [(CaptionTimedSpan, ProjectCaptionTextRange?)] =
+                        (!cue.wasEdited && !cue.timingWasEdited)
+                        ? cue.timedSpans.enumerated().compactMap { index, span in
                             guard span.range.start.seconds >= run.sourceRange.start.seconds,
                                   span.range.end.seconds <= run.sourceRange.end.seconds else { return nil }
-                            return CaptionTimedSpan(
-                                range: rebase(span.range, from: run.sourceRange, to: run.projectRange),
-                                text: span.text,
-                                granularity: span.granularity,
-                                confidence: span.confidence,
-                                alternatives: span.alternatives
+                            return (
+                                CaptionTimedSpan(
+                                    range: rebase(span.range, from: run.sourceRange, to: run.projectRange),
+                                    text: span.text,
+                                    granularity: span.granularity,
+                                    confidence: span.confidence,
+                                    alternatives: span.alternatives
+                                ),
+                                sourceTextRanges[index]
                             )
                         }
                         : []
                     output.append(ProjectCaptionExportCue(
                         range: run.projectRange,
                         text: cue.text,
-                        timedSpans: spans
+                        timedSpans: projectedTiming.map(\.0),
+                        timedSpanTextRanges: projectedTiming.map(\.1)
                     ))
                 }
             }
@@ -254,6 +293,30 @@ struct ProjectCaptionTextRun: Equatable, Sendable {
     let isHighlighted: Bool
 }
 
+private enum CaptionTextOccurrenceResolver {
+    static func ranges(
+        in text: String,
+        for spans: [CaptionTimedSpan]
+    ) -> [ProjectCaptionTextRange?] {
+        var searchLocation = 0
+        let source = text as NSString
+        return spans.map { span in
+            let location = min(searchLocation, source.length)
+            let range = source.range(
+                of: span.text,
+                options: [],
+                range: NSRange(location: location, length: source.length - location)
+            )
+            guard range.location != NSNotFound else { return nil }
+            searchLocation = NSMaxRange(range)
+            return ProjectCaptionTextRange(
+                location: range.location,
+                length: range.length
+            )
+        }
+    }
+}
+
 enum ProjectCaptionOverlayResolver {
     static func active(
         in timeline: ProjectCaptionExportTimeline,
@@ -313,19 +376,8 @@ enum ProjectCaptionOverlayResolver {
         for target: CaptionTimedSpan,
         in cue: ProjectCaptionExportCue
     ) -> NSRange? {
-        var searchLocation = 0
-        let source = cue.text as NSString
-        for span in cue.timedSpans {
-            let location = min(searchLocation, source.length)
-            let range = source.range(
-                of: span.text,
-                options: [],
-                range: NSRange(location: location, length: source.length - location)
-            )
-            guard range.location != NSNotFound else { continue }
-            searchLocation = NSMaxRange(range)
-            if span == target { return range }
-        }
-        return nil
+        guard let index = cue.timedSpans.firstIndex(of: target),
+              cue.timedSpanTextRanges.indices.contains(index) else { return nil }
+        return cue.timedSpanTextRanges[index]?.foundationRange
     }
 }

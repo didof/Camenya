@@ -1063,16 +1063,24 @@ final class TimelineEditorTests: XCTestCase {
             cues: [
                 CaptionCue(
                     range: TakeRange(startSeconds: 3, endSeconds: 7),
-                    recognizedText: "unsafe after trim",
-                    text: "unsafe after trim",
+                    recognizedText: "go go",
+                    text: "go go",
                     confidence: 0.9,
                     alternatives: [],
-                    timedSpans: [CaptionTimedSpan(
-                        range: TakeRange(startSeconds: 4, endSeconds: 5.5),
-                        text: "unsafe",
-                        granularity: .word,
-                        confidence: 0.9
-                    )]
+                    timedSpans: [
+                        CaptionTimedSpan(
+                            range: TakeRange(startSeconds: 3.5, endSeconds: 4.5),
+                            text: "go",
+                            granularity: .word,
+                            confidence: 0.9
+                        ),
+                        CaptionTimedSpan(
+                            range: TakeRange(startSeconds: 5.5, endSeconds: 6.5),
+                            text: "go",
+                            granularity: .word,
+                            confidence: 0.9
+                        )
+                    ]
                 ),
                 CaptionCue(
                     range: TakeRange(startSeconds: 8, endSeconds: 9),
@@ -1109,10 +1117,18 @@ final class TimelineEditorTests: XCTestCase {
 
         XCTAssertEqual(approved.project.captionTimelineIssues.first?.reviewState, .approved)
         XCTAssertEqual(approved.snapshot.captionTimeline?.cues.map(\.text), [
-            "unsafe after trim", "still safe"
+            "go go", "still safe"
         ])
         XCTAssertEqual(approved.snapshot.captionTimeline?.cues.first?.range, TakeRange(startSeconds: 0, endSeconds: 2))
-        XCTAssertEqual(approved.snapshot.captionTimeline?.cues.first?.timedSpans, [])
+        XCTAssertEqual(approved.snapshot.captionTimeline?.cues.first?.timedSpans.map(\.range), [
+            TakeRange(startSeconds: 0.5, endSeconds: 1.5)
+        ])
+        let activeCaption = try XCTUnwrap(approved.snapshot.captionTimeline.flatMap {
+            ProjectCaptionOverlayResolver.active(in: $0, at: 1)
+        })
+        let textRuns = ProjectCaptionOverlayResolver.textRuns(for: activeCaption)
+        XCTAssertEqual(textRuns.map(\.text), ["go ", "go"])
+        XCTAssertEqual(textRuns.map(\.isHighlighted), [false, true])
 
         let undoneApproval = try await editor.restoreSessionState(
             TimelineSessionState(project: outcome.project),
@@ -1129,7 +1145,7 @@ final class TimelineEditorTests: XCTestCase {
         )
         XCTAssertEqual(redoneApproval.project.captionTimelineIssues.first?.reviewState, .approved)
         XCTAssertEqual(redoneApproval.snapshot.captionTimeline?.cues.map(\.text), [
-            "unsafe after trim", "still safe"
+            "go go", "still safe"
         ])
 
         let changedGeometry = try await editor.perform(
@@ -1159,7 +1175,7 @@ final class TimelineEditorTests: XCTestCase {
         )
         XCTAssertTrue(approvedReturn.project.captionTimelineIssues.isEmpty)
         XCTAssertEqual(approvedReturn.snapshot.captionTimeline?.cues.map(\.text), [
-            "unsafe after trim", "still safe"
+            "go go", "still safe"
         ])
     }
 
