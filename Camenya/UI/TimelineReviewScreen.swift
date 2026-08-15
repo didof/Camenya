@@ -119,6 +119,7 @@ final class TimelinePlaybackSession: ObservableObject {
         case previewSeek(ProjectTime)
         case seek(ProjectTime)
         case selectClip(TimelineClip.ID)
+        case selectClipForEditing(TimelineClip.ID)
         case selectPreviousClip
         case selectNextClip
         case zoomIn
@@ -257,6 +258,10 @@ final class TimelinePlaybackSession: ObservableObject {
         case let .selectClip(id):
             guard let index = state.clips.firstIndex(where: { $0.id == id }) else { return }
             seekToClip(at: index)
+        case let .selectClipForEditing(id):
+            guard state.clips.contains(where: { $0.id == id }) else { return }
+            pause()
+            state.selectedClipID = id
         case .selectPreviousClip:
             guard let ordinal = state.selectedClipOrdinal, ordinal > 1 else { return }
             seekToClip(at: ordinal - 2)
@@ -465,6 +470,7 @@ struct TimelineReviewScreen: View {
     @StateObject private var playback: TimelinePlaybackSession
     @ObservedObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isCommittingEdit = false
     @State private var editErrorMessage: String?
     @State private var editRecoveryGeneration = 0
@@ -497,12 +503,19 @@ struct TimelineReviewScreen: View {
                     else {
                         playbackStatus
                         projectTimeSlider
-                        TimelineFilmstrip(playback: playback)
-                            .frame(height: 92)
+                        TimelineFilmstrip(
+                            playback: playback,
+                            isCommitting: isCommittingEdit || model.isEditingTimeline,
+                            onMove: { clipID, destinationIndex in
+                                commit(.move(clipID: clipID, toIndex: destinationIndex))
+                            }
+                        )
                         playbackControls
                         if let selectedClip = playback.state.selectedClip {
                             TimelineTrimInspector(
                                 clip: selectedClip,
+                                clipOrdinal: playback.state.selectedClipOrdinal ?? 1,
+                                clipCount: playback.state.clipCount,
                                 projectTime: playback.state.playhead,
                                 isCommitting: isCommittingEdit,
                                 recoveryGeneration: editRecoveryGeneration,
@@ -692,11 +705,21 @@ struct TimelineReviewScreen: View {
                     edit,
                     expectedRevision: expectedRevision
                 )
-                playback.replaceSnapshot(
-                    outcome.snapshot,
-                    selectedClipID: outcome.focus?.clipID ?? selectedClipID,
-                    projectTime: outcome.focus?.projectTime ?? projectTime
-                )
+                if case .move = edit, !reduceMotion {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        replacePlaybackSnapshot(
+                            outcome,
+                            selectedClipID: selectedClipID,
+                            projectTime: projectTime
+                        )
+                    }
+                } else {
+                    replacePlaybackSnapshot(
+                        outcome,
+                        selectedClipID: selectedClipID,
+                        projectTime: projectTime
+                    )
+                }
                 if case .split = edit, let focus = outcome.focus {
                     let ordinal = outcome.snapshot.clips.firstIndex(where: { $0.id == focus.clipID })
                         .map { $0 + 1 }
@@ -706,6 +729,16 @@ struct TimelineReviewScreen: View {
                         argument: ordinal.map {
                             "Split complete. Clip \($0) of \(outcome.snapshot.clips.count) selected."
                         } ?? "Split complete. Right Clip selected."
+                    )
+                } else if case .move = edit, let focus = outcome.focus {
+                    let ordinal = outcome.snapshot.clips.firstIndex(where: { $0.id == focus.clipID })
+                        .map { $0 + 1 }
+                    UISelectionFeedbackGenerator().selectionChanged()
+                    UIAccessibility.post(
+                        notification: .announcement,
+                        argument: ordinal.map {
+                            "Move complete. Clip \($0) of \(outcome.snapshot.clips.count) selected."
+                        } ?? "Move complete."
                     )
                 }
             } catch {
@@ -719,10 +752,24 @@ struct TimelineReviewScreen: View {
             }
         }
     }
+
+    private func replacePlaybackSnapshot(
+        _ outcome: TimelineEditOutcome,
+        selectedClipID: TimelineClip.ID?,
+        projectTime: ProjectTime
+    ) {
+        playback.replaceSnapshot(
+            outcome.snapshot,
+            selectedClipID: outcome.focus?.clipID ?? selectedClipID,
+            projectTime: outcome.focus?.projectTime ?? projectTime
+        )
+    }
 }
 
 private struct TimelineTrimInspector: View {
     let clip: TimelinePlaybackSession.FilmstripClip
+    let clipOrdinal: Int
+    let clipCount: Int
     let projectTime: ProjectTime
     let isCommitting: Bool
     let recoveryGeneration: Int
@@ -732,6 +779,8 @@ private struct TimelineTrimInspector: View {
 
     init(
         clip: TimelinePlaybackSession.FilmstripClip,
+        clipOrdinal: Int,
+        clipCount: Int,
         projectTime: ProjectTime,
         isCommitting: Bool,
         recoveryGeneration: Int,
@@ -739,6 +788,8 @@ private struct TimelineTrimInspector: View {
         onCommit: @escaping (TimelineEdit) -> Void
     ) {
         self.clip = clip
+        self.clipOrdinal = clipOrdinal
+        self.clipCount = clipCount
         self.projectTime = projectTime
         self.isCommitting = isCommitting
         self.recoveryGeneration = recoveryGeneration
@@ -796,6 +847,11 @@ private struct TimelineTrimInspector: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) { reorderControls }
+                VStack(spacing: 8) { reorderControls }
+            }
+
             if clip.selection == clip.availableRange {
                 Text("This Clip already uses its full Available Range.")
                     .font(.caption)
@@ -834,6 +890,7 @@ private struct TimelineTrimInspector: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Edit selected Clip")
+        .accessibilitySortPriority(2.5)
     }
 
     private var nudgeStartControls: some View {
@@ -852,6 +909,40 @@ private struct TimelineTrimInspector: View {
                 direction: .later
             )
         }
+    }
+
+    private var reorderControls: some View {
+        Group {
+            reorderButton(
+                title: "Move Earlier",
+                systemImage: "arrow.left",
+                destinationIndex: clipOrdinal - 2
+            )
+            reorderButton(
+                title: "Move Later",
+                systemImage: "arrow.right",
+                destinationIndex: clipOrdinal
+            )
+        }
+    }
+
+    private func reorderButton(
+        title: String,
+        systemImage: String,
+        destinationIndex: Int
+    ) -> some View {
+        let destinationOrdinal = destinationIndex + 1
+        let isAvailable = destinationIndex >= 0 && destinationIndex < clipCount
+        return Button(title, systemImage: systemImage) {
+            onCommit(.move(clipID: clip.id, toIndex: destinationIndex))
+        }
+        .buttonStyle(.bordered)
+        .frame(minHeight: 44)
+        .disabled(!isAvailable || isCommitting)
+        .accessibilityValue(isAvailable ? "Result: position \(destinationOrdinal) of \(clipCount)" : "Unavailable")
+        .accessibilityHint(isAvailable
+            ? "Commits one Storyline edit."
+            : "This Clip is already at that end of the Storyline.")
     }
 
     private var nudgeEndControls: some View {
@@ -992,52 +1083,129 @@ private struct TimelineTrimRangeControl: View {
     }
 }
 
+enum TimelineReorderRules {
+    static func destinationIndex(
+        moving sourceIndex: Int,
+        translation: CGFloat,
+        widths: [CGFloat]
+    ) -> Int? {
+        guard widths.indices.contains(sourceIndex),
+              translation.isFinite,
+              widths.allSatisfy({ $0.isFinite && $0 > 0 }) else {
+            return nil
+        }
+
+        var destinationIndex = sourceIndex
+        var distance = widths[sourceIndex] / 2
+        if translation > 0 {
+            for index in widths.indices where index > sourceIndex {
+                distance += widths[index] / 2
+                guard translation >= distance else { break }
+                destinationIndex = index
+                distance += widths[index] / 2
+            }
+        } else if translation < 0 {
+            for index in widths.indices.reversed() where index < sourceIndex {
+                distance += widths[index] / 2
+                guard -translation >= distance else { break }
+                destinationIndex = index
+                distance += widths[index] / 2
+            }
+        }
+        return destinationIndex
+    }
+}
+
 private struct TimelineFilmstrip: View {
     @ObservedObject var playback: TimelinePlaybackSession
+    let isCommitting: Bool
+    let onMove: (TimelineClip.ID, Int) -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dragOriginOffset: CGFloat?
     @State private var previousMagnification = 1.0
+    @State private var reorderDraft: TimelineReorderDraft?
 
     var body: some View {
-        GeometryReader { proxy in
-            let geometry = TimelineFilmstripGeometry(
-                duration: playback.state.duration,
-                pointsPerSecond: playback.state.filmstripPointsPerSecond
-            )
-            ZStack {
-                HStack(spacing: 0) {
-                    ForEach(Array(playback.state.clips.enumerated()), id: \.element.id) { index, clip in
-                        let width = geometry.width(for: clip)
-                        clipView(clip, ordinal: index + 1)
-                            .frame(width: width)
-                            .contentShape(Rectangle().inset(by: -max(0, (44 - width) / 2)))
-                            .onTapGesture { playback.send(.selectClip(clip.id)) }
-                    }
-                }
-                .frame(width: geometry.contentWidth, alignment: .leading)
-                .offset(x: proxy.size.width / 2 - geometry.offset(at: playback.state.playhead))
+        VStack(alignment: .leading, spacing: 4) {
+            GeometryReader { proxy in
+                let geometry = TimelineFilmstripGeometry(
+                    duration: playback.state.duration,
+                    pointsPerSecond: playback.state.filmstripPointsPerSecond
+                )
+                filmstripSurface(geometry: geometry, viewportWidth: proxy.size.width)
+            }
+            .frame(minHeight: 52, idealHeight: 92)
 
-                Rectangle()
-                    .fill(.primary)
-                    .frame(width: 2)
-                    .overlay(alignment: .top) {
-                        Circle().fill(.primary).frame(width: 10, height: 10).offset(y: -4)
-                    }
-                    .allowsHitTesting(false)
-            }
-            .clipped()
-            .background(.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .contentShape(Rectangle())
-            .gesture(scrubGesture(geometry: geometry))
-            .simultaneousGesture(zoomGesture)
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel("Storyline Playhead")
-            .accessibilityValue(accessibilityValue)
-            .accessibilityAdjustableAction { direction in
-                let delta = direction == .increment ? 0.5 : -0.5
-                playback.send(.seek(ProjectTime(seconds: playback.state.playhead.seconds + delta)))
-            }
-            .accessibilitySortPriority(2)
+            Text(reorderStatus)
+                .font(.caption)
+                .foregroundStyle(reorderDraft == nil ? .secondary : .primary)
         }
+    }
+
+    private func filmstripSurface(
+        geometry: TimelineFilmstripGeometry,
+        viewportWidth: CGFloat
+    ) -> some View {
+        ZStack {
+            HStack(spacing: 0) {
+                ForEach(Array(playback.state.clips.enumerated()), id: \.element.id) { index, clip in
+                    reorderableClip(clip, sourceIndex: index, geometry: geometry)
+                }
+            }
+            .frame(width: geometry.contentWidth, alignment: .leading)
+            .offset(x: viewportWidth / 2 - geometry.offset(at: playback.state.playhead))
+
+            Rectangle()
+                .fill(.primary)
+                .frame(width: 2)
+                .overlay(alignment: .top) {
+                    Circle().fill(.primary).frame(width: 10, height: 10).offset(y: -4)
+                }
+                .allowsHitTesting(false)
+        }
+        .clipped()
+        .background(.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .contentShape(Rectangle())
+        .gesture(scrubGesture(geometry: geometry))
+        .simultaneousGesture(zoomGesture)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Storyline Playhead")
+        .accessibilityValue(accessibilityValue)
+        .accessibilityAdjustableAction { direction in
+            let delta = direction == .increment ? 0.5 : -0.5
+            playback.send(.seek(ProjectTime(seconds: playback.state.playhead.seconds + delta)))
+        }
+        .accessibilitySortPriority(2)
+    }
+
+    private func reorderableClip(
+        _ clip: TimelinePlaybackSession.FilmstripClip,
+        sourceIndex: Int,
+        geometry: TimelineFilmstripGeometry
+    ) -> some View {
+        let width = geometry.width(for: clip)
+        let isDragged = reorderDraft?.clipID == clip.id
+        return clipView(clip, ordinal: sourceIndex + 1)
+            .frame(width: width)
+            .overlay(alignment: placementAlignment(for: sourceIndex)) {
+                if isPlacementTarget(sourceIndex) {
+                    Capsule()
+                        .fill(.tint)
+                        .frame(width: 4)
+                        .padding(.vertical, 4)
+                }
+            }
+            .offset(x: isDragged ? reorderDraft?.translation ?? 0 : 0)
+            .scaleEffect(isDragged && !reduceMotion ? 1.04 : 1)
+            .shadow(color: isDragged ? .secondary.opacity(0.32) : .clear, radius: 8, y: 3)
+            .zIndex(isDragged ? 1 : 0)
+            .contentShape(Rectangle().inset(by: -max(0, (44 - width) / 2)))
+            .onTapGesture { playback.send(.selectClip(clip.id)) }
+            .highPriorityGesture(reorderGesture(
+                clip: clip,
+                sourceIndex: sourceIndex,
+                geometry: geometry
+            ))
     }
 
     private func clipView(_ clip: TimelinePlaybackSession.FilmstripClip, ordinal: Int) -> some View {
@@ -1074,14 +1242,109 @@ private struct TimelineFilmstrip: View {
     private func scrubGesture(geometry: TimelineFilmstripGeometry) -> some Gesture {
         DragGesture(minimumDistance: 2)
             .onChanged { value in
+                guard reorderDraft == nil else { return }
                 let origin = dragOriginOffset ?? geometry.offset(at: playback.state.playhead)
                 if dragOriginOffset == nil { dragOriginOffset = origin }
                 playback.send(.previewSeek(geometry.projectTime(at: origin - value.translation.width)))
             }
             .onEnded { _ in
+                guard reorderDraft == nil else { return }
                 dragOriginOffset = nil
                 playback.send(.seek(playback.state.playhead))
             }
+    }
+
+    private func reorderGesture(
+        clip: TimelinePlaybackSession.FilmstripClip,
+        sourceIndex: Int,
+        geometry: TimelineFilmstripGeometry
+    ) -> some Gesture {
+        LongPressGesture(minimumDuration: 0.3)
+            .sequenced(before: DragGesture(minimumDistance: 0))
+            .onChanged { value in
+                guard !isCommitting, playback.state.clipCount > 1 else { return }
+                switch value {
+                case .first(true):
+                    beginReorder(clip: clip, sourceIndex: sourceIndex)
+                case let .second(true, drag?):
+                    beginReorder(clip: clip, sourceIndex: sourceIndex)
+                    updateReorder(
+                        translation: drag.translation.width,
+                        geometry: geometry
+                    )
+                default:
+                    break
+                }
+            }
+            .onEnded { _ in finishReorder() }
+    }
+
+    private func beginReorder(
+        clip: TimelinePlaybackSession.FilmstripClip,
+        sourceIndex: Int
+    ) {
+        guard reorderDraft == nil else { return }
+        dragOriginOffset = nil
+        playback.send(.pause)
+        playback.send(.selectClipForEditing(clip.id))
+        reorderDraft = TimelineReorderDraft(
+            clipID: clip.id,
+            sourceIndex: sourceIndex,
+            destinationIndex: sourceIndex,
+            translation: 0
+        )
+    }
+
+    private func updateReorder(
+        translation: CGFloat,
+        geometry: TimelineFilmstripGeometry
+    ) {
+        guard var draft = reorderDraft,
+              let destinationIndex = TimelineReorderRules.destinationIndex(
+                moving: draft.sourceIndex,
+                translation: translation,
+                widths: playback.state.clips.map(geometry.width(for:))
+              ) else { return }
+        if destinationIndex != draft.destinationIndex {
+            UISelectionFeedbackGenerator().selectionChanged()
+        }
+        draft.destinationIndex = destinationIndex
+        draft.translation = translation
+        reorderDraft = draft
+    }
+
+    private func finishReorder() {
+        guard let draft = reorderDraft else { return }
+        reorderDraft = nil
+        guard draft.destinationIndex != draft.sourceIndex else {
+            UIAccessibility.post(
+                notification: .announcement,
+                argument: "Move cancelled. Clip remains at position \(draft.sourceIndex + 1)."
+            )
+            return
+        }
+        onMove(draft.clipID, draft.destinationIndex)
+    }
+
+    private func isPlacementTarget(_ index: Int) -> Bool {
+        guard let draft = reorderDraft,
+              draft.destinationIndex != draft.sourceIndex else { return false }
+        return index == draft.destinationIndex
+    }
+
+    private func placementAlignment(for index: Int) -> Alignment {
+        guard let draft = reorderDraft, index == draft.destinationIndex else { return .center }
+        return draft.destinationIndex < draft.sourceIndex ? .leading : .trailing
+    }
+
+    private var reorderStatus: String {
+        guard let draft = reorderDraft else {
+            return "Long-press and drag a Clip to reorder."
+        }
+        if draft.destinationIndex == draft.sourceIndex {
+            return "Clip \(draft.sourceIndex + 1) lifted. Drag to move; release to cancel."
+        }
+        return "Move Clip \(draft.sourceIndex + 1) to position \(draft.destinationIndex + 1). Release to place."
     }
 
     private var zoomGesture: some Gesture {
@@ -1114,6 +1377,13 @@ private struct TimelineFilmstrip: View {
         .compactMap { $0 }
         .joined(separator: ", ")
     }
+}
+
+private struct TimelineReorderDraft: Equatable {
+    let clipID: TimelineClip.ID
+    let sourceIndex: Int
+    var destinationIndex: Int
+    var translation: CGFloat
 }
 
 private struct TimelineFilmstripGeometry {

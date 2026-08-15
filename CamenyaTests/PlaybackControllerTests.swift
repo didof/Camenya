@@ -4,6 +4,49 @@ import XCTest
 
 @MainActor
 final class PlaybackControllerTests: XCTestCase {
+    func testReorderDragUsesNeighborCentersWithVariableClipWidths() {
+        let widths: [CGFloat] = [96, 192, 48]
+
+        XCTAssertEqual(
+            TimelineReorderRules.destinationIndex(moving: 1, translation: -143, widths: widths),
+            1
+        )
+        XCTAssertEqual(
+            TimelineReorderRules.destinationIndex(moving: 1, translation: -144, widths: widths),
+            0
+        )
+        XCTAssertEqual(
+            TimelineReorderRules.destinationIndex(moving: 1, translation: 119, widths: widths),
+            1
+        )
+        XCTAssertEqual(
+            TimelineReorderRules.destinationIndex(moving: 1, translation: 120, widths: widths),
+            2
+        )
+        XCTAssertEqual(
+            TimelineReorderRules.destinationIndex(moving: 2, translation: -264, widths: widths),
+            0
+        )
+    }
+
+    func testReorderDragRejectsInvalidGeometry() {
+        XCTAssertNil(TimelineReorderRules.destinationIndex(
+            moving: 2,
+            translation: 10,
+            widths: [48, 48]
+        ))
+        XCTAssertNil(TimelineReorderRules.destinationIndex(
+            moving: 0,
+            translation: .infinity,
+            widths: [48, 48]
+        ))
+        XCTAssertNil(TimelineReorderRules.destinationIndex(
+            moving: 0,
+            translation: 10,
+            widths: [48, 0]
+        ))
+    }
+
     func testPlaybackSessionStartsFromImmutableSnapshotAtFirstClip() {
         let snapshot = makeSnapshot(durations: [2, 3])
 
@@ -27,6 +70,18 @@ final class PlaybackControllerTests: XCTestCase {
         XCTAssertEqual(session.state.playhead.seconds, 2, accuracy: 0.001)
         XCTAssertEqual(session.state.selectedClipID, snapshot.clips[1].id)
         XCTAssertEqual(session.state.selectedClipOrdinal, 2)
+        XCTAssertFalse(session.state.isPlaying)
+    }
+
+    func testSelectingClipForReorderPreservesPlayheadPosition() {
+        let snapshot = makeSnapshot(durations: [2, 3])
+        let session = TimelinePlaybackSession(snapshot: snapshot)
+        session.send(.seek(ProjectTime(seconds: 1)))
+
+        session.send(.selectClipForEditing(snapshot.clips[1].id))
+
+        XCTAssertEqual(session.state.playhead, ProjectTime(seconds: 1))
+        XCTAssertEqual(session.state.selectedClipID, snapshot.clips[1].id)
         XCTAssertFalse(session.state.isPlaying)
     }
 

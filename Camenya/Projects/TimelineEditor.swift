@@ -19,6 +19,7 @@ enum TimelineEdit: Equatable, Sendable {
     case trim(clipID: TimelineClip.ID, selection: TakeRange)
     case resetTrim(clipID: TimelineClip.ID)
     case split(clipID: TimelineClip.ID, at: ProjectTime)
+    case move(clipID: TimelineClip.ID, toIndex: Int)
     case nudgeTrim(
         clipID: TimelineClip.ID,
         edge: TimelineTrimEdge,
@@ -330,6 +331,15 @@ actor TimelineEditor {
                 with: [left, right]
             )
             focusedClipID = right.id
+        case let .move(clipID, destinationIndex):
+            let sourceIndex = try clipIndex(for: clipID, in: project)
+            guard project.primaryStoryline.clips.indices.contains(destinationIndex),
+                  destinationIndex != sourceIndex else {
+                throw TimelineEditorError.invalidClip(clipID)
+            }
+            let clip = project.primaryStoryline.clips.remove(at: sourceIndex)
+            project.primaryStoryline.clips.insert(clip, at: destinationIndex)
+            focusedClipID = clip.id
         case let .nudgeTrim(clipID, edge, direction):
             let clipIndex = try clipIndex(for: clipID, in: project)
             let clip = project.primaryStoryline.clips[clipIndex]

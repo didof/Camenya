@@ -405,6 +405,107 @@ final class TimelineEditorTests: XCTestCase {
         ])
     }
 
+    func testMoveClipAtomicallyReordersStorylineAndRecalculatesProjectTime() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let editor = TimelineEditor(projectID: project.id, projectStore: store)
+        var revision = StorylineRevision.zero
+        var completions: [TakeCompletion] = []
+        for (index, duration) in [2.0, 3.0, 4.0].enumerated() {
+            let completion = try await editor.completeFinalizedTake(
+                FinalizedTake(
+                    id: UUID(),
+                    movieURL: try makeMovie(in: root),
+                    orientation: .portrait,
+                    duration: duration,
+                    createdAt: Date(timeIntervalSince1970: TimeInterval(index + 1))
+                ),
+                expectedRevision: revision
+            )
+            completions.append(completion)
+            revision = completion.snapshot.revision
+        }
+
+        let outcome = try await editor.perform(
+            .move(clipID: completions[2].clip.id, toIndex: 0),
+            expectedRevision: revision
+        )
+
+        XCTAssertEqual(outcome.snapshot.revision, StorylineRevision(rawValue: 4))
+        XCTAssertEqual(outcome.snapshot.clips.map(\.id), [
+            completions[2].clip.id,
+            completions[0].clip.id,
+            completions[1].clip.id
+        ])
+        XCTAssertEqual(outcome.snapshot.clips.map(\.projectTimeRange), [
+            ProjectTimeRange(start: .zero, end: ProjectTime(seconds: 4)),
+            ProjectTimeRange(start: ProjectTime(seconds: 4), end: ProjectTime(seconds: 6)),
+            ProjectTimeRange(start: ProjectTime(seconds: 6), end: ProjectTime(seconds: 9))
+        ])
+        XCTAssertEqual(
+            outcome.focus,
+            TimelineEditFocus(clipID: completions[2].clip.id, projectTime: .zero)
+        )
+        XCTAssertEqual(
+            try ProjectExportPlan(snapshot: outcome.snapshot).sources.map(\.takeID),
+            [completions[2].take.id, completions[0].take.id, completions[1].take.id]
+        )
+        XCTAssertEqual(
+            outcome.project.takes.map(\.id),
+            completions.map(\.take.id),
+            "Reorder changes Clip placement, never immutable Take source order."
+        )
+        XCTAssertEqual(try store.load(id: project.id), outcome.project)
+    }
+
+    func testMoveRejectsSameOrOutOfBoundsDestinationWithoutAdvancingRevision() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let editor = TimelineEditor(projectID: project.id, projectStore: store)
+        let first = try await editor.completeFinalizedTake(
+            FinalizedTake(
+                id: UUID(),
+                movieURL: try makeMovie(in: root),
+                orientation: .portrait,
+                duration: 2,
+                createdAt: Date(timeIntervalSince1970: 1)
+            ),
+            expectedRevision: .zero
+        )
+        let second = try await editor.completeFinalizedTake(
+            FinalizedTake(
+                id: UUID(),
+                movieURL: try makeMovie(in: root),
+                orientation: .portrait,
+                duration: 3,
+                createdAt: Date(timeIntervalSince1970: 2)
+            ),
+            expectedRevision: first.snapshot.revision
+        )
+
+        for destination in [1, 2, -1] {
+            do {
+                _ = try await editor.perform(
+                    .move(clipID: second.clip.id, toIndex: destination),
+                    expectedRevision: second.snapshot.revision
+                )
+                XCTFail("Expected destination \(destination) to be rejected")
+            } catch {
+                XCTAssertEqual(error as? TimelineEditorError, .invalidClip(second.clip.id))
+            }
+        }
+
+        let persisted = try await editor.snapshot()
+        XCTAssertEqual(persisted.revision, second.snapshot.revision)
+        XCTAssertEqual(persisted.clips.map(\.id), [first.clip.id, second.clip.id])
+    }
+
     func testOrdinaryTrimThroughApprovedCueOmitsUnsafeCaptionUntilPhaseNineReview() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
