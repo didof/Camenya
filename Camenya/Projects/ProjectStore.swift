@@ -498,6 +498,7 @@ struct ProjectStore: Sendable {
                 project.takes[index].captions = captions
             }
         }
+        project.captionTimelineIssues = CaptionTimelineProjection.reconciledIssues(in: project)
         project.modifiedAt = modifiedAt
         try save(project, expectedRevision: expectedRevision)
         return project
@@ -622,6 +623,7 @@ struct ProjectStore: Sendable {
                 project.takes[index].captions = captions
             }
         }
+        project.captionTimelineIssues = CaptionTimelineProjection.reconciledIssues(in: project)
         project.modifiedAt = modifiedAt
         try save(project, expectedRevision: expectedRevision)
         try? FileManager.default.removeItem(at: takeTrimEnvelopeURL(projectID: projectID, takeID: takeID))

@@ -52,17 +52,11 @@ struct CaptionBurnInRenderer {
             addVisibility(to: base, range: cue.range, timelineDuration: timeline.duration)
             overlayLayer.addSublayer(base)
 
-            var searchLocation = 0
-            let source = cue.text as NSString
             for span in cue.timedSpans {
-                let location = min(searchLocation, source.length)
-                let highlightedRange = source.range(
-                    of: span.text,
-                    options: [],
-                    range: NSRange(location: location, length: source.length - location)
-                )
-                guard highlightedRange.location != NSNotFound else { continue }
-                searchLocation = NSMaxRange(highlightedRange)
+                guard let highlightedRange = ProjectCaptionOverlayResolver.highlightRange(
+                    for: span,
+                    in: cue
+                ) else { continue }
                 let highlight = captionLayer(
                     text: attributedCaption(
                         cue.text,

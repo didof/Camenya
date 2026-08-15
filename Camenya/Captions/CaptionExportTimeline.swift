@@ -249,6 +249,11 @@ struct ActiveProjectCaptionPresentation: Equatable, Sendable {
     let timedSpan: CaptionTimedSpan?
 }
 
+struct ProjectCaptionTextRun: Equatable, Sendable {
+    let text: String
+    let isHighlighted: Bool
+}
+
 enum ProjectCaptionOverlayResolver {
     static func active(
         in timeline: ProjectCaptionExportTimeline,
@@ -263,5 +268,64 @@ enum ProjectCaptionOverlayResolver {
                 time >= $0.range.start.seconds && time < $0.range.end.seconds
             })
         )
+    }
+
+    static func textRuns(
+        for presentation: ActiveProjectCaptionPresentation
+    ) -> [ProjectCaptionTextRun] {
+        let source = presentation.cue.text as NSString
+        guard let timedSpan = presentation.timedSpan,
+              let highlightedRange = highlightRange(
+                for: timedSpan,
+                in: presentation.cue
+              ) else {
+            return [ProjectCaptionTextRun(
+                text: presentation.cue.text,
+                isHighlighted: false
+            )]
+        }
+
+        var runs: [ProjectCaptionTextRun] = []
+        if highlightedRange.location > 0 {
+            runs.append(ProjectCaptionTextRun(
+                text: source.substring(with: NSRange(
+                    location: 0,
+                    length: highlightedRange.location
+                )),
+                isHighlighted: false
+            ))
+        }
+        runs.append(ProjectCaptionTextRun(
+            text: source.substring(with: highlightedRange),
+            isHighlighted: true
+        ))
+        let suffixLocation = NSMaxRange(highlightedRange)
+        if suffixLocation < source.length {
+            runs.append(ProjectCaptionTextRun(
+                text: source.substring(from: suffixLocation),
+                isHighlighted: false
+            ))
+        }
+        return runs
+    }
+
+    static func highlightRange(
+        for target: CaptionTimedSpan,
+        in cue: ProjectCaptionExportCue
+    ) -> NSRange? {
+        var searchLocation = 0
+        let source = cue.text as NSString
+        for span in cue.timedSpans {
+            let location = min(searchLocation, source.length)
+            let range = source.range(
+                of: span.text,
+                options: [],
+                range: NSRange(location: location, length: source.length - location)
+            )
+            guard range.location != NSNotFound else { continue }
+            searchLocation = NSMaxRange(range)
+            if span == target { return range }
+        }
+        return nil
     }
 }

@@ -182,6 +182,78 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertEqual(migrated.captionTimelineIssues.first?.reviewState, .needsReview)
     }
 
+    func testTakeTrimMutationsReconcilePersistedCaptionTimelineIssues() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let takeID = UUID()
+        let withTake = try store.addTake(
+            projectID: project.id,
+            takeID: takeID,
+            movieAt: makeMovie(),
+            orientation: .portrait,
+            duration: 10,
+            createdAt: Date()
+        )
+        let cue = CaptionCue(
+            range: TakeRange(startSeconds: 3, endSeconds: 7),
+            recognizedText: "caption across trim",
+            text: "caption across trim",
+            confidence: 0.9,
+            alternatives: [],
+            timedSpans: []
+        )
+        var seeded = try store.load(id: project.id)
+        seeded.captionConfiguration = ProjectCaptionConfiguration(
+            localeIdentifier: "en-US",
+            placement: .lower
+        )
+        seeded.takes[0].captions = TakeCaptionTrack(
+            localeIdentifier: "en-US",
+            sourceRange: TakeRange(startSeconds: 0, endSeconds: 10),
+            recognizer: .speechRecognizerIOS18,
+            reviewState: .approved,
+            cues: [cue]
+        )
+        try store.persist(seeded, expectedRevision: withTake.primaryStoryline.revision)
+        let editor = TimelineEditor(projectID: project.id, projectStore: store)
+        let clipID = try XCTUnwrap(seeded.primaryStoryline.clips.first?.id)
+        let trimmed = try await editor.perform(
+            .trim(
+                clipID: clipID,
+                selection: TakeRange(startSeconds: 5, endSeconds: 10)
+            ),
+            expectedRevision: seeded.primaryStoryline.revision
+        )
+        XCTAssertEqual(trimmed.project.captionTimelineIssues.first?.fragments.first?.sourceRange,
+                       TakeRange(startSeconds: 5, endSeconds: 7))
+
+        let reset = try store.resetTrim(projectID: project.id, takeID: takeID)
+
+        XCTAssertEqual(reset.captionTimelineIssues.count, 1)
+        XCTAssertTrue(reset.captionTimelineIssues[0].fragments.isEmpty)
+
+        let trimmedAgain = try await editor.perform(
+            .trim(
+                clipID: clipID,
+                selection: TakeRange(startSeconds: 5, endSeconds: 10)
+            ),
+            expectedRevision: reset.primaryStoryline.revision
+        )
+        XCTAssertFalse(trimmedAgain.project.captionTimelineIssues.isEmpty)
+
+        let takeTrimmed = try store.setTrimDecision(
+            projectID: project.id,
+            takeID: takeID,
+            decision: .useSelection(TakeRange(startSeconds: 6, endSeconds: 10))
+        )
+
+        XCTAssertEqual(takeTrimmed.takes.first?.captions?.reviewState, .stale)
+        XCTAssertTrue(takeTrimmed.captionTimelineIssues.isEmpty)
+    }
+
     func testUnreviewedTrimSuggestionPersistsWithoutChangingEffectiveDuration() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }

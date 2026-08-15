@@ -154,4 +154,32 @@ final class CaptionExportTimelineTests: XCTestCase {
         XCTAssertNil(ProjectCaptionOverlayResolver.active(in: timeline, at: 5))
     }
 
+    func testProjectOverlayHighlightPreservesTheFullExportCueText() throws {
+        let active = ActiveProjectCaptionPresentation(
+            cue: ProjectCaptionExportCue(
+                range: TakeRange(startSeconds: 0, endSeconds: 3),
+                text: "Hello, brave new world!",
+                timedSpans: [
+                    CaptionTimedSpan(
+                        range: TakeRange(startSeconds: 0, endSeconds: 1),
+                        text: "brave",
+                        granularity: .word,
+                        confidence: 0.9
+                    )
+                ]
+            ),
+            timedSpan: CaptionTimedSpan(
+                range: TakeRange(startSeconds: 0, endSeconds: 1),
+                text: "brave",
+                granularity: .word,
+                confidence: 0.9
+            )
+        )
+
+        let runs = ProjectCaptionOverlayResolver.textRuns(for: active)
+
+        XCTAssertEqual(runs.map(\.text).joined(), "Hello, brave new world!")
+        XCTAssertEqual(runs.filter(\.isHighlighted).map(\.text), ["brave"])
+    }
+
 }

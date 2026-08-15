@@ -696,16 +696,10 @@ struct TimelineReviewScreen: View {
     }
 
     private func projectCaptionText(_ active: ActiveProjectCaptionPresentation) -> Text {
-        guard !active.cue.timedSpans.isEmpty else {
-            return Text(active.cue.text).foregroundColor(.white)
-        }
-        return active.cue.timedSpans.enumerated().reduce(Text("")) { result, item in
-            let (index, span) = item
-            let prefix = index == 0 ? "" : " "
-            let isActive = span == active.timedSpan
-            return result + Text(prefix + span.text)
-                .foregroundColor(isActive ? .yellow : .white)
-                .fontWeight(isActive ? .heavy : .bold)
+        ProjectCaptionOverlayResolver.textRuns(for: active).reduce(Text("")) { result, run in
+            result + Text(run.text)
+                .foregroundColor(run.isHighlighted ? .yellow : .white)
+                .fontWeight(run.isHighlighted ? .heavy : .bold)
         }
     }
 
@@ -1109,6 +1103,15 @@ private struct CaptionTimelineIssuesScreen: View {
                         .accessibilityHint("Uses only the caption source time that remains in the current Storyline.")
                     }
                     .padding(.vertical, 6)
+                }
+                .safeAreaInset(edge: .bottom) {
+                    if isCommitting {
+                        ProgressView("Saving Caption Approval…")
+                            .font(.callout.weight(.semibold))
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                            .background(.bar)
+                            .accessibilityAddTraits(.updatesFrequently)
+                    }
                 }
             }
         }
