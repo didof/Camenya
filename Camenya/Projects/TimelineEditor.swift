@@ -18,6 +18,7 @@ struct TakeCompletion: Equatable, Sendable {
 enum TimelineEdit: Equatable, Sendable {
     case trim(clipID: TimelineClip.ID, selection: TakeRange)
     case resetTrim(clipID: TimelineClip.ID)
+    case split(clipID: TimelineClip.ID, at: ProjectTime)
     case nudgeTrim(
         clipID: TimelineClip.ID,
         edge: TimelineTrimEdge,
@@ -72,6 +73,31 @@ enum TimelineTrimRules {
     }
 }
 
+enum TimelineSplitRules {
+    static func sourceTime(
+        selection: TakeRange,
+        projectTimeRange: ProjectTimeRange,
+        at projectTime: ProjectTime
+    ) -> MediaTime? {
+        let projectSeconds = projectTime.seconds
+        let projectStart = projectTimeRange.start.seconds
+        let projectEnd = projectTimeRange.end.seconds
+        guard projectSeconds.isFinite,
+              projectSeconds > projectStart,
+              projectSeconds < projectEnd else {
+            return nil
+        }
+        let sourceTime = MediaTime(
+            seconds: selection.start.seconds + projectSeconds - projectStart
+        )
+        guard sourceTime.seconds - selection.start.seconds >= TimelineTrimRules.minimumDuration,
+              selection.end.seconds - sourceTime.seconds >= TimelineTrimRules.minimumDuration else {
+            return nil
+        }
+        return sourceTime
+    }
+}
+
 struct TimelineEditActivity: Equatable, Sendable {
     private(set) var isActive = false
 
@@ -89,6 +115,22 @@ struct TimelineEditActivity: Equatable, Sendable {
 struct TimelineEditOutcome: Equatable, Sendable {
     let project: ProjectManifest
     let snapshot: ExportSnapshot
+    let focus: TimelineEditFocus?
+
+    init(
+        project: ProjectManifest,
+        snapshot: ExportSnapshot,
+        focus: TimelineEditFocus? = nil
+    ) {
+        self.project = project
+        self.snapshot = snapshot
+        self.focus = focus
+    }
+}
+
+struct TimelineEditFocus: Equatable, Sendable {
+    let clipID: TimelineClip.ID
+    let projectTime: ProjectTime
 }
 
 enum TimelineEditorError: Error, Equatable {
@@ -235,6 +277,7 @@ actor TimelineEditor {
                 actual: project.primaryStoryline.revision
             )
         }
+        var focusedClipID: TimelineClip.ID?
 
         switch edit {
         case let .trim(clipID, selection):
@@ -248,6 +291,45 @@ actor TimelineEditor {
             let clipIndex = try clipIndex(for: clipID, in: project)
             let clip = project.primaryStoryline.clips[clipIndex]
             project.primaryStoryline.clips[clipIndex] = clip.replacingSelection(with: clip.availableRange)
+        case let .split(clipID, projectTime):
+            let clipIndex = try clipIndex(for: clipID, in: project)
+            let clip = project.primaryStoryline.clips[clipIndex]
+            let snapshot = try makeSnapshot(project: project)
+            guard let snapshotClip = snapshot.clips.first(where: { $0.id == clipID }),
+                  let sourceTime = TimelineSplitRules.sourceTime(
+                    selection: snapshotClip.selection,
+                    projectTimeRange: snapshotClip.projectTimeRange,
+                    at: projectTime
+                  ) else {
+                throw TimelineEditorError.invalidClip(clipID)
+            }
+            let left = TimelineClip(
+                takeID: clip.takeID,
+                availableRange: TakeRange(
+                    start: clip.availableRange.start,
+                    end: sourceTime
+                ),
+                selection: TakeRange(
+                    start: clip.selection.start,
+                    end: sourceTime
+                )
+            )
+            let right = TimelineClip(
+                takeID: clip.takeID,
+                availableRange: TakeRange(
+                    start: sourceTime,
+                    end: clip.availableRange.end
+                ),
+                selection: TakeRange(
+                    start: sourceTime,
+                    end: clip.selection.end
+                )
+            )
+            project.primaryStoryline.clips.replaceSubrange(
+                clipIndex...clipIndex,
+                with: [left, right]
+            )
+            focusedClipID = right.id
         case let .nudgeTrim(clipID, edge, direction):
             let clipIndex = try clipIndex(for: clipID, in: project)
             let clip = project.primaryStoryline.clips[clipIndex]
@@ -270,9 +352,16 @@ actor TimelineEditor {
             throw TimelineEditorError.staleRevision(expected: expected, actual: actual)
         }
         let committed = try projectStore.load(id: projectID)
+        let committedSnapshot = try makeSnapshot(project: committed)
+        let focus = focusedClipID.flatMap { clipID in
+            committedSnapshot.clips.first(where: { $0.id == clipID }).map {
+                TimelineEditFocus(clipID: clipID, projectTime: $0.projectTimeRange.start)
+            }
+        }
         return TimelineEditOutcome(
             project: committed,
-            snapshot: try makeSnapshot(project: committed)
+            snapshot: committedSnapshot,
+            focus: focus
         )
     }
 
@@ -316,7 +405,12 @@ actor TimelineEditor {
             if let captions = take.captions,
                captions.reviewState == .approved,
                captions.localeIdentifier == project.captionConfiguration?.localeIdentifier,
-               captions.sourceRange == clip.selection {
+               captions.sourceRange == clip.selection
+                || Self.splitFragmentsPreserveCaptionApproval(
+                    for: clip,
+                    in: project.primaryStoryline.clips,
+                    sourceRange: captions.sourceRange
+                ) {
                 approvedCaptions = captions
             } else {
                 approvedCaptions = nil
@@ -346,6 +440,27 @@ actor TimelineEditor {
             clips: clips,
             duration: ProjectTime(seconds: cursor)
         )
+    }
+
+    private nonisolated static func splitFragmentsPreserveCaptionApproval(
+        for clip: TimelineClip,
+        in clips: [TimelineClip],
+        sourceRange: TakeRange
+    ) -> Bool {
+        let fragments = clips.enumerated().filter { $0.element.takeID == clip.takeID }
+        guard fragments.count > 1,
+              fragments.contains(where: { $0.element.id == clip.id }),
+              let first = fragments.first,
+              let last = fragments.last,
+              last.offset - first.offset + 1 == fragments.count,
+              first.element.selection.start == sourceRange.start,
+              last.element.selection.end == sourceRange.end else {
+            return false
+        }
+
+        return zip(fragments, fragments.dropFirst()).allSatisfy { current, next in
+            current.element.selection.end == next.element.selection.start
+        }
     }
 
     private func makeSnapshot(project: ProjectManifest) throws -> ExportSnapshot {

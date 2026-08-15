@@ -1,5 +1,6 @@
 import AVFoundation
 import SwiftUI
+import UIKit
 
 private struct TimelinePlaybackSource: Equatable, Sendable {
     let url: URL
@@ -502,6 +503,7 @@ struct TimelineReviewScreen: View {
                         if let selectedClip = playback.state.selectedClip {
                             TimelineTrimInspector(
                                 clip: selectedClip,
+                                projectTime: playback.state.playhead,
                                 isCommitting: isCommittingEdit,
                                 recoveryGeneration: editRecoveryGeneration,
                                 onPreview: { selection, edge in
@@ -692,9 +694,20 @@ struct TimelineReviewScreen: View {
                 )
                 playback.replaceSnapshot(
                     outcome.snapshot,
-                    selectedClipID: selectedClipID,
-                    projectTime: projectTime
+                    selectedClipID: outcome.focus?.clipID ?? selectedClipID,
+                    projectTime: outcome.focus?.projectTime ?? projectTime
                 )
+                if case .split = edit, let focus = outcome.focus {
+                    let ordinal = outcome.snapshot.clips.firstIndex(where: { $0.id == focus.clipID })
+                        .map { $0 + 1 }
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    UIAccessibility.post(
+                        notification: .announcement,
+                        argument: ordinal.map {
+                            "Split complete. Clip \($0) of \(outcome.snapshot.clips.count) selected."
+                        } ?? "Split complete. Right Clip selected."
+                    )
+                }
             } catch {
                 playback.replaceSnapshot(
                     originalSnapshot,
@@ -710,6 +723,7 @@ struct TimelineReviewScreen: View {
 
 private struct TimelineTrimInspector: View {
     let clip: TimelinePlaybackSession.FilmstripClip
+    let projectTime: ProjectTime
     let isCommitting: Bool
     let recoveryGeneration: Int
     let onPreview: (TakeRange, TimelineTrimEdge) -> Void
@@ -718,12 +732,14 @@ private struct TimelineTrimInspector: View {
 
     init(
         clip: TimelinePlaybackSession.FilmstripClip,
+        projectTime: ProjectTime,
         isCommitting: Bool,
         recoveryGeneration: Int,
         onPreview: @escaping (TakeRange, TimelineTrimEdge) -> Void,
         onCommit: @escaping (TimelineEdit) -> Void
     ) {
         self.clip = clip
+        self.projectTime = projectTime
         self.isCommitting = isCommitting
         self.recoveryGeneration = recoveryGeneration
         self.onPreview = onPreview
@@ -734,7 +750,7 @@ private struct TimelineTrimInspector: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
-                Text("Trim Clip")
+                Text("Edit Clip")
                     .font(.headline)
                 Spacer()
                 Text("\(time(draft.start.seconds)) to \(time(draft.end.seconds))")
@@ -786,6 +802,22 @@ private struct TimelineTrimInspector: View {
                     .foregroundStyle(.secondary)
             }
 
+            Button("Split at Playhead", systemImage: "scissors") {
+                onCommit(.split(clipID: clip.id, at: projectTime))
+            }
+            .buttonStyle(.bordered)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .disabled(splitSourceTime == nil || isCommitting)
+            .accessibilityHint(splitSourceTime == nil
+                ? "Move the Playhead at least 1.0 second from each edge of this Clip."
+                : "Creates two adjacent Clips without changing the immediate output.")
+
+            if splitSourceTime == nil {
+                Text("Move the Playhead at least 1.0s from each Clip edge to Split.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             if isCommitting {
                 ProgressView("Saving Edit…")
                     .font(.callout)
@@ -801,7 +833,7 @@ private struct TimelineTrimInspector: View {
             draft = clip.selection
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Trim selected Clip")
+        .accessibilityLabel("Edit selected Clip")
     }
 
     private var nudgeStartControls: some View {
@@ -872,6 +904,14 @@ private struct TimelineTrimInspector: View {
 
     private func time(_ seconds: TimeInterval) -> String {
         seconds.formatted(.number.precision(.fractionLength(1))) + "s"
+    }
+
+    private var splitSourceTime: MediaTime? {
+        TimelineSplitRules.sourceTime(
+            selection: clip.selection,
+            projectTimeRange: clip.projectTimeRange,
+            at: projectTime
+        )
     }
 }
 

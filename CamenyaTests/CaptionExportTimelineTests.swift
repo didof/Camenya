@@ -162,6 +162,61 @@ final class CaptionExportTimelineTests: XCTestCase {
         XCTAssertEqual(timeline?.cues.first?.timedSpans.first?.range, TakeRange(startSeconds: 1.2, endSeconds: 1.8))
     }
 
+    func testAdjacentSplitProjectsApprovedCueWithoutChangingItsProjectTimeCoverage() {
+        let cue = CaptionCue(
+            range: TakeRange(startSeconds: 3, endSeconds: 7),
+            recognizedText: "one continuous thought",
+            text: "one continuous thought",
+            confidence: 0.9,
+            alternatives: [],
+            timedSpans: [CaptionTimedSpan(
+                range: TakeRange(startSeconds: 3.5, endSeconds: 4.5),
+                text: "continuous",
+                granularity: .word,
+                confidence: 0.9
+            )]
+        )
+        let captions = track(
+            sourceRange: TakeRange(startSeconds: 0, endSeconds: 10),
+            cues: [cue]
+        )
+        let plan = ProjectExportPlan(
+            sources: [
+                ProjectExportSource(
+                    takeID: UUID(),
+                    url: URL(fileURLWithPath: "/take.mov"),
+                    selection: TakeRange(startSeconds: 0, endSeconds: 4),
+                    duration: 4,
+                    captions: captions
+                ),
+                ProjectExportSource(
+                    takeID: UUID(),
+                    url: URL(fileURLWithPath: "/take.mov"),
+                    selection: TakeRange(startSeconds: 4, endSeconds: 10),
+                    duration: 6,
+                    captions: captions
+                )
+            ],
+            format: .portrait,
+            captionConfiguration: ProjectCaptionConfiguration(
+                localeIdentifier: "it-IT",
+                placement: .lower
+            )
+        )
+
+        let timeline = ProjectCaptionExportTimeline.make(plan: plan)
+
+        XCTAssertEqual(timeline?.duration, 10)
+        XCTAssertEqual(timeline?.cues.map(\.range), [
+            TakeRange(startSeconds: 3, endSeconds: 4),
+            TakeRange(startSeconds: 4, endSeconds: 7)
+        ])
+        XCTAssertEqual(timeline?.cues.flatMap { $0.timedSpans }.map { $0.range }, [
+            TakeRange(startSeconds: 3.5, endSeconds: 4),
+            TakeRange(startSeconds: 4, endSeconds: 4.5)
+        ])
+    }
+
     func testCoreAnimationLayoutMirrorsTopLeadingPreviewCoordinates() {
         let portrait = CaptionPresentationLayout.coreAnimationFrame(
             placement: .lower,

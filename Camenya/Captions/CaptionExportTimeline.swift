@@ -21,16 +21,32 @@ struct ProjectCaptionExportTimeline: Equatable, Sendable {
             if let captions = source.captions,
                captions.localeIdentifier == configuration.localeIdentifier {
                 for cue in captions.cues where cue.isEnabled && !cue.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    let range = rebased(cue.range, sourceStart: sourceStart, timelineStart: cursor)
+                    guard let projectedCueRange = intersection(
+                        cue.range,
+                        with: source.selection
+                    ) else { continue }
+                    let range = rebased(
+                        projectedCueRange,
+                        sourceStart: sourceStart,
+                        timelineStart: cursor
+                    )
                     let preservesRecognizerTiming = !cue.wasEdited && !cue.timingWasEdited
                     let spans = preservesRecognizerTiming
-                        ? cue.timedSpans.map {
-                            CaptionTimedSpan(
-                                range: rebased($0.range, sourceStart: sourceStart, timelineStart: cursor),
-                                text: $0.text,
-                                granularity: $0.granularity,
-                                confidence: $0.confidence,
-                                alternatives: $0.alternatives
+                        ? cue.timedSpans.compactMap { span -> CaptionTimedSpan? in
+                            guard let projectedSpanRange = intersection(
+                                span.range,
+                                with: source.selection
+                            ) else { return nil }
+                            return CaptionTimedSpan(
+                                range: rebased(
+                                    projectedSpanRange,
+                                    sourceStart: sourceStart,
+                                    timelineStart: cursor
+                                ),
+                                text: span.text,
+                                granularity: span.granularity,
+                                confidence: span.confidence,
+                                alternatives: span.alternatives
                             )
                         }
                         : []
@@ -56,5 +72,16 @@ struct ProjectCaptionExportTimeline: Equatable, Sendable {
             startSeconds: timelineStart + range.start.seconds - sourceStart,
             endSeconds: timelineStart + range.end.seconds - sourceStart
         )
+    }
+
+    private static func intersection(
+        _ range: TakeRange,
+        with selection: TakeRange?
+    ) -> TakeRange? {
+        guard let selection else { return range }
+        let start = max(range.start.seconds, selection.start.seconds)
+        let end = min(range.end.seconds, selection.end.seconds)
+        guard end > start else { return nil }
+        return TakeRange(startSeconds: start, endSeconds: end)
     }
 }
