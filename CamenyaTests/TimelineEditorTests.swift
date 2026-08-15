@@ -207,6 +207,7 @@ final class TimelineEditorTests: XCTestCase {
         }
     }
 
+    @MainActor
     func testPreviewAndExportAdaptersRemainOnTheSameImmutableSnapshot() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -237,12 +238,14 @@ final class TimelineEditorTests: XCTestCase {
             expectedRevision: sharedSnapshot.revision
         )
 
-        let previewSources = TimelinePlaybackSource.make(snapshot: sharedSnapshot)
+        let previewSession = TimelinePlaybackSession(snapshot: sharedSnapshot)
         let exportPlan = try ProjectExportPlan(snapshot: sharedSnapshot)
 
         XCTAssertEqual(exportPlan.revision, sharedSnapshot.revision)
-        XCTAssertEqual(previewSources.map(\.url), exportPlan.urls)
-        XCTAssertEqual(previewSources.map(\.selection), exportPlan.sources.map(\.selection))
+        XCTAssertEqual(previewSession.state.revision, sharedSnapshot.revision)
+        XCTAssertEqual(previewSession.state.clips.map(\.id), sharedSnapshot.clips.map(\.id))
+        XCTAssertEqual(exportPlan.urls, sharedSnapshot.clips.map(\.mediaURL))
+        XCTAssertEqual(exportPlan.sources.map(\.selection), sharedSnapshot.clips.map(\.selection))
         XCTAssertEqual(exportPlan.sources.count, 1)
     }
 

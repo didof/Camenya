@@ -91,11 +91,37 @@ struct ExportSnapshot: Equatable, Sendable {
         let id: TimelineClip.ID
         let takeID: UUID
         let mediaURL: URL
+        let thumbnailURL: URL?
+        let sourceCreatedAt: Date?
         let sourceRange: TakeRange
         let availableRange: TakeRange
         let selection: TakeRange
         let projectTimeRange: ProjectTimeRange
         let approvedCaptions: TakeCaptionTrack?
+
+        init(
+            id: TimelineClip.ID,
+            takeID: UUID,
+            mediaURL: URL,
+            thumbnailURL: URL? = nil,
+            sourceCreatedAt: Date? = nil,
+            sourceRange: TakeRange,
+            availableRange: TakeRange,
+            selection: TakeRange,
+            projectTimeRange: ProjectTimeRange,
+            approvedCaptions: TakeCaptionTrack?
+        ) {
+            self.id = id
+            self.takeID = takeID
+            self.mediaURL = mediaURL
+            self.thumbnailURL = thumbnailURL
+            self.sourceCreatedAt = sourceCreatedAt
+            self.sourceRange = sourceRange
+            self.availableRange = availableRange
+            self.selection = selection
+            self.projectTimeRange = projectTimeRange
+            self.approvedCaptions = approvedCaptions
+        }
     }
 
     let projectID: UUID

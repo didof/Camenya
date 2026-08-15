@@ -4,20 +4,117 @@ import XCTest
 
 @MainActor
 final class PlaybackControllerTests: XCTestCase {
-    func testTimelineReturnsToReplayableStartAfterNaturalCompletion() async {
-        let url = URL(fileURLWithPath: "/tmp/timeline.mov")
-        let controller = TimelinePlaybackController(
-            sources: [TimelinePlaybackSource(url: url, selection: nil)]
+    func testPlaybackSessionStartsFromImmutableSnapshotAtFirstClip() {
+        let snapshot = makeSnapshot(durations: [2, 3])
+
+        let session = TimelinePlaybackSession(snapshot: snapshot)
+
+        XCTAssertEqual(session.state.revision, snapshot.revision)
+        XCTAssertEqual(session.state.playhead.seconds, 0, accuracy: 0.001)
+        XCTAssertEqual(session.state.selectedClipID, snapshot.clips[0].id)
+        XCTAssertEqual(session.state.selectedClipOrdinal, 1)
+        XCTAssertEqual(session.state.clipCount, 2)
+        XCTAssertEqual(session.state.duration.seconds, 5, accuracy: 0.001)
+    }
+
+    func testPlaybackSessionSeekAtHardCutSelectsFollowingClipAndPauses() {
+        let snapshot = makeSnapshot(durations: [2, 3])
+        let session = TimelinePlaybackSession(snapshot: snapshot)
+
+        session.send(.togglePlayback)
+        session.send(.seek(ProjectTime(seconds: 2)))
+
+        XCTAssertEqual(session.state.playhead.seconds, 2, accuracy: 0.001)
+        XCTAssertEqual(session.state.selectedClipID, snapshot.clips[1].id)
+        XCTAssertEqual(session.state.selectedClipOrdinal, 2)
+        XCTAssertFalse(session.state.isPlaying)
+    }
+
+    func testPlaybackSessionNamedClipNavigationSeeksToClipStart() {
+        let snapshot = makeSnapshot(durations: [2, 3, 4])
+        let session = TimelinePlaybackSession(snapshot: snapshot)
+
+        session.send(.selectNextClip)
+
+        XCTAssertEqual(session.state.selectedClipID, snapshot.clips[1].id)
+        XCTAssertEqual(session.state.playhead.seconds, 2, accuracy: 0.001)
+        XCTAssertTrue(session.state.canSelectPreviousClip)
+        XCTAssertTrue(session.state.canSelectNextClip)
+    }
+
+    func testPlaybackSessionZoomClampsWithoutChangingProjectPosition() {
+        let snapshot = makeSnapshot(durations: [2, 3])
+        let session = TimelinePlaybackSession(snapshot: snapshot)
+        session.send(.seek(ProjectTime(seconds: 2.5)))
+        let selectedClipID = session.state.selectedClipID
+
+        for _ in 0..<20 { session.send(.zoomIn) }
+        let maximumZoom = session.state.filmstripPointsPerSecond
+        session.send(.zoomIn)
+        XCTAssertEqual(session.state.filmstripPointsPerSecond, maximumZoom)
+
+        for _ in 0..<40 { session.send(.zoomOut) }
+        let minimumZoom = session.state.filmstripPointsPerSecond
+        session.send(.zoomOut)
+        XCTAssertEqual(session.state.filmstripPointsPerSecond, minimumZoom)
+        XCTAssertEqual(session.state.playhead.seconds, 2.5, accuracy: 0.001)
+        XCTAssertEqual(session.state.selectedClipID, selectedClipID)
+    }
+
+    func testEmptyPlaybackSessionIgnoresPlaybackAndSeekIntents() {
+        let snapshot = ExportSnapshot(
+            projectID: UUID(),
+            revision: StorylineRevision(rawValue: 3),
+            format: .portrait,
+            captionConfiguration: nil,
+            clips: [],
+            duration: .zero
         )
-        await waitForCurrentItem(in: controller)
-        controller.togglePlayback()
-        let completedItem = controller.player.currentItem
+        let session = TimelinePlaybackSession(snapshot: snapshot)
+
+        session.send(.togglePlayback)
+        session.send(.seek(ProjectTime(seconds: 12)))
+        session.send(.selectNextClip)
+
+        XCTAssertEqual(session.state.phase, .empty)
+        XCTAssertEqual(session.state.playhead, .zero)
+        XCTAssertNil(session.state.selectedClipID)
+    }
+
+    func testSeekToProjectEndInvalidatesOlderPreparation() async {
+        let session = TimelinePlaybackSession(snapshot: makeSnapshot(
+            mediaURL: URL(fileURLWithPath: "/tmp/stale-preparation.mov")
+        ))
+
+        session.send(.seek(session.state.duration))
+        for _ in 0..<1_000 { await Task.yield() }
+
+        XCTAssertEqual(session.state.phase, .completed)
+        XCTAssertEqual(session.state.playhead, session.state.duration)
+        XCTAssertEqual(session.state.selectedClipOrdinal, 1)
+    }
+
+    func testTimelineReturnsToReplayableStartAfterNaturalCompletion() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let url = root.appendingPathComponent("timeline.mov")
+        try await makeMovie(at: url)
+        let session = TimelinePlaybackSession(snapshot: makeSnapshot(mediaURL: url))
+        await waitForCurrentItem(in: session)
+        session.send(.togglePlayback)
+        let completedItem = session.player.currentItem
 
         NotificationCenter.default.post(name: .AVPlayerItemDidPlayToEndTime, object: completedItem)
-        await waitForReplacementItem(in: controller, replacing: completedItem)
+        await waitForPhase(.completed, in: session)
 
-        XCTAssertFalse(controller.isPlaying)
-        XCTAssertEqual(controller.player.items().count, 1)
+        XCTAssertEqual(session.state.playhead, session.state.duration)
+        XCTAssertFalse(session.state.isPlaying)
+
+        session.send(.togglePlayback)
+        await waitForPhase(.playing, in: session)
+        XCTAssertEqual(session.state.playhead.seconds, 0, accuracy: 0.001)
+        XCTAssertEqual(session.state.selectedClipOrdinal, 1)
     }
 
     func testTakeReturnsToStartAfterNaturalCompletion() async {
@@ -56,16 +153,15 @@ final class PlaybackControllerTests: XCTestCase {
         let movieURL = root.appendingPathComponent("trimmed.mov")
         try await makeMovie(at: movieURL)
 
-        let controller = TimelinePlaybackController(sources: [
-            TimelinePlaybackSource(
-                url: movieURL,
-                selection: TakeRange(startSeconds: 0.25, endSeconds: 0.75)
-            )
-        ])
+        let session = TimelinePlaybackSession(snapshot: makeSnapshot(
+            mediaURL: movieURL,
+            sourceRange: TakeRange(startSeconds: 0, endSeconds: 1),
+            selection: TakeRange(startSeconds: 0.25, endSeconds: 0.75)
+        ))
 
-        await waitForCurrentItem(in: controller)
+        await waitForCurrentItem(in: session)
 
-        let item = try XCTUnwrap(controller.player.currentItem)
+        let item = try XCTUnwrap(session.player.currentItem)
         let duration = try await item.asset.load(.duration).seconds
         let videoTracks = try await item.asset.loadTracks(withMediaType: .video)
         let videoTrack = try XCTUnwrap(videoTracks.first)
@@ -74,7 +170,7 @@ final class PlaybackControllerTests: XCTestCase {
             .image(at: CMTime(seconds: 0.1, preferredTimescale: 600)).image
         let color = averageColor(frame)
         XCTAssertEqual(duration, 0.5, accuracy: 0.04)
-        XCTAssertEqual(controller.player.currentTime().seconds, 0, accuracy: 0.04)
+        XCTAssertEqual(session.player.currentTime().seconds, 0, accuracy: 0.04)
         XCTAssertEqual(transform.a, 0, accuracy: 0.001)
         XCTAssertEqual(transform.b, 1, accuracy: 0.001)
         XCTAssertEqual(transform.c, -1, accuracy: 0.001)
@@ -84,39 +180,121 @@ final class PlaybackControllerTests: XCTestCase {
     }
 
     func testTimelineReportsPreparationFailureWithoutSubstitutingTheWholeTake() async {
-        let controller = TimelinePlaybackController(sources: [
-            TimelinePlaybackSource(
-                url: URL(fileURLWithPath: "/tmp/missing-trimmed.mov"),
-                selection: TakeRange(startSeconds: 0.25, endSeconds: 0.75)
+        let session = TimelinePlaybackSession(snapshot: makeSnapshot(
+            mediaURL: URL(fileURLWithPath: "/tmp/missing-trimmed.mov"),
+            sourceRange: TakeRange(startSeconds: 0, endSeconds: 1),
+            selection: TakeRange(startSeconds: 0.25, endSeconds: 0.75)
+        ))
+
+        for _ in 0..<10_000 where session.state.phase != .failed {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(session.state.phase, .failed)
+        XCTAssertTrue(session.player.items().isEmpty)
+    }
+
+    func testTimelineReportsPreparationFailureForMissingFullRangeSource() async {
+        let session = TimelinePlaybackSession(snapshot: makeSnapshot(
+            mediaURL: URL(fileURLWithPath: "/tmp/missing-full-range.mov")
+        ))
+
+        for _ in 0..<10_000 where session.state.phase != .failed {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(session.state.phase, .failed)
+        XCTAssertTrue(session.player.items().isEmpty)
+    }
+
+    func testTimelineCanRetryAfterMissingSourceBecomesReadable() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let movieURL = root.appendingPathComponent("retry.mov")
+        let session = TimelinePlaybackSession(snapshot: makeSnapshot(mediaURL: movieURL))
+        await waitForPhase(.failed, in: session)
+
+        try await makeMovie(at: movieURL)
+        session.send(.retryPreparation)
+        await waitForPhase(.paused, in: session)
+
+        XCTAssertNotNil(session.player.currentItem)
+        XCTAssertEqual(session.state.revision, StorylineRevision(rawValue: 1))
+        XCTAssertEqual(session.state.selectedClipOrdinal, 1)
+    }
+
+    private func waitForCurrentItem(in session: TimelinePlaybackSession) async {
+        for _ in 0..<10_000 where session.player.currentItem == nil {
+            await Task.yield()
+        }
+        XCTAssertNotNil(session.player.currentItem)
+    }
+
+    private func makeSnapshot(durations: [TimeInterval]) -> ExportSnapshot {
+        var projectStart = 0.0
+        let clips = durations.enumerated().map { index, duration in
+            defer { projectStart += duration }
+            let takeID = UUID()
+            let range = TakeRange(startSeconds: 0, endSeconds: duration)
+            return ExportSnapshot.Clip(
+                id: TimelineClip.ID(),
+                takeID: takeID,
+                mediaURL: URL(fileURLWithPath: "/tmp/playback-\(index).mov"),
+                sourceRange: range,
+                availableRange: range,
+                selection: range,
+                projectTimeRange: ProjectTimeRange(
+                    start: ProjectTime(seconds: projectStart),
+                    end: ProjectTime(seconds: projectStart + duration)
+                ),
+                approvedCaptions: nil
             )
-        ])
-
-        for _ in 0..<10_000 where !controller.preparationFailed {
-            await Task.yield()
         }
-
-        XCTAssertTrue(controller.preparationFailed)
-        XCTAssertTrue(controller.player.items().isEmpty)
+        return ExportSnapshot(
+            projectID: UUID(),
+            revision: StorylineRevision(rawValue: 7),
+            format: .portrait,
+            captionConfiguration: nil,
+            clips: clips,
+            duration: ProjectTime(seconds: durations.reduce(0, +))
+        )
     }
 
-    private func waitForCurrentItem(in controller: TimelinePlaybackController) async {
-        for _ in 0..<10_000 where controller.player.currentItem == nil {
+    private func waitForPhase(_ phase: TimelinePlaybackSession.Phase, in session: TimelinePlaybackSession) async {
+        for _ in 0..<10_000 where session.state.phase != phase {
             await Task.yield()
         }
-        XCTAssertNotNil(controller.player.currentItem)
+        XCTAssertEqual(session.state.phase, phase)
     }
 
-    private func waitForReplacementItem(
-        in controller: TimelinePlaybackController,
-        replacing completedItem: AVPlayerItem?
-    ) async {
-        for _ in 0..<10_000 {
-            if let currentItem = controller.player.currentItem, currentItem !== completedItem {
-                return
-            }
-            await Task.yield()
-        }
-        XCTFail("Timeline did not reload after natural completion")
+    private func makeSnapshot(
+        mediaURL: URL,
+        sourceRange: TakeRange = TakeRange(startSeconds: 0, endSeconds: 1),
+        selection: TakeRange? = nil
+    ) -> ExportSnapshot {
+        let selectedRange = selection ?? sourceRange
+        let clip = ExportSnapshot.Clip(
+            id: TimelineClip.ID(),
+            takeID: UUID(),
+            mediaURL: mediaURL,
+            sourceRange: sourceRange,
+            availableRange: sourceRange,
+            selection: selectedRange,
+            projectTimeRange: ProjectTimeRange(
+                start: .zero,
+                end: ProjectTime(seconds: selectedRange.duration)
+            ),
+            approvedCaptions: nil
+        )
+        return ExportSnapshot(
+            projectID: UUID(),
+            revision: StorylineRevision(rawValue: 1),
+            format: .portrait,
+            captionConfiguration: nil,
+            clips: [clip],
+            duration: ProjectTime(seconds: selectedRange.duration)
+        )
     }
 
     private func makeMovie(at url: URL) async throws {

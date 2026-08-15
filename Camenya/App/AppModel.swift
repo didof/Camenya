@@ -358,9 +358,7 @@ final class AppModel: ObservableObject {
         projectStore.takeThumbnailURL(projectID: project.id, takeID: take.id)
     }
 
-    var timelinePlaybackSources: [TimelinePlaybackSource]? {
-        exportSnapshot.map(TimelinePlaybackSource.make(snapshot:))
-    }
+    var timelinePlaybackSnapshot: ExportSnapshot? { exportSnapshot }
 
     var trimReviewTakes: [ProjectTake] {
         trimReviewTakeIDs.compactMap { id in project.takes.first(where: { $0.id == id }) }

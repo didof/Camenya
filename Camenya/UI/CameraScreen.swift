@@ -9,7 +9,7 @@ struct CameraScreen: View {
     @State private var reviewingTake: ProjectTake?
     @State private var managingTakes = false
     @State private var reviewingTimeline = false
-    @State private var timelineSources: [TimelinePlaybackSource] = []
+    @State private var timelineSnapshot: ExportSnapshot?
     @State private var reviewingTrim = false
     @State private var configuringCaptions = false
     @State private var reviewingCaptions = false
@@ -78,11 +78,13 @@ struct CameraScreen: View {
                 .presentationDragIndicator(.visible)
         }
         .sheet(isPresented: $reviewingTimeline) {
-            TimelineReviewScreen(
-                sources: timelineSources,
-                title: model.project.name,
-                format: model.project.format ?? .portrait
-            )
+            if let timelineSnapshot {
+                TimelineReviewScreen(
+                    snapshot: timelineSnapshot,
+                    title: model.project.name,
+                    format: model.project.format ?? .portrait
+                )
+            }
         }
         .sheet(isPresented: $reviewingTrim) {
             TrimReviewQueueScreen(model: model)
@@ -143,11 +145,11 @@ struct CameraScreen: View {
         ) else { return }
         switch action {
         case .playProject:
-            guard let sources = model.timelinePlaybackSources else {
+            guard let snapshot = model.timelinePlaybackSnapshot else {
                 model.reportInvalidTrimRange()
                 return
             }
-            timelineSources = sources
+            timelineSnapshot = snapshot
             reviewingTimeline = true
         case .analyzeEdges:
             model.cleanUpEdges()

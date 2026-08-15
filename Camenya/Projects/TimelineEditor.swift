@@ -177,6 +177,8 @@ actor TimelineEditor {
                 id: clip.id,
                 takeID: take.id,
                 mediaURL: projectStore.takeMovieURL(projectID: project.id, takeID: take.id),
+                thumbnailURL: projectStore.takeThumbnailURL(projectID: project.id, takeID: take.id),
+                sourceCreatedAt: take.createdAt,
                 sourceRange: sourceRange,
                 availableRange: clip.availableRange,
                 selection: clip.selection,
