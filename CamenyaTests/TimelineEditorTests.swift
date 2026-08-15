@@ -2,6 +2,228 @@ import XCTest
 @testable import Camenya
 
 final class TimelineEditorTests: XCTestCase {
+    func testTimelineEditActivityAllowsOnlyOnePersistedMutationUntilFinish() {
+        var activity = TimelineEditActivity()
+
+        XCTAssertTrue(activity.begin())
+        XCTAssertFalse(activity.begin())
+
+        activity.finish()
+
+        XCTAssertTrue(activity.begin())
+    }
+
+    func testTrimRulesRejectNudgesThatWouldCrossMinimumDuration() {
+        let available = TakeRange(startSeconds: 0, endSeconds: 10)
+        let selection = TakeRange(startSeconds: 2, endSeconds: 3.05)
+
+        XCTAssertNil(TimelineTrimRules.nudgedSelection(
+            selection: selection,
+            availableRange: available,
+            edge: .start,
+            direction: .later
+        ))
+        XCTAssertNil(TimelineTrimRules.nudgedSelection(
+            selection: selection,
+            availableRange: available,
+            edge: .end,
+            direction: .earlier
+        ))
+        XCTAssertEqual(TimelineTrimRules.nudgedSelection(
+            selection: selection,
+            availableRange: available,
+            edge: .start,
+            direction: .earlier
+        ), TakeRange(startSeconds: 1.9, endSeconds: 3.05))
+    }
+
+    func testTrimmingClipPersistsSelectionAndReturnsUpdatedSnapshot() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let editor = TimelineEditor(projectID: project.id, projectStore: store)
+        let completed = try await editor.completeFinalizedTake(
+            FinalizedTake(
+                id: UUID(),
+                movieURL: try makeMovie(in: root),
+                orientation: .portrait,
+                duration: 10,
+                createdAt: Date(timeIntervalSince1970: 1)
+            ),
+            expectedRevision: .zero
+        )
+
+        let outcome = try await editor.perform(
+            .trim(
+                clipID: completed.clip.id,
+                selection: TakeRange(startSeconds: 2, endSeconds: 8)
+            ),
+            expectedRevision: completed.snapshot.revision,
+            modifiedAt: Date(timeIntervalSince1970: 2)
+        )
+
+        XCTAssertEqual(outcome.snapshot.revision, StorylineRevision(rawValue: 2))
+        XCTAssertEqual(outcome.snapshot.duration, ProjectTime(seconds: 6))
+        XCTAssertEqual(outcome.snapshot.clips.first?.availableRange, TakeRange(startSeconds: 0, endSeconds: 10))
+        XCTAssertEqual(outcome.snapshot.clips.first?.selection, TakeRange(startSeconds: 2, endSeconds: 8))
+        XCTAssertEqual(outcome.project.primaryStoryline.clips.first?.selection, TakeRange(startSeconds: 2, endSeconds: 8))
+        XCTAssertNil(outcome.project.takes.first?.trimDecision)
+        XCTAssertEqual(try store.load(id: project.id), outcome.project)
+    }
+
+    func testResetTrimRestoresClipAvailableRangeRatherThanWholeTake() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let editor = TimelineEditor(projectID: project.id, projectStore: store)
+        let completed = try await editor.completeFinalizedTake(
+            FinalizedTake(
+                id: UUID(),
+                movieURL: try makeMovie(in: root),
+                orientation: .portrait,
+                duration: 10,
+                createdAt: Date(timeIntervalSince1970: 1)
+            ),
+            expectedRevision: .zero
+        )
+        var seeded = try store.load(id: project.id)
+        seeded.primaryStoryline.clips[0] = TimelineClip(
+            id: completed.clip.id,
+            takeID: completed.take.id,
+            availableRange: TakeRange(startSeconds: 2, endSeconds: 9),
+            selection: TakeRange(startSeconds: 3, endSeconds: 7)
+        )
+        seeded.primaryStoryline.revision = StorylineRevision(rawValue: 2)
+        try store.persist(seeded, expectedRevision: completed.snapshot.revision)
+
+        let outcome = try await editor.perform(
+            .resetTrim(clipID: completed.clip.id),
+            expectedRevision: StorylineRevision(rawValue: 2)
+        )
+
+        XCTAssertEqual(outcome.snapshot.clips.first?.availableRange, TakeRange(startSeconds: 2, endSeconds: 9))
+        XCTAssertEqual(outcome.snapshot.clips.first?.selection, TakeRange(startSeconds: 2, endSeconds: 9))
+        XCTAssertEqual(outcome.snapshot.duration, ProjectTime(seconds: 7))
+    }
+
+    func testTrimNudgesMoveOneEdgeByOneTenthAndCommitSeparately() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let editor = TimelineEditor(projectID: project.id, projectStore: store)
+        let completed = try await editor.completeFinalizedTake(
+            FinalizedTake(
+                id: UUID(),
+                movieURL: try makeMovie(in: root),
+                orientation: .portrait,
+                duration: 10,
+                createdAt: Date(timeIntervalSince1970: 1)
+            ),
+            expectedRevision: .zero
+        )
+        let trimmed = try await editor.perform(
+            .trim(clipID: completed.clip.id, selection: TakeRange(startSeconds: 2, endSeconds: 8)),
+            expectedRevision: completed.snapshot.revision
+        )
+
+        let nudgedStart = try await editor.perform(
+            .nudgeTrim(clipID: completed.clip.id, edge: .start, direction: .later),
+            expectedRevision: trimmed.snapshot.revision
+        )
+        let nudgedEnd = try await editor.perform(
+            .nudgeTrim(clipID: completed.clip.id, edge: .end, direction: .earlier),
+            expectedRevision: nudgedStart.snapshot.revision
+        )
+
+        XCTAssertEqual(nudgedStart.snapshot.clips.first?.selection, TakeRange(startSeconds: 2.1, endSeconds: 8))
+        XCTAssertEqual(nudgedEnd.snapshot.clips.first?.selection, TakeRange(startSeconds: 2.1, endSeconds: 7.9))
+        XCTAssertEqual(nudgedStart.snapshot.revision, StorylineRevision(rawValue: 3))
+        XCTAssertEqual(nudgedEnd.snapshot.revision, StorylineRevision(rawValue: 4))
+    }
+
+    func testSnapshotAdaptsTakeSilenceSuggestionToEachClipAvailableRange() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let editor = TimelineEditor(projectID: project.id, projectStore: store)
+        let completed = try await editor.completeFinalizedTake(
+            FinalizedTake(
+                id: UUID(),
+                movieURL: try makeMovie(in: root),
+                orientation: .portrait,
+                duration: 10,
+                createdAt: Date(timeIntervalSince1970: 1)
+            ),
+            expectedRevision: .zero
+        )
+        _ = try store.recordTrimAnalysis(
+            projectID: project.id,
+            takeID: completed.take.id,
+            result: .suggestion(TrimSuggestion(
+                range: TakeRange(startSeconds: 2, endSeconds: 9),
+                algorithmVersion: 1,
+                envelopeFileName: nil
+            ))
+        )
+        var seeded = try store.load(id: project.id)
+        seeded.primaryStoryline.clips[0] = TimelineClip(
+            id: completed.clip.id,
+            takeID: completed.take.id,
+            availableRange: TakeRange(startSeconds: 5, endSeconds: 10),
+            selection: TakeRange(startSeconds: 5, endSeconds: 10)
+        )
+        seeded.primaryStoryline.revision = StorylineRevision(rawValue: 2)
+        try store.persist(seeded, expectedRevision: completed.snapshot.revision)
+
+        let snapshot = try await editor.snapshot()
+
+        XCTAssertEqual(snapshot.clips.first?.trimSuggestion, TakeRange(startSeconds: 5, endSeconds: 9))
+    }
+
+    func testTrimRejectsSelectionShorterThanOneSecondWithoutAdvancingRevision() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let editor = TimelineEditor(projectID: project.id, projectStore: store)
+        let completed = try await editor.completeFinalizedTake(
+            FinalizedTake(
+                id: UUID(),
+                movieURL: try makeMovie(in: root),
+                orientation: .portrait,
+                duration: 10,
+                createdAt: Date(timeIntervalSince1970: 1)
+            ),
+            expectedRevision: .zero
+        )
+
+        do {
+            _ = try await editor.perform(
+                .trim(
+                    clipID: completed.clip.id,
+                    selection: TakeRange(startSeconds: 2, endSeconds: 2.9)
+                ),
+                expectedRevision: completed.snapshot.revision
+            )
+            XCTFail("Expected the short selection to be rejected")
+        } catch {
+            XCTAssertEqual(error as? TimelineEditorError, .invalidClip(completed.clip.id))
+        }
+
+        let persisted = try await editor.snapshot()
+        XCTAssertEqual(persisted.revision, completed.snapshot.revision)
+        XCTAssertEqual(persisted.clips.first?.selection, completed.clip.selection)
+    }
+
     func testCompletingFinalizedTakeCreatesDistinctFullRangeClip() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

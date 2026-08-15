@@ -3,33 +3,33 @@ import SwiftUI
 struct TakeEdgeCleanupPresentation: Equatable, Sendable {
     let label: String
     let systemImage: String
-    let canReset: Bool
     let actionTitle: String
 
-    init(label: String, systemImage: String, canReset: Bool, actionTitle: String) {
+    init(label: String, systemImage: String, actionTitle: String) {
         self.label = label
         self.systemImage = systemImage
-        self.canReset = canReset
         self.actionTitle = actionTitle
     }
 
-    init(take: ProjectTake) {
-        switch take.trimDecision {
-        case .useSelection:
-            self = Self(label: "Cleaned selection", systemImage: "crop", canReset: true, actionTitle: "Edit Silence Trim")
-        case .keepOriginal:
-            self = Self(label: "Original kept", systemImage: "rectangle", canReset: true, actionTitle: "Edit Silence Trim")
+    init(take: ProjectTake, clips: [TimelineClip] = []) {
+        let takeClips = clips.filter { $0.takeID == take.id }
+        if takeClips.contains(where: { $0.selection != $0.availableRange }) {
+            self = Self(
+                label: "Storyline Clip trimmed",
+                systemImage: "crop",
+                actionTitle: "Edit Storyline Trim"
+            )
+            return
+        }
+        switch take.trimAnalysis {
+        case .suggestion:
+            self = Self(label: "Cleanup review needed", systemImage: "waveform.badge.magnifyingglass", actionTitle: "Review Silence Trim")
+        case .noSuggestion:
+            self = Self(label: "No edge trim suggested", systemImage: "waveform.slash", actionTitle: "Adjust Silence Trim")
+        case .failed:
+            self = Self(label: "Cleanup unavailable", systemImage: "exclamationmark.triangle", actionTitle: "Retry Silence Analysis")
         case nil:
-            switch take.trimAnalysis {
-            case .suggestion:
-                self = Self(label: "Cleanup review needed", systemImage: "waveform.badge.magnifyingglass", canReset: true, actionTitle: "Review Silence Trim")
-            case .noSuggestion:
-                self = Self(label: "No edge trim suggested", systemImage: "waveform.slash", canReset: true, actionTitle: "Adjust Silence Trim")
-            case .failed:
-                self = Self(label: "Cleanup unavailable", systemImage: "exclamationmark.triangle", canReset: true, actionTitle: "Retry Silence Analysis")
-            case nil:
-                self = Self(label: "Original range", systemImage: "rectangle", canReset: false, actionTitle: "Analyze Silence")
-            }
+            self = Self(label: "Original range", systemImage: "rectangle", actionTitle: "Analyze Silence")
         }
     }
 }
@@ -85,7 +85,10 @@ struct TakeListScreen: View {
             List {
                 Section {
                     ForEach(Array(model.project.takes.enumerated()), id: \.element.id) { index, take in
-                        let cleanup = TakeEdgeCleanupPresentation(take: take)
+                        let cleanup = TakeEdgeCleanupPresentation(
+                            take: take,
+                            clips: model.project.primaryStoryline.clips
+                        )
                         takeRow(take, index: index)
                             .swipeActions(edge: .leading, allowsFullSwipe: false) {
                                 Button(cleanup.actionTitle, systemImage: "waveform.badge.magnifyingglass") {
@@ -124,7 +127,10 @@ struct TakeListScreen: View {
     }
 
     private func takeRow(_ take: ProjectTake, index: Int) -> some View {
-        let cleanup = TakeEdgeCleanupPresentation(take: take)
+        let cleanup = TakeEdgeCleanupPresentation(
+            take: take,
+            clips: model.project.primaryStoryline.clips
+        )
         let captions = TakeCaptionPresentation(
             take: take,
             configuration: model.captionConfiguration
@@ -178,12 +184,6 @@ struct TakeListScreen: View {
                     onRequestProjectAction(.manageCaptions(takeID: take.id))
                 }
                 .disabled(!model.canManageTakes)
-                if cleanup.canReset {
-                    Button("Reset Edge Cleanup", systemImage: "arrow.counterclockwise") {
-                        model.resetTrim(takeID: take.id)
-                    }
-                    .disabled(!model.canManageTakes)
-                }
             } label: {
                 Image(systemName: "ellipsis.circle")
                     .font(.title3)

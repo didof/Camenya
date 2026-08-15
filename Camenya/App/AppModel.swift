@@ -25,6 +25,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var isInterrupted = false
     @Published private(set) var captureReady = false
     @Published private(set) var isExportingProject = false
+    @Published private(set) var isEditingTimeline = false
     @Published private(set) var projectExportStatus: String?
     @Published private(set) var completedTakeForReview: ProjectTake?
     @Published private(set) var projectExportProgress: Double = 0
@@ -73,6 +74,7 @@ final class AppModel: ObservableObject {
     private var captionTranscriptionTask: Task<Void, Never>?
     private var exportSnapshotTask: Task<Void, Never>?
     private var exportSnapshotRequestID = 0
+    private var timelineEditActivity = TimelineEditActivity()
 
     init(
         project: ProjectManifest,
@@ -152,6 +154,10 @@ final class AppModel: ObservableObject {
     }
 
     func record() {
+        guard !isEditingTimeline else {
+            errorMessage = "Wait for the Storyline edit to finish before recording."
+            return
+        }
         guard !isExportingProject else {
             errorMessage = "Wait for Project Export to finish before recording."
             return
@@ -359,6 +365,31 @@ final class AppModel: ObservableObject {
     }
 
     var timelinePlaybackSnapshot: ExportSnapshot? { exportSnapshot }
+
+    func performTimelineEdit(
+        _ edit: TimelineEdit,
+        expectedRevision: StorylineRevision
+    ) async throws -> TimelineEditOutcome {
+        guard phase == .idle, !isExportingProject else {
+            throw TimelineEditorError.editingUnavailable
+        }
+        guard timelineEditActivity.begin() else {
+            throw TimelineEditorError.editingUnavailable
+        }
+        isEditingTimeline = true
+        defer {
+            timelineEditActivity.finish()
+            isEditingTimeline = false
+        }
+        let outcome = try await timelineEditor.perform(
+            edit,
+            expectedRevision: expectedRevision
+        )
+        project = outcome.project
+        exportSnapshot = outcome.snapshot
+        onProjectChanged(outcome.project)
+        return outcome
+    }
 
     var trimReviewTakes: [ProjectTake] {
         trimReviewTakeIDs.compactMap { id in project.takes.first(where: { $0.id == id }) }
@@ -572,6 +603,11 @@ final class AppModel: ObservableObject {
 
     func prepareTrimReview(takeID: UUID) -> Bool {
         guard let take = project.takes.first(where: { $0.id == takeID }) else { return false }
+        if project.primaryStoryline.clips.contains(where: {
+            $0.takeID == takeID && $0.selection != $0.availableRange
+        }) {
+            return true
+        }
         let hasWaveform = !trimEnvelope(for: take).isEmpty
         switch take.trimAnalysis {
         case .suggestion, .noSuggestion:
@@ -665,6 +701,9 @@ final class AppModel: ObservableObject {
                 if failureCount > 0 { parts.append("\(failureCount) failed") }
                 trimAnalysisSummary = parts.joined(separator: " · ")
             }
+            if let refreshedSnapshot = try? await timelineEditor.snapshot() {
+                exportSnapshot = refreshedSnapshot
+            }
             finishTrimAnalysis()
         }
     }
@@ -696,11 +735,19 @@ final class AppModel: ObservableObject {
     }
 
     var canManageTakes: Bool {
-        phase == .idle && !isExportingProject && !isAnalyzingTrim && !isTranscribingCaptions
+        phase == .idle
+            && !isExportingProject
+            && !isEditingTimeline
+            && !isAnalyzingTrim
+            && !isTranscribingCaptions
     }
 
     func exportProject() {
-        guard phase == .idle, !project.takes.isEmpty, !isExportingProject, !isAnalyzingTrim else { return }
+        guard phase == .idle,
+              !project.takes.isEmpty,
+              !isExportingProject,
+              !isEditingTimeline,
+              !isAnalyzingTrim else { return }
         if canRetryProjectExportSave {
             retryProjectExportSave()
             return
@@ -753,7 +800,11 @@ final class AppModel: ObservableObject {
     }
 
     var canLeaveProject: Bool {
-        phase == .idle && !isExportingProject && !isAnalyzingTrim && !isTranscribingCaptions
+        phase == .idle
+            && !isExportingProject
+            && !isEditingTimeline
+            && !isAnalyzingTrim
+            && !isTranscribingCaptions
     }
 
     private func finishCaptionTranscription() {

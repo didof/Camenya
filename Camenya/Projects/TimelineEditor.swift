@@ -15,6 +15,82 @@ struct TakeCompletion: Equatable, Sendable {
     let snapshot: ExportSnapshot
 }
 
+enum TimelineEdit: Equatable, Sendable {
+    case trim(clipID: TimelineClip.ID, selection: TakeRange)
+    case resetTrim(clipID: TimelineClip.ID)
+    case nudgeTrim(
+        clipID: TimelineClip.ID,
+        edge: TimelineTrimEdge,
+        direction: TimelineNudgeDirection
+    )
+}
+
+enum TimelineTrimEdge: Equatable, Sendable {
+    case start
+    case end
+}
+
+enum TimelineNudgeDirection: Equatable, Sendable {
+    case earlier
+    case later
+}
+
+enum TimelineTrimRules {
+    static let minimumDuration: TimeInterval = 1
+    static let nudgeSeconds: TimeInterval = 0.1
+
+    static func isValid(_ selection: TakeRange, inside availableRange: TakeRange) -> Bool {
+        selection.isValid(
+            inside: availableRange.end.seconds,
+            minimumDuration: minimumDuration
+        )
+            && selection.start.seconds >= availableRange.start.seconds
+            && selection.end.seconds <= availableRange.end.seconds
+    }
+
+    static func nudgedSelection(
+        selection: TakeRange,
+        availableRange: TakeRange,
+        edge: TimelineTrimEdge,
+        direction: TimelineNudgeDirection
+    ) -> TakeRange? {
+        let delta = direction == .later ? nudgeSeconds : -nudgeSeconds
+        let proposed: TakeRange
+        switch edge {
+        case .start:
+            proposed = TakeRange(
+                startSeconds: selection.start.seconds + delta,
+                endSeconds: selection.end.seconds
+            )
+        case .end:
+            proposed = TakeRange(
+                startSeconds: selection.start.seconds,
+                endSeconds: selection.end.seconds + delta
+            )
+        }
+        return isValid(proposed, inside: availableRange) ? proposed : nil
+    }
+}
+
+struct TimelineEditActivity: Equatable, Sendable {
+    private(set) var isActive = false
+
+    mutating func begin() -> Bool {
+        guard !isActive else { return false }
+        isActive = true
+        return true
+    }
+
+    mutating func finish() {
+        isActive = false
+    }
+}
+
+struct TimelineEditOutcome: Equatable, Sendable {
+    let project: ProjectManifest
+    let snapshot: ExportSnapshot
+}
+
 enum TimelineEditorError: Error, Equatable {
     case projectNotFound(UUID)
     case mediaNotFound(URL)
@@ -26,6 +102,7 @@ enum TimelineEditorError: Error, Equatable {
     case invalidClip(TimelineClip.ID)
     case corruptPrimaryStoryline
     case revisionExhausted
+    case editingUnavailable
 }
 
 actor TimelineEditor {
@@ -146,6 +223,59 @@ actor TimelineEditor {
         )
     }
 
+    func perform(
+        _ edit: TimelineEdit,
+        expectedRevision: StorylineRevision,
+        modifiedAt: Date = Date()
+    ) throws -> TimelineEditOutcome {
+        var project = try projectStore.load(id: projectID)
+        guard project.primaryStoryline.revision == expectedRevision else {
+            throw TimelineEditorError.staleRevision(
+                expected: expectedRevision,
+                actual: project.primaryStoryline.revision
+            )
+        }
+
+        switch edit {
+        case let .trim(clipID, selection):
+            let clipIndex = try clipIndex(for: clipID, in: project)
+            let clip = project.primaryStoryline.clips[clipIndex]
+            guard Self.selectionIsValid(selection, for: clip) else {
+                throw TimelineEditorError.invalidClip(clipID)
+            }
+            project.primaryStoryline.clips[clipIndex] = clip.replacingSelection(with: selection)
+        case let .resetTrim(clipID):
+            let clipIndex = try clipIndex(for: clipID, in: project)
+            let clip = project.primaryStoryline.clips[clipIndex]
+            project.primaryStoryline.clips[clipIndex] = clip.replacingSelection(with: clip.availableRange)
+        case let .nudgeTrim(clipID, edge, direction):
+            let clipIndex = try clipIndex(for: clipID, in: project)
+            let clip = project.primaryStoryline.clips[clipIndex]
+            guard let selection = TimelineTrimRules.nudgedSelection(
+                selection: clip.selection,
+                availableRange: clip.availableRange,
+                edge: edge,
+                direction: direction
+            ) else {
+                throw TimelineEditorError.invalidClip(clipID)
+            }
+            project.primaryStoryline.clips[clipIndex] = clip.replacingSelection(with: selection)
+        }
+
+        project.primaryStoryline.revision = try project.primaryStoryline.revision.incremented()
+        project.modifiedAt = modifiedAt
+        do {
+            try projectStore.persist(project, expectedRevision: expectedRevision)
+        } catch let ProjectStoreError.staleRevision(expected, actual) {
+            throw TimelineEditorError.staleRevision(expected: expected, actual: actual)
+        }
+        let committed = try projectStore.load(id: projectID)
+        return TimelineEditOutcome(
+            project: committed,
+            snapshot: try makeSnapshot(project: committed)
+        )
+    }
+
     private nonisolated static func resolveSnapshot(
         project: ProjectManifest,
         projectStore: ProjectStore
@@ -164,6 +294,24 @@ actor TimelineEditor {
             }
             let start = cursor
             cursor += clip.selection.duration
+            let trimSuggestion: TakeRange?
+            if case let .suggestion(suggestion) = take.trimAnalysis {
+                let adapted = TakeRange(
+                    startSeconds: max(
+                        clip.availableRange.start.seconds,
+                        suggestion.range.start.seconds
+                    ),
+                    endSeconds: min(
+                        clip.availableRange.end.seconds,
+                        suggestion.range.end.seconds
+                    )
+                )
+                trimSuggestion = adapted.isValid(inside: take.duration, minimumDuration: 1)
+                    ? adapted
+                    : nil
+            } else {
+                trimSuggestion = nil
+            }
             let approvedCaptions: TakeCaptionTrack?
             if let captions = take.captions,
                captions.reviewState == .approved,
@@ -182,6 +330,7 @@ actor TimelineEditor {
                 sourceRange: sourceRange,
                 availableRange: clip.availableRange,
                 selection: clip.selection,
+                trimSuggestion: trimSuggestion,
                 projectTimeRange: ProjectTimeRange(
                     start: ProjectTime(seconds: start),
                     end: ProjectTime(seconds: cursor)
@@ -201,5 +350,33 @@ actor TimelineEditor {
 
     private func makeSnapshot(project: ProjectManifest) throws -> ExportSnapshot {
         try Self.resolveSnapshot(project: project, projectStore: projectStore)
+    }
+
+    private func clipIndex(
+        for clipID: TimelineClip.ID,
+        in project: ProjectManifest
+    ) throws -> Int {
+        guard let index = project.primaryStoryline.clips.firstIndex(where: { $0.id == clipID }) else {
+            throw TimelineEditorError.invalidClip(clipID)
+        }
+        return index
+    }
+
+    private nonisolated static func selectionIsValid(
+        _ selection: TakeRange,
+        for clip: TimelineClip
+    ) -> Bool {
+        TimelineTrimRules.isValid(selection, inside: clip.availableRange)
+    }
+}
+
+private extension TimelineClip {
+    func replacingSelection(with selection: TakeRange) -> TimelineClip {
+        TimelineClip(
+            id: id,
+            takeID: takeID,
+            availableRange: availableRange,
+            selection: selection
+        )
     }
 }

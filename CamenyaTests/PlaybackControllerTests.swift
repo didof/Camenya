@@ -57,6 +57,81 @@ final class PlaybackControllerTests: XCTestCase {
         XCTAssertFalse(session.state.isPlaying)
     }
 
+    func testTrimDraggingPreviewsSelectedEdgesWhilePlaybackStaysPaused() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let movieURL = root.appendingPathComponent("trim-preview.mov")
+        try await makeMovie(at: movieURL)
+        let snapshot = makeSnapshot(mediaURL: movieURL)
+        let session = TimelinePlaybackSession(snapshot: snapshot)
+        await waitForPhase(.paused, in: session)
+        let draft = TakeRange(startSeconds: 0.2, endSeconds: 0.8)
+
+        session.previewTrim(clipID: snapshot.clips[0].id, selection: draft, edge: .start)
+        await waitForPhase(.paused, in: session)
+        await waitUntil("The start edge should preview at the beginning of the draft") {
+            session.player.currentItem != nil && abs(session.player.currentTime().seconds) < 0.04
+        }
+
+        XCTAssertEqual(session.state.selectedClipID, snapshot.clips[0].id)
+        XCTAssertEqual(session.state.playhead, snapshot.clips[0].projectTimeRange.start)
+        XCTAssertFalse(session.state.isPlaying)
+
+        session.previewTrim(clipID: snapshot.clips[0].id, selection: draft, edge: .end)
+        await waitForPhase(.paused, in: session)
+        await waitUntil("The end edge should preview the final draft frame") {
+            session.player.currentItem != nil
+                && abs(session.player.currentTime().seconds - (draft.duration - 1.0 / 30.0)) < 0.05
+        }
+
+        XCTAssertEqual(session.state.playhead.seconds, draft.duration - 0.001, accuracy: 0.001)
+        XCTAssertEqual(session.state.selectedClipID, snapshot.clips[0].id)
+        XCTAssertFalse(session.state.isPlaying)
+    }
+
+    func testPlaybackSessionCanOpenAtRequestedClip() {
+        let snapshot = makeSnapshot(durations: [2, 3, 4])
+
+        let session = TimelinePlaybackSession(
+            snapshot: snapshot,
+            initialSelectedClipID: snapshot.clips[1].id
+        )
+
+        XCTAssertEqual(session.state.selectedClipID, snapshot.clips[1].id)
+        XCTAssertEqual(session.state.playhead, snapshot.clips[1].projectTimeRange.start)
+    }
+
+    func testReplacingSnapshotAfterDraftPreviewRestoresCommittedTrim() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let movieURL = root.appendingPathComponent("trim-rollback.mov")
+        try await makeMovie(at: movieURL)
+        let snapshot = makeSnapshot(mediaURL: movieURL)
+        let session = TimelinePlaybackSession(snapshot: snapshot)
+        await waitForPhase(.paused, in: session)
+
+        session.previewTrim(
+            clipID: snapshot.clips[0].id,
+            selection: TakeRange(startSeconds: 0.2, endSeconds: 0.8),
+            edge: .end
+        )
+        await waitForPhase(.paused, in: session)
+
+        session.replaceSnapshot(
+            snapshot,
+            selectedClipID: snapshot.clips[0].id,
+            projectTime: .zero
+        )
+        await waitForPhase(.paused, in: session)
+
+        XCTAssertEqual(session.currentSnapshot, snapshot)
+        XCTAssertEqual(session.state.clips[0].selection, snapshot.clips[0].selection)
+        XCTAssertEqual(session.state.playhead, .zero)
+        XCTAssertEqual(session.player.items().count, 1)
+    }
+
     func testPlaybackSessionNamedClipNavigationSeeksToClipStart() {
         let snapshot = makeSnapshot(durations: [2, 3, 4])
         let session = TimelinePlaybackSession(snapshot: snapshot)
@@ -175,7 +250,10 @@ final class PlaybackControllerTests: XCTestCase {
                 id: clip.id,
                 projectTimeRange: clip.projectTimeRange,
                 thumbnailURL: thumbnailURL,
-                sourceCreatedAt: sourceCreatedAt
+                sourceCreatedAt: sourceCreatedAt,
+                availableRange: range,
+                selection: range,
+                trimSuggestion: nil
             )
         ])
     }

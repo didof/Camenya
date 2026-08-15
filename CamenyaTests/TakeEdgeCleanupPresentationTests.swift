@@ -10,13 +10,12 @@ final class TakeEdgeCleanupPresentationTests: XCTestCase {
             TakeEdgeCleanupPresentation(
                 label: "Original range",
                 systemImage: "rectangle",
-                canReset: false,
                 actionTitle: "Analyze Silence"
             )
         )
     }
 
-    func testPendingSuggestionIsNamedAndResettable() {
+    func testPendingSuggestionIsNamedForStorylineReview() {
         let range = TakeRange(startSeconds: 1, endSeconds: 9)
         let take = ProjectTake(
             createdAt: Date(),
@@ -31,13 +30,12 @@ final class TakeEdgeCleanupPresentationTests: XCTestCase {
             TakeEdgeCleanupPresentation(
                 label: "Cleanup review needed",
                 systemImage: "waveform.badge.magnifyingglass",
-                canReset: true,
                 actionTitle: "Review Silence Trim"
             )
         )
     }
 
-    func testApprovedSelectionUsesCleanedPresentation() {
+    func testLegacyTakeDecisionDoesNotClaimStorylineWasCleaned() {
         let range = TakeRange(startSeconds: 1, endSeconds: 9)
         let take = ProjectTake(
             createdAt: Date(),
@@ -48,10 +46,27 @@ final class TakeEdgeCleanupPresentationTests: XCTestCase {
         XCTAssertEqual(
             TakeEdgeCleanupPresentation(take: take),
             TakeEdgeCleanupPresentation(
-                label: "Cleaned selection",
+                label: "Original range",
+                systemImage: "rectangle",
+                actionTitle: "Analyze Silence"
+            )
+        )
+    }
+
+    func testTrimmedStorylineClipOwnsCleanedPresentation() {
+        let take = ProjectTake(createdAt: Date(), duration: 10)
+        let clip = TimelineClip(
+            takeID: take.id,
+            availableRange: TakeRange(startSeconds: 0, endSeconds: 10),
+            selection: TakeRange(startSeconds: 1, endSeconds: 9)
+        )
+
+        XCTAssertEqual(
+            TakeEdgeCleanupPresentation(take: take, clips: [clip]),
+            TakeEdgeCleanupPresentation(
+                label: "Storyline Clip trimmed",
                 systemImage: "crop",
-                canReset: true,
-                actionTitle: "Edit Silence Trim"
+                actionTitle: "Edit Storyline Trim"
             )
         )
     }

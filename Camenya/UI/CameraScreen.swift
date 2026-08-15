@@ -10,7 +10,7 @@ struct CameraScreen: View {
     @State private var managingTakes = false
     @State private var reviewingTimeline = false
     @State private var timelineSnapshot: ExportSnapshot?
-    @State private var reviewingTrim = false
+    @State private var initialTimelineClipID: TimelineClip.ID?
     @State private var configuringCaptions = false
     @State private var reviewingCaptions = false
     @State private var takeListActionCoordinator = TakeListActionCoordinator()
@@ -30,6 +30,7 @@ struct CameraScreen: View {
             cameraChrome
                 .allowsHitTesting(
                     !model.isExportingProject
+                        && !model.isEditingTimeline
                         && !model.isAnalyzingTrim
                         && !model.isTranscribingCaptions
                 )
@@ -82,12 +83,11 @@ struct CameraScreen: View {
                 TimelineReviewScreen(
                     snapshot: timelineSnapshot,
                     title: model.project.name,
-                    format: model.project.format ?? .portrait
+                    format: model.project.format ?? .portrait,
+                    model: model,
+                    initialSelectedClipID: initialTimelineClipID
                 )
             }
-        }
-        .sheet(isPresented: $reviewingTrim) {
-            TrimReviewQueueScreen(model: model)
         }
         .sheet(isPresented: $configuringCaptions) {
             CaptionSetupScreen(
@@ -107,7 +107,7 @@ struct CameraScreen: View {
         }
         .onChange(of: model.isAnalyzingTrim) { wasAnalyzing, isAnalyzing in
             if wasAnalyzing, !isAnalyzing, !model.trimReviewTakeIDs.isEmpty {
-                reviewingTrim = true
+                openTimeline(preferredTakeID: model.trimReviewTakeIDs.first)
             }
         }
         .onChange(of: model.isTranscribingCaptions) { wasTranscribing, isTranscribing in
@@ -145,16 +145,11 @@ struct CameraScreen: View {
         ) else { return }
         switch action {
         case .playProject:
-            guard let snapshot = model.timelinePlaybackSnapshot else {
-                model.reportInvalidTrimRange()
-                return
-            }
-            timelineSnapshot = snapshot
-            reviewingTimeline = true
+            openTimeline()
         case .analyzeEdges:
             model.cleanUpEdges()
         case .reviewEdges:
-            reviewingTrim = true
+            openTimeline(preferredTakeID: model.trimReviewTakeIDs.first)
         case .captionSettings:
             configuringCaptions = true
         case .reviewCaptions:
@@ -165,11 +160,23 @@ struct CameraScreen: View {
             else { configuringCaptions = true }
         case let .manageEdges(takeID):
             if model.prepareTrimReview(takeID: takeID) {
-                reviewingTrim = true
+                openTimeline(preferredTakeID: takeID)
             }
         case .exportProject:
             model.exportProject()
         }
+    }
+
+    private func openTimeline(preferredTakeID: UUID? = nil) {
+        guard let snapshot = model.timelinePlaybackSnapshot else {
+            model.reportInvalidTrimRange()
+            return
+        }
+        timelineSnapshot = snapshot
+        initialTimelineClipID = preferredTakeID.flatMap { takeID in
+            snapshot.clips.first(where: { $0.takeID == takeID })?.id
+        }
+        reviewingTimeline = true
     }
 
     private var previewScrim: some View {
