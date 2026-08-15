@@ -28,18 +28,51 @@ struct TimelineClip: Codable, Equatable, Hashable, Identifiable, Sendable {
     let takeID: UUID
     let availableRange: TakeRange
     let selection: TakeRange
+    let isMuted: Bool
 
     init(
         id: ID = ID(),
         takeID: UUID,
         availableRange: TakeRange,
-        selection: TakeRange
+        selection: TakeRange,
+        isMuted: Bool = false
     ) {
         self.id = id
         self.takeID = takeID
         self.availableRange = availableRange
         self.selection = selection
+        self.isMuted = isMuted
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case takeID
+        case availableRange
+        case selection
+        case isMuted
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(ID.self, forKey: .id)
+        takeID = try container.decode(UUID.self, forKey: .takeID)
+        availableRange = try container.decode(TakeRange.self, forKey: .availableRange)
+        selection = try container.decode(TakeRange.self, forKey: .selection)
+        isMuted = try container.decodeIfPresent(Bool.self, forKey: .isMuted) ?? false
+    }
+}
+
+struct TimelinePlacementContext: Codable, Equatable, Hashable, Sendable {
+    let previousClipID: TimelineClip.ID?
+    let nextClipID: TimelineClip.ID?
+    let originalIndex: Int
+}
+
+struct RemovedTimelineClip: Codable, Equatable, Hashable, Identifiable, Sendable {
+    let clip: TimelineClip
+    let placement: TimelinePlacementContext
+
+    var id: TimelineClip.ID { clip.id }
 }
 
 struct PrimaryStoryline: Codable, Equatable, Hashable, Sendable {

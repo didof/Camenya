@@ -6,6 +6,22 @@ import XCTest
 @testable import Camenya
 
 final class ProjectExporterTests: XCTestCase {
+    func testEmptyStorylineCannotCreateExportPlan() throws {
+        let snapshot = fixtureSnapshot(
+            projectID: UUID(),
+            format: .portrait,
+            sources: []
+        )
+
+        XCTAssertThrowsError(try ProjectExportPlan(snapshot: snapshot)) { error in
+            XCTAssertEqual(error as? ProjectExportError, .emptyTimeline)
+            XCTAssertEqual(
+                (error as? ProjectExportError)?.errorDescription,
+                "A Project needs at least one Storyline Clip before export."
+            )
+        }
+    }
+
     func testExportPlanUsesEveryTakeInTimelineOrder() throws {
         let root = URL(fileURLWithPath: "/projects")
         let store = ProjectStore(projectsRoot: root)

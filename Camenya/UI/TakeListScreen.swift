@@ -101,7 +101,7 @@ struct TakeListScreen: View {
                 } header: {
                     Text("Recorded Takes")
                 } footer: {
-                    Text("Each finalized Take is kept as source media and currently appears once in Project order.")
+                    Text("Finalized Takes are kept as source media. Edit their Clips and order in the Primary Storyline.")
                 }
 
             }
@@ -253,6 +253,10 @@ struct TakeListScreen: View {
                 .frame(maxWidth: .infinity, minHeight: 44)
             }
             .buttonStyle(.borderedProminent)
+            .disabled(!model.canExportProject)
+            .accessibilityHint(model.canExportProject
+                ? "Creates the explicit finalized Project Export before saving to Photos."
+                : "Add at least one Clip to the Primary Storyline before exporting.")
         }
         .font(.caption.weight(.semibold))
         .buttonStyle(.bordered)

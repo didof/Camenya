@@ -333,6 +333,34 @@ final class PlaybackControllerTests: XCTestCase {
         XCTAssertNil(session.state.selectedClipID)
     }
 
+    func testReplacingPlaybackWithEmptyStorylineClearsInstalledVideo() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let movieURL = root.appendingPathComponent("installed.mov")
+        try await makeMovie(at: movieURL)
+        let populated = makeSnapshot(mediaURL: movieURL)
+        let session = TimelinePlaybackSession(snapshot: populated)
+        await waitForPhase(.paused, in: session)
+        XCTAssertNotNil(session.player.currentItem)
+
+        let empty = ExportSnapshot(
+            projectID: populated.projectID,
+            revision: StorylineRevision(rawValue: populated.revision.rawValue + 1),
+            format: populated.format,
+            captionConfiguration: populated.captionConfiguration,
+            clips: [],
+            duration: .zero
+        )
+        session.replaceSnapshot(empty, selectedClipID: nil, projectTime: .zero)
+
+        XCTAssertEqual(session.state.phase, .empty)
+        XCTAssertNil(session.state.selectedClipID)
+        XCTAssertNil(session.player.currentItem)
+        XCTAssertTrue(session.player.items().isEmpty)
+    }
+
     func testSeekToProjectEndInvalidatesOlderPreparation() async {
         let session = TimelinePlaybackSession(snapshot: makeSnapshot(
             mediaURL: URL(fileURLWithPath: "/tmp/stale-preparation.mov")

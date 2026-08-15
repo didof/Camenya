@@ -295,7 +295,8 @@ struct ProjectStore: Sendable {
         guard let index = project.takes.firstIndex(where: { $0.id == takeID }) else {
             throw ProjectStoreError.takeNotFound(takeID)
         }
-        guard !project.primaryStoryline.clips.contains(where: { $0.takeID == takeID }) else {
+        guard !project.primaryStoryline.clips.contains(where: { $0.takeID == takeID }),
+              !project.removedClips.contains(where: { $0.clip.takeID == takeID }) else {
             throw ProjectStoreError.takeReferencedByStoryline(takeID)
         }
         let sourceDirectory = takeDirectory(projectID: projectID, takeID: takeID)
@@ -472,7 +473,8 @@ struct ProjectStore: Sendable {
             id: clip.id,
             takeID: clip.takeID,
             availableRange: clip.availableRange,
-            selection: selection
+            selection: selection,
+            isMuted: clip.isMuted
         )
         project.primaryStoryline.revision = try project.primaryStoryline.revision.incremented()
         if var captions = project.takes[index].captions {
@@ -601,7 +603,8 @@ struct ProjectStore: Sendable {
             id: clip.id,
             takeID: clip.takeID,
             availableRange: clip.availableRange,
-            selection: TakeRange(startSeconds: 0, endSeconds: project.takes[index].duration)
+            selection: TakeRange(startSeconds: 0, endSeconds: project.takes[index].duration),
+            isMuted: clip.isMuted
         )
         project.primaryStoryline.revision = try project.primaryStoryline.revision.incremented()
         if var captions = project.takes[index].captions {

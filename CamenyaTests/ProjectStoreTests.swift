@@ -59,6 +59,62 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertNil(migrated.takes.first?.captions)
     }
 
+    func testSchemaFourProjectMigratesRemovedClipBaselineWithoutChangingStoryline() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let projectID = UUID()
+        let take = ProjectTake(
+            id: UUID(),
+            createdAt: Date(timeIntervalSince1970: 1),
+            duration: 5
+        )
+        let clip = TimelineClip(
+            takeID: take.id,
+            availableRange: TakeRange(startSeconds: 0, endSeconds: 5),
+            selection: TakeRange(startSeconds: 1, endSeconds: 4)
+        )
+        let legacy = ProjectManifest(
+            schemaVersion: 4,
+            id: projectID,
+            createdAt: Date(timeIntervalSince1970: 0),
+            modifiedAt: Date(timeIntervalSince1970: 1),
+            name: "Schema Four",
+            format: .portrait,
+            takes: [take],
+            primaryStoryline: PrimaryStoryline(
+                revision: StorylineRevision(rawValue: 3),
+                clips: [clip]
+            )
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoder.encode(legacy)) as? [String: Any]
+        )
+        object.removeValue(forKey: "removedClips")
+        var storyline = try XCTUnwrap(object["primaryStoryline"] as? [String: Any])
+        var clips = try XCTUnwrap(storyline["clips"] as? [[String: Any]])
+        clips[0].removeValue(forKey: "isMuted")
+        storyline["clips"] = clips
+        object["primaryStoryline"] = storyline
+        let directory = store.projectDirectory(id: projectID)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: object).write(
+            to: directory.appendingPathComponent("project.json")
+        )
+
+        let migrated = try store.load(id: projectID)
+
+        XCTAssertEqual(migrated.schemaVersion, ProjectManifest.currentSchemaVersion)
+        XCTAssertEqual(migrated.primaryStoryline.revision, StorylineRevision(rawValue: 3))
+        XCTAssertEqual(migrated.primaryStoryline.clips.map(\.id), [clip.id])
+        XCTAssertEqual(migrated.primaryStoryline.clips.map(\.selection), [clip.selection])
+        XCTAssertEqual(migrated.primaryStoryline.clips.map(\.isMuted), [false])
+        XCTAssertTrue(migrated.removedClips.isEmpty)
+    }
+
     func testUnreviewedTrimSuggestionPersistsWithoutChangingEffectiveDuration() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }

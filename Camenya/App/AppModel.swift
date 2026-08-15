@@ -391,6 +391,25 @@ final class AppModel: ObservableObject {
         return outcome
     }
 
+    func deleteUnusedTakePermanently(_ takeID: UUID) async throws {
+        guard phase == .idle, !isExportingProject else {
+            throw TimelineEditorError.editingUnavailable
+        }
+        guard timelineEditActivity.begin() else {
+            throw TimelineEditorError.editingUnavailable
+        }
+        isEditingTimeline = true
+        defer {
+            timelineEditActivity.finish()
+            isEditingTimeline = false
+        }
+        let updated = try projectStore.deleteTake(projectID: project.id, takeID: takeID)
+        trimReviewTakeIDs.removeAll { $0 == takeID }
+        captionReviewTakeIDs.removeAll { $0 == takeID }
+        project = updated
+        onProjectChanged(updated)
+    }
+
     var trimReviewTakes: [ProjectTake] {
         trimReviewTakeIDs.compactMap { id in project.takes.first(where: { $0.id == id }) }
     }
@@ -742,9 +761,13 @@ final class AppModel: ObservableObject {
             && !isTranscribingCaptions
     }
 
+    var canExportProject: Bool {
+        canManageTakes
+            && (canRetryProjectExportSave || exportSnapshot?.clips.isEmpty == false)
+    }
+
     func exportProject() {
         guard phase == .idle,
-              !project.takes.isEmpty,
               !isExportingProject,
               !isEditingTimeline,
               !isAnalyzingTrim else { return }
@@ -759,7 +782,7 @@ final class AppModel: ObservableObject {
             return
         }
         do {
-            guard let exportSnapshot else {
+            guard let exportSnapshot, !exportSnapshot.clips.isEmpty else {
                 throw TimelineEditorError.corruptPrimaryStoryline
             }
             let plan = try ProjectExportPlan(snapshot: exportSnapshot)

@@ -20,6 +20,10 @@ enum TimelineEdit: Equatable, Sendable {
     case resetTrim(clipID: TimelineClip.ID)
     case split(clipID: TimelineClip.ID, at: ProjectTime)
     case move(clipID: TimelineClip.ID, toIndex: Int)
+    case remove(clipID: TimelineClip.ID)
+    case restore(clipID: TimelineClip.ID)
+    case deleteRemovedClipPermanently(clipID: TimelineClip.ID)
+    case addFullTakeToStoryline(takeID: UUID)
     case nudgeTrim(
         clipID: TimelineClip.ID,
         edge: TimelineTrimEdge,
@@ -96,6 +100,42 @@ enum TimelineSplitRules {
             return nil
         }
         return sourceTime
+    }
+}
+
+enum TimelineRemovalRules {
+    static func placement(removingAt index: Int, from clips: [TimelineClip]) -> TimelinePlacementContext {
+        TimelinePlacementContext(
+            previousClipID: index > clips.startIndex ? clips[index - 1].id : nil,
+            nextClipID: index + 1 < clips.endIndex ? clips[index + 1].id : nil,
+            originalIndex: index
+        )
+    }
+
+    static func restorationIndex(
+        placement: TimelinePlacementContext,
+        activeClips: [TimelineClip]
+    ) -> Int {
+        let previousIndex = placement.previousClipID.flatMap { id in
+            activeClips.firstIndex { $0.id == id }
+        }
+        let nextIndex = placement.nextClipID.flatMap { id in
+            activeClips.firstIndex { $0.id == id }
+        }
+
+        if let previousIndex, let nextIndex, previousIndex + 1 == nextIndex {
+            return nextIndex
+        }
+
+        let candidates = [previousIndex.map { $0 + 1 }, nextIndex].compactMap { $0 }
+        if let nearest = candidates.min(by: {
+            let leftDistance = abs($0 - placement.originalIndex)
+            let rightDistance = abs($1 - placement.originalIndex)
+            return leftDistance == rightDistance ? $0 < $1 : leftDistance < rightDistance
+        }) {
+            return min(max(nearest, 0), activeClips.count)
+        }
+        return min(max(placement.originalIndex, 0), activeClips.count)
     }
 }
 
@@ -313,7 +353,8 @@ actor TimelineEditor {
                 selection: TakeRange(
                     start: clip.selection.start,
                     end: sourceTime
-                )
+                ),
+                isMuted: clip.isMuted
             )
             let right = TimelineClip(
                 takeID: clip.takeID,
@@ -324,7 +365,8 @@ actor TimelineEditor {
                 selection: TakeRange(
                     start: sourceTime,
                     end: clip.selection.end
-                )
+                ),
+                isMuted: clip.isMuted
             )
             project.primaryStoryline.clips.replaceSubrange(
                 clipIndex...clipIndex,
@@ -339,6 +381,50 @@ actor TimelineEditor {
             }
             let clip = project.primaryStoryline.clips.remove(at: sourceIndex)
             project.primaryStoryline.clips.insert(clip, at: destinationIndex)
+            focusedClipID = clip.id
+        case let .remove(clipID):
+            let clipIndex = try clipIndex(for: clipID, in: project)
+            let placement = TimelineRemovalRules.placement(
+                removingAt: clipIndex,
+                from: project.primaryStoryline.clips
+            )
+            let clip = project.primaryStoryline.clips.remove(at: clipIndex)
+            project.removedClips.append(RemovedTimelineClip(clip: clip, placement: placement))
+            if !project.primaryStoryline.clips.isEmpty {
+                focusedClipID = project.primaryStoryline.clips[
+                    min(clipIndex, project.primaryStoryline.clips.count - 1)
+                ].id
+            }
+        case let .restore(clipID):
+            guard let removedIndex = project.removedClips.firstIndex(where: { $0.id == clipID }) else {
+                throw TimelineEditorError.invalidClip(clipID)
+            }
+            let removed = project.removedClips.remove(at: removedIndex)
+            let destination = TimelineRemovalRules.restorationIndex(
+                placement: removed.placement,
+                activeClips: project.primaryStoryline.clips
+            )
+            project.primaryStoryline.clips.insert(removed.clip, at: destination)
+            focusedClipID = removed.clip.id
+        case let .deleteRemovedClipPermanently(clipID):
+            guard let removedIndex = project.removedClips.firstIndex(where: { $0.id == clipID }) else {
+                throw TimelineEditorError.invalidClip(clipID)
+            }
+            project.removedClips.remove(at: removedIndex)
+        case let .addFullTakeToStoryline(takeID):
+            guard !project.primaryStoryline.clips.contains(where: { $0.takeID == takeID }),
+                  let take = project.takes.first(where: { $0.id == takeID }),
+                  take.duration.isFinite,
+                  take.duration > 0 else {
+                throw TimelineEditorError.missingTake(takeID)
+            }
+            let fullRange = TakeRange(startSeconds: 0, endSeconds: take.duration)
+            let clip = TimelineClip(
+                takeID: take.id,
+                availableRange: fullRange,
+                selection: fullRange
+            )
+            project.primaryStoryline.clips.append(clip)
             focusedClipID = clip.id
         case let .nudgeTrim(clipID, edge, direction):
             let clipIndex = try clipIndex(for: clipID, in: project)
@@ -501,7 +587,8 @@ private extension TimelineClip {
             id: id,
             takeID: takeID,
             availableRange: availableRange,
-            selection: selection
+            selection: selection,
+            isMuted: isMuted
         )
     }
 }

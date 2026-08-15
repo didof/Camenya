@@ -61,7 +61,7 @@ enum ProjectExportError: Error, LocalizedError, Equatable {
 
     var errorDescription: String? {
         switch self {
-        case .emptyTimeline: "A Project needs at least one Take before export."
+        case .emptyTimeline: "A Project needs at least one Storyline Clip before export."
         case .missingFormat: "The Project format is unavailable."
         case let .missingVideoTrack(name): "\(name) has no video track."
         case .invalidTakeRange: "An approved Take selection is outside its original media. Reset it and try again."

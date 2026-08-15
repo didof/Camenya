@@ -169,6 +169,7 @@ final class TimelinePlaybackSession: ObservableObject {
         preparationGeneration += 1
         preparationTask?.cancel()
         player.pause()
+        clearInstalledItems()
         self.snapshot = snapshot
         sources = TimelinePlaybackSource.make(snapshot: snapshot)
         let clips = Self.makeFilmstripClips(snapshot: snapshot)
@@ -370,17 +371,14 @@ final class TimelinePlaybackSession: ObservableObject {
                 self.install(items: prepared, localTime: localTime, playWhenReady: playWhenReady)
             } catch {
                 guard !Task.isCancelled, let self, generation == self.preparationGeneration else { return }
-                self.player.removeAllItems()
+                self.clearInstalledItems()
                 self.state.phase = .failed
             }
         }
     }
 
     private func install(items: [(Int, AVPlayerItem)], localTime: TimeInterval, playWhenReady: Bool) {
-        completionObservers.forEach(NotificationCenter.default.removeObserver)
-        completionObservers.removeAll()
-        installedItemIndices.removeAll()
-        player.removeAllItems()
+        clearInstalledItems()
         for (index, item) in items {
             installedItemIndices[ObjectIdentifier(item)] = index
             completionObservers.append(NotificationCenter.default.addObserver(
@@ -402,13 +400,18 @@ final class TimelinePlaybackSession: ObservableObject {
         sourceIndex: Int,
         localTime: TimeInterval
     ) {
-        completionObservers.forEach(NotificationCenter.default.removeObserver)
-        completionObservers.removeAll()
+        clearInstalledItems()
         installedItemIndices = [ObjectIdentifier(item): sourceIndex]
-        player.removeAllItems()
         player.insert(item, after: nil)
         player.seek(to: CMTime(seconds: localTime, preferredTimescale: 600))
         state.phase = .paused
+    }
+
+    private func clearInstalledItems() {
+        completionObservers.forEach(NotificationCenter.default.removeObserver)
+        completionObservers.removeAll()
+        installedItemIndices.removeAll()
+        player.removeAllItems()
     }
 
     private func itemDidFinish(_ item: AVPlayerItem?) {
@@ -537,6 +540,19 @@ struct TimelineReviewScreen: View {
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    NavigationLink {
+                        RemovedUnusedScreen(
+                            model: model,
+                            onTimelineEdit: commit,
+                            onDeleteTake: model.deleteUnusedTakePermanently
+                        )
+                    } label: {
+                        Label("Removed & Unused", systemImage: "archivebox")
+                    }
+                    .disabled(isCommittingEdit || model.isEditingTimeline)
+                    .accessibilityHint("Manage recoverable removed Clips and Takes not used by the Storyline.")
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                         .disabled(isCommittingEdit || model.isEditingTimeline)
@@ -594,11 +610,11 @@ struct TimelineReviewScreen: View {
     }
 
     private var emptyState: some View {
-        ContentUnavailableView(
-            "Storyline Empty",
-            systemImage: "film.stack",
-            description: Text("Record a Take to add its first Clip.")
-        )
+        ContentUnavailableView {
+            Label("Storyline Empty", systemImage: "film.stack")
+        } description: {
+            Text("Record a Take to add a Clip automatically, or restore removed and unused media. Export requires at least one playable Clip.")
+        }
     }
 
     private var playbackStatus: some View {
@@ -705,7 +721,14 @@ struct TimelineReviewScreen: View {
                     edit,
                     expectedRevision: expectedRevision
                 )
-                if case .move = edit, !reduceMotion {
+                let animatesStructure: Bool
+                switch edit {
+                case .move, .remove, .restore, .addFullTakeToStoryline:
+                    animatesStructure = true
+                case .trim, .resetTrim, .split, .deleteRemovedClipPermanently, .nudgeTrim:
+                    animatesStructure = false
+                }
+                if animatesStructure, !reduceMotion {
                     withAnimation(.easeOut(duration: 0.2)) {
                         replacePlaybackSnapshot(
                             outcome,
@@ -739,6 +762,45 @@ struct TimelineReviewScreen: View {
                         argument: ordinal.map {
                             "Move complete. Clip \($0) of \(outcome.snapshot.clips.count) selected."
                         } ?? "Move complete."
+                    )
+                } else if case .remove = edit {
+                    let ordinal = outcome.focus.flatMap { focus in
+                        outcome.snapshot.clips.firstIndex(where: { $0.id == focus.clipID })
+                    }.map { $0 + 1 }
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                    UIAccessibility.post(
+                        notification: .announcement,
+                        argument: outcome.snapshot.clips.isEmpty
+                            ? "Clip removed. Storyline empty. The Clip remains available in Removed and Unused."
+                            : ordinal.map {
+                                "Clip removed. Clip \($0) of \(outcome.snapshot.clips.count) selected."
+                            } ?? "Clip removed. Another Clip is selected."
+                    )
+                } else if case .restore = edit, let focus = outcome.focus {
+                    let ordinal = outcome.snapshot.clips.firstIndex(where: { $0.id == focus.clipID })
+                        .map { $0 + 1 }
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                    UIAccessibility.post(
+                        notification: .announcement,
+                        argument: ordinal.map {
+                            "Clip restored at position \($0) of \(outcome.snapshot.clips.count)."
+                        } ?? "Clip restored."
+                    )
+                } else if case .addFullTakeToStoryline = edit, let focus = outcome.focus {
+                    let ordinal = outcome.snapshot.clips.firstIndex(where: { $0.id == focus.clipID })
+                        .map { $0 + 1 }
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                    UIAccessibility.post(
+                        notification: .announcement,
+                        argument: ordinal.map {
+                            "Full Take added as Clip \($0) of \(outcome.snapshot.clips.count)."
+                        } ?? "Full Take added to the Storyline."
+                    )
+                } else if case .deleteRemovedClipPermanently = edit {
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                    UIAccessibility.post(
+                        notification: .announcement,
+                        argument: "Removed Clip metadata deleted permanently. The Take media remains available."
                     )
                 }
             } catch {
@@ -874,6 +936,14 @@ private struct TimelineTrimInspector: View {
                     .foregroundStyle(.secondary)
             }
 
+            Button("Remove Clip", systemImage: "archivebox") {
+                onCommit(.remove(clipID: clip.id))
+            }
+            .buttonStyle(.bordered)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .disabled(isCommitting)
+            .accessibilityHint("Removes this Clip from the Storyline without deleting its Take media. You can restore it from Removed and Unused.")
+
             if isCommitting {
                 ProgressView("Saving Edit…")
                     .font(.callout)
@@ -1003,6 +1073,225 @@ private struct TimelineTrimInspector: View {
             projectTimeRange: clip.projectTimeRange,
             at: projectTime
         )
+    }
+}
+
+private struct RemovedUnusedScreen: View {
+    private enum PendingDeletion: Identifiable {
+        case removedClip(TimelineClip.ID)
+        case take(UUID)
+
+        var id: String {
+            switch self {
+            case let .removedClip(id): "clip-\(id.rawValue.uuidString)"
+            case let .take(id): "take-\(id.uuidString)"
+            }
+        }
+    }
+
+    @ObservedObject var model: AppModel
+    let onTimelineEdit: (TimelineEdit) -> Void
+    let onDeleteTake: (UUID) async throws -> Void
+    @State private var pendingDeletion: PendingDeletion?
+    @State private var deleteErrorMessage: String?
+    @State private var isDeletingTake = false
+
+    var body: some View {
+        Group {
+            if model.project.removedClips.isEmpty && model.project.unusedTakes.isEmpty {
+                ContentUnavailableView(
+                    "Nothing Removed or Unused",
+                    systemImage: "archivebox",
+                    description: Text("Removed Clips stay recoverable here. Takes appear here when no active Clip uses them.")
+                )
+            } else {
+                List {
+                    if !model.project.removedClips.isEmpty {
+                        Section("Removed Clips") {
+                            ForEach(model.project.removedClips) { removed in
+                                removedClipRow(removed)
+                            }
+                        }
+                    }
+                    if !model.project.unusedTakes.isEmpty {
+                        Section {
+                            ForEach(model.project.unusedTakes) { take in
+                                unusedTakeRow(take)
+                            }
+                        } header: {
+                            Text("Unused Takes")
+                        } footer: {
+                            Text("Adding a full Take creates a new Clip. Deleting a Take permanently removes its source media.")
+                        }
+                    }
+                }
+            }
+        }
+        .navigationTitle("Removed & Unused")
+        .navigationBarTitleDisplayMode(.inline)
+        .disabled(model.isEditingTimeline || isDeletingTake)
+        .interactiveDismissDisabled(model.isEditingTimeline || isDeletingTake)
+        .confirmationDialog(
+            deletionTitle,
+            isPresented: Binding(
+                get: { pendingDeletion != nil },
+                set: { if !$0 { pendingDeletion = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: pendingDeletion
+        ) { deletion in
+            switch deletion {
+            case let .removedClip(clipID):
+                Button("Delete Removed Clip", role: .destructive) {
+                    onTimelineEdit(.deleteRemovedClipPermanently(clipID: clipID))
+                }
+            case let .take(takeID):
+                Button("Delete Take", role: .destructive) {
+                    deleteTake(takeID)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { deletion in
+            Text(deletionMessage(for: deletion))
+        }
+        .alert("Take Not Deleted", isPresented: Binding(
+            get: { deleteErrorMessage != nil },
+            set: { if !$0 { deleteErrorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) { deleteErrorMessage = nil }
+        } message: {
+            Text(deleteErrorMessage ?? "The Take source media is unchanged.")
+        }
+    }
+
+    private func removedClipRow(_ removed: RemovedTimelineClip) -> some View {
+        let take = model.project.takes.first { $0.id == removed.clip.takeID }
+        let takeNumber = model.project.takes.firstIndex { $0.id == removed.clip.takeID }.map { $0 + 1 }
+        return VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(takeNumber.map { "Removed Clip from Take \($0)" } ?? "Removed Clip")
+                    .font(.headline)
+                if let createdAt = take?.createdAt {
+                    Text(createdAt.formatted(date: .abbreviated, time: .shortened))
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                Text("Source \(time(removed.clip.selection.start.seconds))–\(time(removed.clip.selection.end.seconds)) · \(time(removed.clip.selection.duration))")
+                    .font(.subheadline.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Label(removed.clip.isMuted ? "Muted" : "Audio included", systemImage: removed.clip.isMuted ? "speaker.slash" : "speaker.wave.2")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) { removedClipActions(removed) }
+                VStack(alignment: .leading, spacing: 8) { removedClipActions(removed) }
+            }
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .contain)
+    }
+
+    @ViewBuilder
+    private func removedClipActions(_ removed: RemovedTimelineClip) -> some View {
+        Button("Restore Clip", systemImage: "arrow.uturn.backward") {
+            onTimelineEdit(.restore(clipID: removed.id))
+        }
+        .buttonStyle(.borderedProminent)
+        .frame(minHeight: 44)
+        .accessibilityHint("Restores the exact saved Clip near its original Storyline position.")
+
+        Button("Delete Removed Clip Permanently", systemImage: "trash", role: .destructive) {
+            pendingDeletion = .removedClip(removed.id)
+        }
+        .buttonStyle(.bordered)
+        .frame(minHeight: 44)
+        .accessibilityHint("Deletes only the removed Clip metadata, not the Take media.")
+    }
+
+    private func unusedTakeRow(_ take: ProjectTake) -> some View {
+        let takeNumber = model.project.takes.firstIndex(of: take).map { $0 + 1 }
+        let dependentClips = model.project.removedClips.filter { $0.clip.takeID == take.id }
+        return VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(takeNumber.map { "Take \($0)" } ?? "Unused Take")
+                    .font(.headline)
+                Text(take.createdAt.formatted(date: .abbreviated, time: .shortened))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Text("Full source · \(time(take.duration))")
+                    .font(.subheadline.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            Button("Add Full Take to Storyline", systemImage: "plus.rectangle.on.rectangle") {
+                onTimelineEdit(.addFullTakeToStoryline(takeID: take.id))
+            }
+            .buttonStyle(.borderedProminent)
+            .frame(minHeight: 44)
+            .accessibilityHint("Creates a new full-length Clip at the end of the Storyline.")
+
+            if dependentClips.isEmpty {
+                Button("Delete Take Permanently", systemImage: "trash", role: .destructive) {
+                    pendingDeletion = .take(take.id)
+                }
+                .buttonStyle(.bordered)
+                .frame(minHeight: 44)
+                .accessibilityHint("Permanently deletes this unused Take source media.")
+            } else {
+                Text("Delete these removed Clips before deleting this Take:")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                ForEach(dependentClips) { removed in
+                    Label(
+                        "Removed Clip, source \(time(removed.clip.selection.start.seconds))–\(time(removed.clip.selection.end.seconds))",
+                        systemImage: "link"
+                    )
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .contain)
+    }
+
+    private func deleteTake(_ takeID: UUID) {
+        guard !isDeletingTake else { return }
+        isDeletingTake = true
+        Task {
+            defer { isDeletingTake = false }
+            do {
+                try await onDeleteTake(takeID)
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                UIAccessibility.post(notification: .announcement, argument: "Take deleted permanently.")
+            } catch {
+                deleteErrorMessage = "Camenya couldn't delete this Take. Its source media is unchanged."
+            }
+        }
+    }
+
+    private var deletionTitle: String {
+        switch pendingDeletion {
+        case .removedClip: "Delete Removed Clip Permanently?"
+        case .take: "Delete Take Permanently?"
+        case nil: "Confirm Permanent Deletion"
+        }
+    }
+
+    private func deletionMessage(for deletion: PendingDeletion) -> String {
+        switch deletion {
+        case .removedClip:
+            "This deletes the saved Clip edit metadata. The original Take media remains available."
+        case .take:
+            "This permanently deletes the Take source media. This cannot be undone."
+        }
+    }
+
+    private func time(_ seconds: TimeInterval) -> String {
+        let safeSeconds = max(0, seconds.isFinite ? seconds : 0)
+        let minutes = Int(safeSeconds) / 60
+        let remainingSeconds = safeSeconds - TimeInterval(minutes * 60)
+        return String(format: "%02d:%04.1f", minutes, remainingSeconds)
     }
 }
 

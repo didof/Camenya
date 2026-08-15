@@ -506,6 +506,188 @@ final class TimelineEditorTests: XCTestCase {
         XCTAssertEqual(persisted.clips.map(\.id), [first.clip.id, second.clip.id])
     }
 
+    func testRemoveAndRestorePersistExactClipWithoutDeletingTakeMedia() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let editor = TimelineEditor(projectID: project.id, projectStore: store)
+        let completed = try await editor.completeFinalizedTake(
+            FinalizedTake(
+                id: UUID(),
+                movieURL: try makeMovie(in: root),
+                orientation: .portrait,
+                duration: 10,
+                createdAt: Date(timeIntervalSince1970: 1)
+            ),
+            expectedRevision: .zero
+        )
+        var seeded = try store.load(id: project.id)
+        seeded.primaryStoryline.clips[0] = TimelineClip(
+            id: completed.clip.id,
+            takeID: completed.take.id,
+            availableRange: TakeRange(startSeconds: 1, endSeconds: 9),
+            selection: TakeRange(startSeconds: 2, endSeconds: 8),
+            isMuted: true
+        )
+        try store.persist(seeded, expectedRevision: completed.snapshot.revision)
+
+        let removed = try await editor.perform(
+            .remove(clipID: completed.clip.id),
+            expectedRevision: completed.snapshot.revision
+        )
+
+        XCTAssertTrue(removed.snapshot.clips.isEmpty)
+        XCTAssertEqual(removed.snapshot.duration, .zero)
+        XCTAssertEqual(removed.project.removedClips.count, 1)
+        XCTAssertEqual(removed.project.removedClips[0].clip, seeded.primaryStoryline.clips[0])
+        XCTAssertEqual(
+            removed.project.removedClips[0].placement,
+            TimelinePlacementContext(previousClipID: nil, nextClipID: nil, originalIndex: 0)
+        )
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: store.takeMovieURL(projectID: project.id, takeID: completed.take.id).path
+        ))
+
+        let restored = try await editor.perform(
+            .restore(clipID: completed.clip.id),
+            expectedRevision: removed.snapshot.revision
+        )
+
+        XCTAssertEqual(restored.project.primaryStoryline.clips, [seeded.primaryStoryline.clips[0]])
+        XCTAssertTrue(restored.project.removedClips.isEmpty)
+        XCTAssertEqual(restored.snapshot.duration, ProjectTime(seconds: 6))
+        XCTAssertEqual(
+            restored.focus,
+            TimelineEditFocus(clipID: completed.clip.id, projectTime: .zero)
+        )
+    }
+
+    func testRestoreUsesOriginalNeighborsThenNearestValidPosition() {
+        let first = TimelineClip(
+            takeID: UUID(),
+            availableRange: TakeRange(startSeconds: 0, endSeconds: 2),
+            selection: TakeRange(startSeconds: 0, endSeconds: 2)
+        )
+        let second = TimelineClip(
+            takeID: UUID(),
+            availableRange: TakeRange(startSeconds: 0, endSeconds: 2),
+            selection: TakeRange(startSeconds: 0, endSeconds: 2)
+        )
+        let third = TimelineClip(
+            takeID: UUID(),
+            availableRange: TakeRange(startSeconds: 0, endSeconds: 2),
+            selection: TakeRange(startSeconds: 0, endSeconds: 2)
+        )
+        let context = TimelinePlacementContext(
+            previousClipID: first.id,
+            nextClipID: third.id,
+            originalIndex: 1
+        )
+
+        XCTAssertEqual(
+            TimelineRemovalRules.restorationIndex(
+                placement: context,
+                activeClips: [first, third]
+            ),
+            1
+        )
+        XCTAssertEqual(
+            TimelineRemovalRules.restorationIndex(
+                placement: context,
+                activeClips: [third]
+            ),
+            0
+        )
+        XCTAssertEqual(
+            TimelineRemovalRules.restorationIndex(
+                placement: context,
+                activeClips: [second]
+            ),
+            1
+        )
+    }
+
+    func testUnusedTakeCanAddFullClipWhileRemovedClipRemainsRecoverable() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let editor = TimelineEditor(projectID: project.id, projectStore: store)
+        let completed = try await editor.completeFinalizedTake(
+            FinalizedTake(
+                id: UUID(),
+                movieURL: try makeMovie(in: root),
+                orientation: .portrait,
+                duration: 7,
+                createdAt: Date(timeIntervalSince1970: 1)
+            ),
+            expectedRevision: .zero
+        )
+        let removed = try await editor.perform(
+            .remove(clipID: completed.clip.id),
+            expectedRevision: completed.snapshot.revision
+        )
+
+        XCTAssertEqual(removed.project.unusedTakes.map(\.id), [completed.take.id])
+
+        let added = try await editor.perform(
+            .addFullTakeToStoryline(takeID: completed.take.id),
+            expectedRevision: removed.snapshot.revision
+        )
+
+        XCTAssertEqual(added.snapshot.clips.count, 1)
+        XCTAssertNotEqual(added.snapshot.clips[0].id, completed.clip.id)
+        XCTAssertEqual(added.snapshot.clips[0].selection, TakeRange(startSeconds: 0, endSeconds: 7))
+        XCTAssertEqual(added.project.removedClips.map(\.id), [completed.clip.id])
+        XCTAssertTrue(added.project.unusedTakes.isEmpty)
+    }
+
+    func testRemovedClipMetadataMustBeDeletedBeforeUnusedTakeCanBeDeleted() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let editor = TimelineEditor(projectID: project.id, projectStore: store)
+        let completed = try await editor.completeFinalizedTake(
+            FinalizedTake(
+                id: UUID(),
+                movieURL: try makeMovie(in: root),
+                orientation: .portrait,
+                duration: 4,
+                createdAt: Date(timeIntervalSince1970: 1)
+            ),
+            expectedRevision: .zero
+        )
+        let removed = try await editor.perform(
+            .remove(clipID: completed.clip.id),
+            expectedRevision: completed.snapshot.revision
+        )
+
+        XCTAssertThrowsError(try store.deleteTake(
+            projectID: project.id,
+            takeID: completed.take.id
+        )) { error in
+            XCTAssertEqual(error as? ProjectStoreError, .takeReferencedByStoryline(completed.take.id))
+        }
+
+        let discarded = try await editor.perform(
+            .deleteRemovedClipPermanently(clipID: completed.clip.id),
+            expectedRevision: removed.snapshot.revision
+        )
+        XCTAssertTrue(discarded.project.removedClips.isEmpty)
+        XCTAssertEqual(discarded.project.unusedTakes.map(\.id), [completed.take.id])
+
+        let deleted = try store.deleteTake(projectID: project.id, takeID: completed.take.id)
+        XCTAssertTrue(deleted.takes.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: store.takeMovieURL(projectID: project.id, takeID: completed.take.id).path
+        ))
+    }
+
     func testOrdinaryTrimThroughApprovedCueOmitsUnsafeCaptionUntilPhaseNineReview() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
