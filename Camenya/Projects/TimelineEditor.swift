@@ -24,6 +24,7 @@ enum TimelineEdit: Equatable, Sendable {
     case restore(clipID: TimelineClip.ID)
     case deleteRemovedClipPermanently(clipID: TimelineClip.ID)
     case addFullTakeToStoryline(takeID: UUID)
+    case setMuted(clipID: TimelineClip.ID, isMuted: Bool)
     case nudgeTrim(
         clipID: TimelineClip.ID,
         edge: TimelineTrimEdge,
@@ -504,6 +505,13 @@ actor TimelineEditor {
             )
             project.primaryStoryline.clips.append(clip)
             focusedClipID = clip.id
+        case let .setMuted(clipID, isMuted):
+            let clipIndex = try clipIndex(for: clipID, in: project)
+            let clip = project.primaryStoryline.clips[clipIndex]
+            guard clip.isMuted != isMuted else {
+                throw TimelineEditorError.invalidClip(clipID)
+            }
+            project.primaryStoryline.clips[clipIndex] = clip.replacingMutedState(with: isMuted)
         case let .nudgeTrim(clipID, edge, direction):
             let clipIndex = try clipIndex(for: clipID, in: project)
             let clip = project.primaryStoryline.clips[clipIndex]
@@ -640,6 +648,7 @@ actor TimelineEditor {
                 availableRange: clip.availableRange,
                 selection: clip.selection,
                 trimSuggestion: trimSuggestion,
+                isMuted: clip.isMuted,
                 projectTimeRange: ProjectTimeRange(
                     start: ProjectTime(seconds: start),
                     end: ProjectTime(seconds: cursor)
@@ -719,6 +728,16 @@ actor TimelineEditor {
 
 private extension TimelineClip {
     func replacingSelection(with selection: TakeRange) -> TimelineClip {
+        TimelineClip(
+            id: id,
+            takeID: takeID,
+            availableRange: availableRange,
+            selection: selection,
+            isMuted: isMuted
+        )
+    }
+
+    func replacingMutedState(with isMuted: Bool) -> TimelineClip {
         TimelineClip(
             id: id,
             takeID: takeID,

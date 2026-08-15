@@ -6,15 +6,18 @@ private struct TimelinePlaybackSource: Equatable, Sendable {
     let url: URL
     let selection: TakeRange?
     let sourceRange: TakeRange?
+    let isMuted: Bool
 
     init(
         url: URL,
         selection: TakeRange?,
-        sourceRange: TakeRange? = nil
+        sourceRange: TakeRange? = nil,
+        isMuted: Bool = false
     ) {
         self.url = url
         self.selection = selection
         self.sourceRange = sourceRange
+        self.isMuted = isMuted
     }
 
     static func make(snapshot: ExportSnapshot) -> [TimelinePlaybackSource] {
@@ -22,7 +25,8 @@ private struct TimelinePlaybackSource: Equatable, Sendable {
             TimelinePlaybackSource(
                 url: $0.mediaURL,
                 selection: $0.selection,
-                sourceRange: $0.sourceRange
+                sourceRange: $0.sourceRange,
+                isMuted: $0.isMuted
             )
         }
     }
@@ -47,6 +51,7 @@ final class TimelinePlaybackSession: ObservableObject {
         let availableRange: TakeRange
         let selection: TakeRange
         let trimSuggestion: TakeRange?
+        let isMuted: Bool
 
         init(
             id: TimelineClip.ID,
@@ -55,7 +60,8 @@ final class TimelinePlaybackSession: ObservableObject {
             sourceCreatedAt: Date?,
             availableRange: TakeRange = TakeRange(startSeconds: 0, endSeconds: 0),
             selection: TakeRange = TakeRange(startSeconds: 0, endSeconds: 0),
-            trimSuggestion: TakeRange? = nil
+            trimSuggestion: TakeRange? = nil,
+            isMuted: Bool = false
         ) {
             self.id = id
             self.projectTimeRange = projectTimeRange
@@ -64,6 +70,7 @@ final class TimelinePlaybackSession: ObservableObject {
             self.availableRange = availableRange
             self.selection = selection
             self.trimSuggestion = trimSuggestion
+            self.isMuted = isMuted
         }
 
         var duration: TimeInterval {
@@ -222,7 +229,8 @@ final class TimelinePlaybackSession: ObservableObject {
         let previewSource = TimelinePlaybackSource(
             url: source.url,
             selection: selection,
-            sourceRange: source.sourceRange
+            sourceRange: source.sourceRange,
+            isMuted: source.isMuted
         )
         preparationTask = Task { [weak self] in
             do {
@@ -457,7 +465,8 @@ final class TimelinePlaybackSession: ObservableObject {
                 sourceCreatedAt: clip.sourceCreatedAt,
                 availableRange: clip.availableRange,
                 selection: clip.selection,
-                trimSuggestion: clip.trimSuggestion
+                trimSuggestion: clip.trimSuggestion,
+                isMuted: clip.isMuted
             )
         }
     }
@@ -747,7 +756,7 @@ struct TimelineReviewScreen: View {
                 switch edit {
                 case .move, .remove, .restore, .addFullTakeToStoryline:
                     animatesStructure = true
-                case .trim, .resetTrim, .split, .deleteRemovedClipPermanently, .nudgeTrim:
+                case .trim, .resetTrim, .split, .deleteRemovedClipPermanently, .setMuted, .nudgeTrim:
                     animatesStructure = false
                 }
                 if animatesStructure, !reduceMotion {
@@ -823,6 +832,18 @@ struct TimelineReviewScreen: View {
                     UIAccessibility.post(
                         notification: .announcement,
                         argument: "Removed Clip metadata deleted permanently. The Take media remains available."
+                    )
+                } else if case let .setMuted(clipID, isMuted) = edit {
+                    let ordinal = outcome.snapshot.clips.firstIndex(where: { $0.id == clipID })
+                        .map { $0 + 1 }
+                    UISelectionFeedbackGenerator().selectionChanged()
+                    UIAccessibility.post(
+                        notification: .announcement,
+                        argument: ordinal.map {
+                            isMuted
+                                ? "Source audio muted for Clip \($0) of \(outcome.snapshot.clips.count)."
+                                : "Source audio on for Clip \($0) of \(outcome.snapshot.clips.count)."
+                        } ?? (isMuted ? "Source audio muted." : "Source audio on.")
                     )
                 }
             } catch {
@@ -946,6 +967,7 @@ struct TimelineReviewScreen: View {
              let .remove(clipID),
              let .restore(clipID),
              let .deleteRemovedClipPermanently(clipID),
+             let .setMuted(clipID, _),
              let .nudgeTrim(clipID, _, _):
             clipID
         case .addFullTakeToStoryline:
@@ -1044,6 +1066,20 @@ private struct TimelineTrimInspector: View {
                 HStack(spacing: 8) { reorderControls }
                 VStack(spacing: 8) { reorderControls }
             }
+
+            Button(
+                clip.isMuted ? "Unmute Source Audio" : "Mute Source Audio",
+                systemImage: clip.isMuted ? "speaker.wave.2" : "speaker.slash"
+            ) {
+                onCommit(.setMuted(clipID: clip.id, isMuted: !clip.isMuted))
+            }
+            .buttonStyle(.bordered)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .disabled(isCommitting)
+            .accessibilityValue(clip.isMuted ? "Muted" : "On")
+            .accessibilityHint(clip.isMuted
+                ? "Includes this Clip's source audio in preview and export."
+                : "Excludes this Clip's source audio from preview and export without changing the Take.")
 
             if clip.selection == clip.availableRange {
                 Text("This Clip already uses its full Available Range.")
@@ -1648,6 +1684,15 @@ private struct TimelineFilmstrip: View {
                     .padding(5)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
             }
+            if clip.isMuted {
+                Image(systemName: "speaker.slash.fill")
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(.primary)
+                    .padding(5)
+                    .background(.regularMaterial, in: Circle())
+                    .padding(4)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
         }
         .overlay {
             RoundedRectangle(cornerRadius: 4, style: .continuous)
@@ -1792,6 +1837,7 @@ private struct TimelineFilmstrip: View {
         return [
             sourceDate.map { "Recorded \($0)" },
             "\(duration) seconds",
+            clip.isMuted ? "source audio muted" : "source audio on",
             selected ? "selected" : "not selected"
         ]
         .compactMap { $0 }
@@ -1835,20 +1881,24 @@ private enum TimelinePlaybackItemBuilder {
         guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
             throw TimelinePlaybackPreparationError.missingVideoTrack
         }
-        guard let selection = source.selection,
-              selection != source.sourceRange else {
+        guard source.isMuted || source.selection != source.sourceRange else {
             return AVPlayerItem(asset: asset)
         }
         let videoRange = try await videoTrack.load(.timeRange)
         let preferredTransform = try await videoTrack.load(.preferredTransform)
-        let sourceStart = CMTime(
-            seconds: videoRange.start.seconds + selection.start.seconds,
-            preferredTimescale: 600
-        )
-        let selectedRange = CMTimeRange(
-            start: sourceStart,
-            duration: CMTime(seconds: selection.duration, preferredTimescale: 600)
-        )
+        let selectedRange: CMTimeRange
+        if let selection = source.selection {
+            let sourceStart = CMTime(
+                seconds: videoRange.start.seconds + selection.start.seconds,
+                preferredTimescale: 600
+            )
+            selectedRange = CMTimeRange(
+                start: sourceStart,
+                duration: CMTime(seconds: selection.duration, preferredTimescale: 600)
+            )
+        } else {
+            selectedRange = videoRange
+        }
         let composition = AVMutableComposition()
         guard let compositionVideoTrack = composition.addMutableTrack(
             withMediaType: .video,
@@ -1859,21 +1909,23 @@ private enum TimelinePlaybackItemBuilder {
         try compositionVideoTrack.insertTimeRange(selectedRange, of: videoTrack, at: .zero)
         compositionVideoTrack.preferredTransform = preferredTransform
 
-        for audioTrack in try await asset.loadTracks(withMediaType: .audio) {
-            let audioRange = try await audioTrack.load(.timeRange)
-            let intersection = CMTimeRangeGetIntersection(selectedRange, otherRange: audioRange)
-            guard intersection.isValid, intersection.duration > .zero else { continue }
-            guard let compositionAudioTrack = composition.addMutableTrack(
-                withMediaType: .audio,
-                preferredTrackID: kCMPersistentTrackID_Invalid
-            ) else {
-                throw TimelinePlaybackPreparationError.cannotCreateComposition
+        if !source.isMuted {
+            for audioTrack in try await asset.loadTracks(withMediaType: .audio) {
+                let audioRange = try await audioTrack.load(.timeRange)
+                let intersection = CMTimeRangeGetIntersection(selectedRange, otherRange: audioRange)
+                guard intersection.isValid, intersection.duration > .zero else { continue }
+                guard let compositionAudioTrack = composition.addMutableTrack(
+                    withMediaType: .audio,
+                    preferredTrackID: kCMPersistentTrackID_Invalid
+                ) else {
+                    throw TimelinePlaybackPreparationError.cannotCreateComposition
+                }
+                try compositionAudioTrack.insertTimeRange(
+                    intersection,
+                    of: audioTrack,
+                    at: CMTimeSubtract(intersection.start, selectedRange.start)
+                )
             }
-            try compositionAudioTrack.insertTimeRange(
-                intersection,
-                of: audioTrack,
-                at: CMTimeSubtract(intersection.start, selectedRange.start)
-            )
         }
 
         guard let immutableComposition = composition.copy() as? AVComposition else {

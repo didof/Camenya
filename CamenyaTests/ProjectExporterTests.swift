@@ -66,6 +66,93 @@ final class ProjectExporterTests: XCTestCase {
         ])
     }
 
+    func testExportPlanCarriesPerClipMutePolicyFromImmutableSnapshot() throws {
+        let range = TakeRange(startSeconds: 0, endSeconds: 2)
+        let muted = ExportSnapshot.Clip(
+            id: TimelineClip.ID(),
+            takeID: UUID(),
+            mediaURL: URL(fileURLWithPath: "/muted.mov"),
+            sourceRange: range,
+            availableRange: range,
+            selection: range,
+            isMuted: true,
+            projectTimeRange: ProjectTimeRange(start: .zero, end: ProjectTime(seconds: 2)),
+            approvedCaptions: nil
+        )
+        let audible = ExportSnapshot.Clip(
+            id: TimelineClip.ID(),
+            takeID: UUID(),
+            mediaURL: URL(fileURLWithPath: "/audible.mov"),
+            sourceRange: range,
+            availableRange: range,
+            selection: range,
+            isMuted: false,
+            projectTimeRange: ProjectTimeRange(
+                start: ProjectTime(seconds: 2),
+                end: ProjectTime(seconds: 4)
+            ),
+            approvedCaptions: nil
+        )
+        let snapshot = ExportSnapshot(
+            projectID: UUID(),
+            revision: StorylineRevision(rawValue: 7),
+            format: .portrait,
+            captionConfiguration: nil,
+            clips: [muted, audible],
+            duration: ProjectTime(seconds: 4)
+        )
+
+        let plan = try ProjectExportPlan(snapshot: snapshot)
+
+        XCTAssertEqual(plan.sources.map(\.isMuted), [true, false])
+        XCTAssertEqual(plan.revision, snapshot.revision)
+    }
+
+    @MainActor
+    func testExporterOmitsAudioTrackWhenEveryStorylineClipIsMuted() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let takeID = UUID()
+        let source = root.appendingPathComponent("muted-source.mov")
+        try await makeMovie(at: source, red: 30, green: 180, blue: 80)
+        let completed = try await TimelineEditor(
+            projectID: project.id,
+            projectStore: store
+        ).completeFinalizedTake(
+            FinalizedTake(
+                id: takeID,
+                movieURL: source,
+                orientation: .landscapeLeft,
+                duration: 0.5,
+                createdAt: Date()
+            ),
+            expectedRevision: .zero
+        )
+        let editor = TimelineEditor(projectID: project.id, projectStore: store)
+        let muted = try await editor.perform(
+            .setMuted(clipID: completed.clip.id, isMuted: true),
+            expectedRevision: completed.snapshot.revision
+        )
+
+        let output = try await ProjectExporter().export(
+            plan: try ProjectExportPlan(snapshot: muted.snapshot),
+            to: store.pendingExportURL(projectID: project.id)
+        )
+
+        let asset = AVURLAsset(url: output)
+        let videoTracks = try await asset.loadTracks(withMediaType: .video)
+        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+        let duration = try await asset.load(.duration).seconds
+        XCTAssertEqual(videoTracks.count, 1)
+        XCTAssertTrue(audioTracks.isEmpty)
+        XCTAssertEqual(duration, 0.5, accuracy: 0.08)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: store.takeMovieURL(projectID: project.id, takeID: takeID).path
+        ))
+    }
+
     @MainActor
     func testExporterDoesNotCreateOutputWhenTakeMediaIsInvalid() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -118,6 +205,7 @@ final class ProjectExporterTests: XCTestCase {
         let asset = AVURLAsset(url: output)
         let duration = try await asset.load(.duration).seconds
         let videoTracks = try await asset.loadTracks(withMediaType: .video)
+        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
         let video = try XCTUnwrap(videoTracks.first)
         let size = try await video.load(.naturalSize)
         let imageGenerator = AVAssetImageGenerator(asset: asset)
@@ -130,10 +218,57 @@ final class ProjectExporterTests: XCTestCase {
         XCTAssertEqual(duration, 1, accuracy: 0.08)
         XCTAssertEqual(size.width, 1920, accuracy: 1)
         XCTAssertEqual(size.height, 1080, accuracy: 1)
+        XCTAssertEqual(audioTracks.count, 1)
         XCTAssertGreaterThan(firstColor.red, firstColor.blue)
         XCTAssertGreaterThan(secondColor.blue, secondColor.red)
         XCTAssertTrue(FileManager.default.fileExists(atPath: store.takeMovieURL(projectID: project.id, takeID: firstID).path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: store.takeMovieURL(projectID: project.id, takeID: secondID).path))
+    }
+
+    @MainActor
+    func testExporterRejectsMissingAudioForUnmutedStorylineAndPreservesSource() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let takeID = UUID()
+        let source = root.appendingPathComponent("video-only.mov")
+        try await makeMovie(
+            at: source,
+            red: 30,
+            green: 180,
+            blue: 80,
+            includeAudio: false
+        )
+        let completed = try await TimelineEditor(
+            projectID: project.id,
+            projectStore: store
+        ).completeFinalizedTake(
+            FinalizedTake(
+                id: takeID,
+                movieURL: source,
+                orientation: .landscapeLeft,
+                duration: 0.5,
+                createdAt: Date()
+            ),
+            expectedRevision: .zero
+        )
+        let output = store.pendingExportURL(projectID: project.id)
+
+        do {
+            _ = try await ProjectExporter().export(
+                plan: try ProjectExportPlan(snapshot: completed.snapshot),
+                to: output
+            )
+            XCTFail("Expected an unmuted Storyline with missing audio to be rejected")
+        } catch {
+            XCTAssertEqual(error as? ProjectExportError, .missingAudioTrack(output.lastPathComponent))
+        }
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: store.takeMovieURL(projectID: project.id, takeID: takeID).path
+        ))
     }
 
     @MainActor
@@ -346,7 +481,8 @@ final class ProjectExporterTests: XCTestCase {
         green: UInt8,
         blue: UInt8,
         videoDuration: TimeInterval = 0.5,
-        audioDuration: TimeInterval = 0.5
+        audioDuration: TimeInterval = 0.5,
+        includeAudio: Bool = true
     ) async throws {
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
@@ -370,12 +506,16 @@ final class ProjectExporterTests: XCTestCase {
             AVNumberOfChannelsKey: 1,
             AVEncoderBitRateKey: 64_000
         ])
-        XCTAssertTrue(writer.canAdd(audioInput))
-        writer.add(audioInput)
+        if includeAudio {
+            XCTAssertTrue(writer.canAdd(audioInput))
+            writer.add(audioInput)
+        }
         XCTAssertTrue(writer.startWriting())
         writer.startSession(atSourceTime: .zero)
-        XCTAssertTrue(audioInput.append(try silentAudioSampleBuffer(duration: audioDuration)))
-        audioInput.markAsFinished()
+        if includeAudio {
+            XCTAssertTrue(audioInput.append(try silentAudioSampleBuffer(duration: audioDuration)))
+            audioInput.markAsFinished()
+        }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             var frame = 0
             let frameCount = max(1, Int((videoDuration * 30).rounded()))
@@ -421,7 +561,8 @@ final class ProjectExporterTests: XCTestCase {
                 }
                 if frame == frameCount {
                     finished = true
-                    writer.endSession(atSourceTime: CMTime(seconds: max(videoDuration, audioDuration), preferredTimescale: 600))
+                    let outputDuration = includeAudio ? max(videoDuration, audioDuration) : videoDuration
+                    writer.endSession(atSourceTime: CMTime(seconds: outputDuration, preferredTimescale: 600))
                     input.markAsFinished()
                     writer.finishWriting {
                         if let error = writer.error { continuation.resume(throwing: error) }

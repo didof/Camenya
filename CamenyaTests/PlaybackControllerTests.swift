@@ -286,6 +286,7 @@ final class PlaybackControllerTests: XCTestCase {
             sourceRange: range,
             availableRange: range,
             selection: range,
+            isMuted: true,
             projectTimeRange: ProjectTimeRange(start: .zero, end: ProjectTime(seconds: 3)),
             approvedCaptions: nil
         )
@@ -308,7 +309,8 @@ final class PlaybackControllerTests: XCTestCase {
                 sourceCreatedAt: sourceCreatedAt,
                 availableRange: range,
                 selection: range,
-                trimSuggestion: nil
+                trimSuggestion: nil,
+                isMuted: true
             )
         ])
     }
@@ -508,6 +510,28 @@ final class PlaybackControllerTests: XCTestCase {
         XCTAssertEqual(audioRange.duration.seconds, 0.5, accuracy: 0.04)
     }
 
+    func testMutedTimelineClipBuildsPlayableVideoWithoutSourceAudio() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let movieURL = root.appendingPathComponent("muted.mov")
+        try await makeMovie(at: movieURL, includeAudio: true)
+        let session = TimelinePlaybackSession(snapshot: makeSnapshot(
+            mediaURL: movieURL,
+            isMuted: true
+        ))
+
+        await waitForCurrentItem(in: session)
+
+        let item = try XCTUnwrap(session.player.currentItem)
+        let duration = try await item.asset.load(.duration).seconds
+        let videoTracks = try await item.asset.loadTracks(withMediaType: .video)
+        let audioTracks = try await item.asset.loadTracks(withMediaType: .audio)
+        XCTAssertEqual(duration, 1, accuracy: 0.04)
+        XCTAssertEqual(videoTracks.count, 1)
+        XCTAssertTrue(audioTracks.isEmpty)
+    }
+
     func testTimelineReportsPreparationFailureWithoutSubstitutingTheWholeTake() async {
         let session = TimelinePlaybackSession(snapshot: makeSnapshot(
             mediaURL: URL(fileURLWithPath: "/tmp/missing-trimmed.mov"),
@@ -668,7 +692,8 @@ final class PlaybackControllerTests: XCTestCase {
     private func makeSnapshot(
         mediaURL: URL,
         sourceRange: TakeRange = TakeRange(startSeconds: 0, endSeconds: 1),
-        selection: TakeRange? = nil
+        selection: TakeRange? = nil,
+        isMuted: Bool = false
     ) -> ExportSnapshot {
         let selectedRange = selection ?? sourceRange
         let clip = ExportSnapshot.Clip(
@@ -678,6 +703,7 @@ final class PlaybackControllerTests: XCTestCase {
             sourceRange: sourceRange,
             availableRange: sourceRange,
             selection: selectedRange,
+            isMuted: isMuted,
             projectTimeRange: ProjectTimeRange(
                 start: .zero,
                 end: ProjectTime(seconds: selectedRange.duration)

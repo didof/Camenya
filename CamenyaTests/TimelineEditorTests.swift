@@ -721,6 +721,61 @@ final class TimelineEditorTests: XCTestCase {
         XCTAssertEqual(persisted.clips.map(\.id), [first.clip.id, second.clip.id])
     }
 
+    func testMutePersistsPerClipWithoutChangingStorylineTimingOrSiblingAudioState() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let editor = TimelineEditor(projectID: project.id, projectStore: store)
+        let completed = try await editor.completeFinalizedTake(
+            FinalizedTake(
+                id: UUID(),
+                movieURL: try makeMovie(in: root),
+                orientation: .portrait,
+                duration: 8,
+                createdAt: Date(timeIntervalSince1970: 1)
+            ),
+            expectedRevision: .zero
+        )
+        let split = try await editor.perform(
+            .split(clipID: completed.clip.id, at: ProjectTime(seconds: 4)),
+            expectedRevision: completed.snapshot.revision
+        )
+        let left = try XCTUnwrap(split.snapshot.clips.first)
+        let right = try XCTUnwrap(split.snapshot.clips.last)
+
+        let muted = try await editor.perform(
+            .setMuted(clipID: left.id, isMuted: true),
+            expectedRevision: split.snapshot.revision
+        )
+
+        XCTAssertEqual(muted.snapshot.revision.rawValue, split.snapshot.revision.rawValue + 1)
+        XCTAssertEqual(muted.snapshot.duration, split.snapshot.duration)
+        XCTAssertEqual(muted.snapshot.clips.map(\.selection), split.snapshot.clips.map(\.selection))
+        XCTAssertEqual(muted.snapshot.clips.map(\.isMuted), [true, false])
+        XCTAssertEqual(muted.project.primaryStoryline.clips.map(\.isMuted), [true, false])
+        XCTAssertNil(muted.focus)
+        XCTAssertEqual(right.takeID, left.takeID)
+
+        let undone = try await editor.restoreSessionState(
+            TimelineSessionState(project: split.project),
+            expectedRevision: muted.snapshot.revision,
+            focusClipID: left.id
+        )
+        let redone = try await editor.restoreSessionState(
+            TimelineSessionState(project: muted.project),
+            expectedRevision: undone.snapshot.revision,
+            focusClipID: left.id
+        )
+
+        XCTAssertEqual(undone.snapshot.clips.map(\.isMuted), [false, false])
+        XCTAssertEqual(redone.snapshot.clips.map(\.isMuted), [true, false])
+        XCTAssertEqual(undone.snapshot.revision.rawValue, muted.snapshot.revision.rawValue + 1)
+        XCTAssertEqual(redone.snapshot.revision.rawValue, undone.snapshot.revision.rawValue + 1)
+        XCTAssertEqual(try store.load(id: project.id), redone.project)
+    }
+
     func testRemoveAndRestorePersistExactClipWithoutDeletingTakeMedia() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

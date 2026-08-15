@@ -130,6 +130,7 @@ struct ExportSnapshot: Equatable, Sendable {
         let availableRange: TakeRange
         let selection: TakeRange
         let trimSuggestion: TakeRange?
+        let isMuted: Bool
         let projectTimeRange: ProjectTimeRange
         let approvedCaptions: TakeCaptionTrack?
 
@@ -143,6 +144,7 @@ struct ExportSnapshot: Equatable, Sendable {
             availableRange: TakeRange,
             selection: TakeRange,
             trimSuggestion: TakeRange? = nil,
+            isMuted: Bool = false,
             projectTimeRange: ProjectTimeRange,
             approvedCaptions: TakeCaptionTrack?
         ) {
@@ -155,6 +157,7 @@ struct ExportSnapshot: Equatable, Sendable {
             self.availableRange = availableRange
             self.selection = selection
             self.trimSuggestion = trimSuggestion
+            self.isMuted = isMuted
             self.projectTimeRange = projectTimeRange
             self.approvedCaptions = approvedCaptions
         }
