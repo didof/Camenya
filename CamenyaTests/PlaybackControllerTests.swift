@@ -99,6 +99,66 @@ final class PlaybackControllerTests: XCTestCase {
         XCTAssertTrue(controller.player.items().isEmpty)
     }
 
+    func testTimelinePositionStartsAtFirstTakeAfterQueueInstall() async {
+        let controller = TimelinePlaybackController(sources: [
+            TimelinePlaybackSource(url: URL(fileURLWithPath: "/tmp/timeline-a.mov"), selection: nil),
+            TimelinePlaybackSource(url: URL(fileURLWithPath: "/tmp/timeline-b.mov"), selection: nil),
+            TimelinePlaybackSource(url: URL(fileURLWithPath: "/tmp/timeline-c.mov"), selection: nil),
+        ])
+
+        await waitForCurrentItem(in: controller)
+
+        XCTAssertEqual(controller.totalTakeCount, 3)
+        XCTAssertEqual(controller.currentTakeIndex, 1)
+    }
+
+    func testTimelinePositionAdvancesWhenEachTakeFinishes() async {
+        let controller = TimelinePlaybackController(sources: [
+            TimelinePlaybackSource(url: URL(fileURLWithPath: "/tmp/timeline-a.mov"), selection: nil),
+            TimelinePlaybackSource(url: URL(fileURLWithPath: "/tmp/timeline-b.mov"), selection: nil),
+            TimelinePlaybackSource(url: URL(fileURLWithPath: "/tmp/timeline-c.mov"), selection: nil),
+        ])
+        await waitForCurrentItem(in: controller)
+
+        NotificationCenter.default.post(
+            name: .AVPlayerItemDidPlayToEndTime,
+            object: controller.player.currentItem
+        )
+        await Task.yield()
+
+        XCTAssertEqual(controller.currentTakeIndex, 2)
+
+        NotificationCenter.default.post(
+            name: .AVPlayerItemDidPlayToEndTime,
+            object: controller.player.currentItem
+        )
+        await Task.yield()
+
+        XCTAssertEqual(controller.currentTakeIndex, 3)
+    }
+
+    func testTimelinePositionResetsAfterFullPlaybackCompletes() async {
+        let controller = TimelinePlaybackController(sources: [
+            TimelinePlaybackSource(url: URL(fileURLWithPath: "/tmp/timeline-a.mov"), selection: nil),
+            TimelinePlaybackSource(url: URL(fileURLWithPath: "/tmp/timeline-b.mov"), selection: nil),
+        ])
+        await waitForCurrentItem(in: controller)
+
+        NotificationCenter.default.post(
+            name: .AVPlayerItemDidPlayToEndTime,
+            object: controller.player.currentItem
+        )
+        await Task.yield()
+        NotificationCenter.default.post(
+            name: .AVPlayerItemDidPlayToEndTime,
+            object: controller.player.currentItem
+        )
+        await waitForReplacementItem(in: controller, replacing: controller.player.currentItem)
+
+        XCTAssertFalse(controller.isPlaying)
+        XCTAssertEqual(controller.currentTakeIndex, 1)
+    }
+
     private func waitForCurrentItem(in controller: TimelinePlaybackController) async {
         for _ in 0..<10_000 where controller.player.currentItem == nil {
             await Task.yield()
