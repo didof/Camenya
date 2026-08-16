@@ -63,6 +63,19 @@ struct TimelineReviewScreen: View {
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
 
+                if playback.totalTakeCount > 0, !playback.preparationFailed {
+                    let position = TimelineTakePositionPresentation(
+                        currentIndex: playback.currentTakeIndex,
+                        totalCount: playback.totalTakeCount
+                    )
+                    if !position.positionLabel.isEmpty {
+                        Text(position.positionLabel)
+                            .font(.subheadline.weight(.medium))
+                            .accessibilityLabel(position.accessibilityLabel)
+                            .accessibilityValue(position.accessibilityValue)
+                    }
+                }
+
                 if !playback.preparationFailed {
                     Button(playback.isPlaying ? "Pause" : "Play Project", systemImage: playback.isPlaying ? "pause.fill" : "play.fill") {
                         playback.togglePlayback()
@@ -85,6 +98,8 @@ struct TimelineReviewScreen: View {
 final class TimelinePlaybackController: ObservableObject {
     @Published private(set) var isPlaying = false
     @Published private(set) var preparationFailed = false
+    @Published private(set) var currentTakeIndex = 0
+    var totalTakeCount: Int { sources.count }
     let player: AVQueuePlayer
     private let sources: [TimelinePlaybackSource]
     private var completedItemCount = 0
@@ -123,7 +138,10 @@ final class TimelinePlaybackController: ObservableObject {
 
     private func itemDidFinish() {
         completedItemCount += 1
-        guard completedItemCount >= sources.count else { return }
+        if completedItemCount < sources.count {
+            currentTakeIndex = completedItemCount + 1
+            return
+        }
         player.pause()
         reloadQueue()
         isPlaying = false
@@ -135,6 +153,7 @@ final class TimelinePlaybackController: ObservableObject {
         player.removeAllItems()
         preparationTask?.cancel()
         completedItemCount = 0
+        currentTakeIndex = 0
         preparationFailed = false
         preparationTask = Task { [weak self, sources] in
             guard let self else { return }
@@ -206,6 +225,7 @@ final class TimelinePlaybackController: ObservableObject {
     }
 
     private func install(items: [AVPlayerItem]) {
+        currentTakeIndex = sources.isEmpty ? 0 : 1
         for item in items {
             completionObservers.append(NotificationCenter.default.addObserver(
                 forName: .AVPlayerItemDidPlayToEndTime,
