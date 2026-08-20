@@ -107,61 +107,6 @@ final class CaptionExportTimelineTests: XCTestCase {
         XCTAssertEqual(spanAnimation.keyTimes, [0, 0.1, 0.2, 1])
     }
 
-    func testTimelineRebasesApprovedCaptionsAcrossTrimmedAndOriginalTakes() {
-        let firstCue = CaptionCue(
-            range: TakeRange(startSeconds: 3, endSeconds: 4),
-            recognizedText: "prima take",
-            text: "prima take",
-            confidence: 0.9,
-            alternatives: [],
-            timedSpans: [CaptionTimedSpan(
-                range: TakeRange(startSeconds: 3.2, endSeconds: 3.8),
-                text: "prima",
-                granularity: .word,
-                confidence: 0.9
-            )]
-        )
-        let secondCue = CaptionCue(
-            range: TakeRange(startSeconds: 0.5, endSeconds: 1.5),
-            recognizedText: "seconda take",
-            text: "seconda take",
-            confidence: 0.8,
-            alternatives: [],
-            timedSpans: []
-        )
-        let plan = ProjectExportPlan(
-            sources: [
-                ProjectExportSource(
-                    takeID: UUID(),
-                    url: URL(fileURLWithPath: "/first.mov"),
-                    selection: TakeRange(startSeconds: 2, endSeconds: 8),
-                    duration: 6,
-                    captions: track(sourceRange: TakeRange(startSeconds: 2, endSeconds: 8), cues: [firstCue])
-                ),
-                ProjectExportSource(
-                    takeID: UUID(),
-                    url: URL(fileURLWithPath: "/second.mov"),
-                    selection: nil,
-                    duration: 5,
-                    captions: track(sourceRange: TakeRange(startSeconds: 0, endSeconds: 5), cues: [secondCue])
-                )
-            ],
-            format: .portrait,
-            captionConfiguration: ProjectCaptionConfiguration(localeIdentifier: "it-IT", placement: .upper)
-        )
-
-        let timeline = ProjectCaptionExportTimeline.make(plan: plan)
-
-        XCTAssertEqual(timeline?.placement, .upper)
-        XCTAssertEqual(timeline?.style, .highContrast)
-        XCTAssertEqual(timeline?.duration, 11)
-        XCTAssertEqual(timeline?.cues.map(\.range), [
-            TakeRange(startSeconds: 1, endSeconds: 2),
-            TakeRange(startSeconds: 6.5, endSeconds: 7.5)
-        ])
-        XCTAssertEqual(timeline?.cues.first?.timedSpans.first?.range, TakeRange(startSeconds: 1.2, endSeconds: 1.8))
-    }
-
     func testCoreAnimationLayoutMirrorsTopLeadingPreviewCoordinates() {
         let portrait = CaptionPresentationLayout.coreAnimationFrame(
             placement: .lower,
@@ -184,55 +129,57 @@ final class CaptionExportTimelineTests: XCTestCase {
         XCTAssertEqual(landscape.midX / 1920, 0.5, accuracy: 0.001)
     }
 
-    func testEditedCueFallsBackToCueTimingAndDisabledCueIsOmitted() {
-        let edited = CaptionCue(
-            range: TakeRange(startSeconds: 1, endSeconds: 2),
-            recognizedText: "raw words",
-            text: "correct words",
-            confidence: nil,
-            alternatives: [],
+    func testProjectOverlayResolvesTheSameCueAndTimedSpanUsedByExport() throws {
+        let cue = ProjectCaptionExportCue(
+            range: TakeRange(startSeconds: 2, endSeconds: 5),
+            text: "Shared timeline",
             timedSpans: [CaptionTimedSpan(
-                range: TakeRange(startSeconds: 1, endSeconds: 1.5),
-                text: "raw",
+                range: TakeRange(startSeconds: 2.5, endSeconds: 3.5),
+                text: "Shared",
                 granularity: .word,
-                confidence: nil
+                confidence: 0.9
             )]
         )
-        let disabled = CaptionCue(
-            range: TakeRange(startSeconds: 3, endSeconds: 4),
-            recognizedText: "hidden",
-            text: "hidden",
-            confidence: nil,
-            alternatives: [],
-            timedSpans: [],
-            isEnabled: false
-        )
-        let plan = ProjectExportPlan(
-            sources: [ProjectExportSource(
-                takeID: UUID(),
-                url: URL(fileURLWithPath: "/take.mov"),
-                selection: nil,
-                duration: 5,
-                captions: track(sourceRange: TakeRange(startSeconds: 0, endSeconds: 5), cues: [edited, disabled])
-            )],
-            format: .landscape,
-            captionConfiguration: ProjectCaptionConfiguration(localeIdentifier: "it-IT", placement: .lower)
+        let timeline = ProjectCaptionExportTimeline(
+            placement: .lower,
+            style: .highContrast,
+            duration: 8,
+            cues: [cue]
         )
 
-        let timeline = ProjectCaptionExportTimeline.make(plan: plan)
+        let active = try XCTUnwrap(ProjectCaptionOverlayResolver.active(in: timeline, at: 3))
 
-        XCTAssertEqual(timeline?.cues.count, 1)
-        XCTAssertEqual(timeline?.cues.first?.text, "correct words")
-        XCTAssertEqual(timeline?.cues.first?.timedSpans, [])
+        XCTAssertEqual(active.cue, cue)
+        XCTAssertEqual(active.timedSpan?.text, "Shared")
+        XCTAssertNil(ProjectCaptionOverlayResolver.active(in: timeline, at: 5))
     }
 
-    private func track(sourceRange: TakeRange, cues: [CaptionCue]) -> TakeCaptionTrack {
-        TakeCaptionTrack(
-            localeIdentifier: "it-IT",
-            sourceRange: sourceRange,
-            recognizer: .speechRecognizerIOS18,
-            reviewState: .approved,
-            cues: cues
+    func testProjectOverlayHighlightPreservesTheFullExportCueText() throws {
+        let active = ActiveProjectCaptionPresentation(
+            cue: ProjectCaptionExportCue(
+                range: TakeRange(startSeconds: 0, endSeconds: 3),
+                text: "Hello, brave new world!",
+                timedSpans: [
+                    CaptionTimedSpan(
+                        range: TakeRange(startSeconds: 0, endSeconds: 1),
+                        text: "brave",
+                        granularity: .word,
+                        confidence: 0.9
+                    )
+                ]
+            ),
+            timedSpan: CaptionTimedSpan(
+                range: TakeRange(startSeconds: 0, endSeconds: 1),
+                text: "brave",
+                granularity: .word,
+                confidence: 0.9
+            )
         )
+
+        let runs = ProjectCaptionOverlayResolver.textRuns(for: active)
+
+        XCTAssertEqual(runs.map(\.text).joined(), "Hello, brave new world!")
+        XCTAssertEqual(runs.filter(\.isHighlighted).map(\.text), ["brave"])
     }
+
 }

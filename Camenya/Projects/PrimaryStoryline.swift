@@ -28,18 +28,51 @@ struct TimelineClip: Codable, Equatable, Hashable, Identifiable, Sendable {
     let takeID: UUID
     let availableRange: TakeRange
     let selection: TakeRange
+    let isMuted: Bool
 
     init(
         id: ID = ID(),
         takeID: UUID,
         availableRange: TakeRange,
-        selection: TakeRange
+        selection: TakeRange,
+        isMuted: Bool = false
     ) {
         self.id = id
         self.takeID = takeID
         self.availableRange = availableRange
         self.selection = selection
+        self.isMuted = isMuted
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case takeID
+        case availableRange
+        case selection
+        case isMuted
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(ID.self, forKey: .id)
+        takeID = try container.decode(UUID.self, forKey: .takeID)
+        availableRange = try container.decode(TakeRange.self, forKey: .availableRange)
+        selection = try container.decode(TakeRange.self, forKey: .selection)
+        isMuted = try container.decodeIfPresent(Bool.self, forKey: .isMuted) ?? false
+    }
+}
+
+struct TimelinePlacementContext: Codable, Equatable, Hashable, Sendable {
+    let previousClipID: TimelineClip.ID?
+    let nextClipID: TimelineClip.ID?
+    let originalIndex: Int
+}
+
+struct RemovedTimelineClip: Codable, Equatable, Hashable, Identifiable, Sendable {
+    let clip: TimelineClip
+    let placement: TimelinePlacementContext
+
+    var id: TimelineClip.ID { clip.id }
 }
 
 struct PrimaryStoryline: Codable, Equatable, Hashable, Sendable {
@@ -91,19 +124,67 @@ struct ExportSnapshot: Equatable, Sendable {
         let id: TimelineClip.ID
         let takeID: UUID
         let mediaURL: URL
+        let thumbnailURL: URL?
+        let sourceCreatedAt: Date?
         let sourceRange: TakeRange
         let availableRange: TakeRange
         let selection: TakeRange
+        let trimSuggestion: TakeRange?
+        let isMuted: Bool
         let projectTimeRange: ProjectTimeRange
-        let approvedCaptions: TakeCaptionTrack?
+
+        init(
+            id: TimelineClip.ID,
+            takeID: UUID,
+            mediaURL: URL,
+            thumbnailURL: URL? = nil,
+            sourceCreatedAt: Date? = nil,
+            sourceRange: TakeRange,
+            availableRange: TakeRange,
+            selection: TakeRange,
+            trimSuggestion: TakeRange? = nil,
+            isMuted: Bool = false,
+            projectTimeRange: ProjectTimeRange
+        ) {
+            self.id = id
+            self.takeID = takeID
+            self.mediaURL = mediaURL
+            self.thumbnailURL = thumbnailURL
+            self.sourceCreatedAt = sourceCreatedAt
+            self.sourceRange = sourceRange
+            self.availableRange = availableRange
+            self.selection = selection
+            self.trimSuggestion = trimSuggestion
+            self.isMuted = isMuted
+            self.projectTimeRange = projectTimeRange
+        }
     }
 
     let projectID: UUID
     let revision: StorylineRevision
     let format: ProjectFormat?
     let captionConfiguration: ProjectCaptionConfiguration?
+    let captionTimeline: ProjectCaptionExportTimeline?
     let clips: [Clip]
     let duration: ProjectTime
+
+    init(
+        projectID: UUID,
+        revision: StorylineRevision,
+        format: ProjectFormat?,
+        captionConfiguration: ProjectCaptionConfiguration?,
+        captionTimeline: ProjectCaptionExportTimeline? = nil,
+        clips: [Clip],
+        duration: ProjectTime
+    ) {
+        self.projectID = projectID
+        self.revision = revision
+        self.format = format
+        self.captionConfiguration = captionConfiguration
+        self.captionTimeline = captionTimeline
+        self.clips = clips
+        self.duration = duration
+    }
 
     func position(at projectTime: ProjectTime) -> StorylinePosition? {
         let seconds = projectTime.seconds

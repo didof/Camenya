@@ -15,6 +15,252 @@ struct TakeCompletion: Equatable, Sendable {
     let snapshot: ExportSnapshot
 }
 
+enum TimelineEdit: Equatable, Sendable {
+    case trim(clipID: TimelineClip.ID, selection: TakeRange)
+    case resetTrim(clipID: TimelineClip.ID)
+    case split(clipID: TimelineClip.ID, at: ProjectTime)
+    case move(clipID: TimelineClip.ID, toIndex: Int)
+    case remove(clipID: TimelineClip.ID)
+    case restore(clipID: TimelineClip.ID)
+    case deleteRemovedClipPermanently(clipID: TimelineClip.ID)
+    case addFullTakeToStoryline(takeID: UUID)
+    case setMuted(clipID: TimelineClip.ID, isMuted: Bool)
+    case approveCaptionTimelineIssue(issueID: CaptionTimelineIssue.ID)
+    case nudgeTrim(
+        clipID: TimelineClip.ID,
+        edge: TimelineTrimEdge,
+        direction: TimelineNudgeDirection
+    )
+}
+
+enum TimelineTrimEdge: Equatable, Sendable {
+    case start
+    case end
+}
+
+enum TimelineNudgeDirection: Equatable, Sendable {
+    case earlier
+    case later
+}
+
+enum TimelineTrimRules {
+    static let minimumDuration: TimeInterval = 1
+    static let nudgeSeconds: TimeInterval = 0.1
+
+    static func isValid(_ selection: TakeRange, inside availableRange: TakeRange) -> Bool {
+        selection.isValid(
+            inside: availableRange.end.seconds,
+            minimumDuration: minimumDuration
+        )
+            && selection.start.seconds >= availableRange.start.seconds
+            && selection.end.seconds <= availableRange.end.seconds
+    }
+
+    static func nudgedSelection(
+        selection: TakeRange,
+        availableRange: TakeRange,
+        edge: TimelineTrimEdge,
+        direction: TimelineNudgeDirection
+    ) -> TakeRange? {
+        let delta = direction == .later ? nudgeSeconds : -nudgeSeconds
+        let proposed: TakeRange
+        switch edge {
+        case .start:
+            proposed = TakeRange(
+                startSeconds: selection.start.seconds + delta,
+                endSeconds: selection.end.seconds
+            )
+        case .end:
+            proposed = TakeRange(
+                startSeconds: selection.start.seconds,
+                endSeconds: selection.end.seconds + delta
+            )
+        }
+        return isValid(proposed, inside: availableRange) ? proposed : nil
+    }
+}
+
+enum TimelineSplitRules {
+    static func sourceTime(
+        selection: TakeRange,
+        projectTimeRange: ProjectTimeRange,
+        at projectTime: ProjectTime
+    ) -> MediaTime? {
+        let projectSeconds = projectTime.seconds
+        let projectStart = projectTimeRange.start.seconds
+        let projectEnd = projectTimeRange.end.seconds
+        guard projectSeconds.isFinite,
+              projectSeconds > projectStart,
+              projectSeconds < projectEnd else {
+            return nil
+        }
+        let sourceTime = MediaTime(
+            seconds: selection.start.seconds + projectSeconds - projectStart
+        )
+        guard sourceTime.seconds - selection.start.seconds >= TimelineTrimRules.minimumDuration,
+              selection.end.seconds - sourceTime.seconds >= TimelineTrimRules.minimumDuration else {
+            return nil
+        }
+        return sourceTime
+    }
+}
+
+enum TimelineRemovalRules {
+    static func placement(removingAt index: Int, from clips: [TimelineClip]) -> TimelinePlacementContext {
+        TimelinePlacementContext(
+            previousClipID: index > clips.startIndex ? clips[index - 1].id : nil,
+            nextClipID: index + 1 < clips.endIndex ? clips[index + 1].id : nil,
+            originalIndex: index
+        )
+    }
+
+    static func restorationIndex(
+        placement: TimelinePlacementContext,
+        activeClips: [TimelineClip]
+    ) -> Int {
+        let previousIndex = placement.previousClipID.flatMap { id in
+            activeClips.firstIndex { $0.id == id }
+        }
+        let nextIndex = placement.nextClipID.flatMap { id in
+            activeClips.firstIndex { $0.id == id }
+        }
+
+        if let previousIndex, let nextIndex, previousIndex + 1 == nextIndex {
+            return nextIndex
+        }
+
+        let candidates = [previousIndex.map { $0 + 1 }, nextIndex].compactMap { $0 }
+        if let nearest = candidates.min(by: {
+            let leftDistance = abs($0 - placement.originalIndex)
+            let rightDistance = abs($1 - placement.originalIndex)
+            return leftDistance == rightDistance ? $0 < $1 : leftDistance < rightDistance
+        }) {
+            return min(max(nearest, 0), activeClips.count)
+        }
+        return min(max(placement.originalIndex, 0), activeClips.count)
+    }
+}
+
+struct TimelineEditActivity: Equatable, Sendable {
+    private(set) var isActive = false
+
+    mutating func begin() -> Bool {
+        guard !isActive else { return false }
+        isActive = true
+        return true
+    }
+
+    mutating func finish() {
+        isActive = false
+    }
+}
+
+struct TimelineEditOutcome: Equatable, Sendable {
+    let project: ProjectManifest
+    let snapshot: ExportSnapshot
+    let focus: TimelineEditFocus?
+
+    init(
+        project: ProjectManifest,
+        snapshot: ExportSnapshot,
+        focus: TimelineEditFocus? = nil
+    ) {
+        self.project = project
+        self.snapshot = snapshot
+        self.focus = focus
+    }
+}
+
+struct TimelineEditFocus: Equatable, Sendable {
+    let clipID: TimelineClip.ID
+    let projectTime: ProjectTime
+}
+
+struct TimelineSessionState: Equatable, Sendable {
+    let clips: [TimelineClip]
+    let removedClips: [RemovedTimelineClip]
+    let captionTimelineIssues: [CaptionTimelineIssue]
+
+    init(
+        clips: [TimelineClip],
+        removedClips: [RemovedTimelineClip],
+        captionTimelineIssues: [CaptionTimelineIssue] = []
+    ) {
+        self.clips = clips
+        self.removedClips = removedClips
+        self.captionTimelineIssues = captionTimelineIssues
+    }
+
+    init(project: ProjectManifest) {
+        clips = project.primaryStoryline.clips
+        removedClips = project.removedClips
+        captionTimelineIssues = project.captionTimelineIssues
+    }
+}
+
+struct TimelineSessionHistoryTarget: Equatable, Sendable {
+    let state: TimelineSessionState
+    let focusClipID: TimelineClip.ID?
+}
+
+struct TimelineSessionHistory: Equatable, Sendable {
+    private struct Entry: Equatable, Sendable {
+        let before: TimelineSessionState
+        let after: TimelineSessionState
+        let undoFocusClipID: TimelineClip.ID?
+        let redoFocusClipID: TimelineClip.ID?
+    }
+
+    private var undoEntries: [Entry] = []
+    private var redoEntries: [Entry] = []
+
+    var canUndo: Bool { !undoEntries.isEmpty }
+    var canRedo: Bool { !redoEntries.isEmpty }
+
+    var undoTarget: TimelineSessionHistoryTarget? {
+        undoEntries.last.map {
+            TimelineSessionHistoryTarget(state: $0.before, focusClipID: $0.undoFocusClipID)
+        }
+    }
+
+    var redoTarget: TimelineSessionHistoryTarget? {
+        redoEntries.last.map {
+            TimelineSessionHistoryTarget(state: $0.after, focusClipID: $0.redoFocusClipID)
+        }
+    }
+
+    mutating func record(
+        before: TimelineSessionState,
+        after: TimelineSessionState,
+        undoFocusClipID: TimelineClip.ID?,
+        redoFocusClipID: TimelineClip.ID?
+    ) {
+        guard before != after else { return }
+        undoEntries.append(Entry(
+            before: before,
+            after: after,
+            undoFocusClipID: undoFocusClipID,
+            redoFocusClipID: redoFocusClipID
+        ))
+        redoEntries.removeAll()
+    }
+
+    mutating func didUndo() {
+        guard let entry = undoEntries.popLast() else { return }
+        redoEntries.append(entry)
+    }
+
+    mutating func didRedo() {
+        guard let entry = redoEntries.popLast() else { return }
+        undoEntries.append(entry)
+    }
+
+    mutating func removeAll() {
+        undoEntries.removeAll()
+        redoEntries.removeAll()
+    }
+}
+
 enum TimelineEditorError: Error, Equatable {
     case projectNotFound(UUID)
     case mediaNotFound(URL)
@@ -26,6 +272,8 @@ enum TimelineEditorError: Error, Equatable {
     case invalidClip(TimelineClip.ID)
     case corruptPrimaryStoryline
     case revisionExhausted
+    case editingUnavailable
+    case captionTimelineIssueNotFound(UUID)
 }
 
 actor TimelineEditor {
@@ -113,6 +361,7 @@ actor TimelineEditor {
         project.format = project.format ?? format
         project.takes.append(take)
         project.primaryStoryline.clips.append(clip)
+        project.captionTimelineIssues = CaptionTimelineProjection.reconciledIssues(in: project)
         project.primaryStoryline.revision = try project.primaryStoryline.revision.incremented()
         project.modifiedAt = completedAt
         do {
@@ -146,6 +395,221 @@ actor TimelineEditor {
         )
     }
 
+    func perform(
+        _ edit: TimelineEdit,
+        expectedRevision: StorylineRevision,
+        modifiedAt: Date = Date()
+    ) throws -> TimelineEditOutcome {
+        var project = try projectStore.load(id: projectID)
+        guard project.primaryStoryline.revision == expectedRevision else {
+            throw TimelineEditorError.staleRevision(
+                expected: expectedRevision,
+                actual: project.primaryStoryline.revision
+            )
+        }
+        var focusedClipID: TimelineClip.ID?
+
+        project.captionTimelineIssues = CaptionTimelineProjection.reconciledIssues(in: project)
+
+        switch edit {
+        case let .trim(clipID, selection):
+            let clipIndex = try clipIndex(for: clipID, in: project)
+            let clip = project.primaryStoryline.clips[clipIndex]
+            guard Self.selectionIsValid(selection, for: clip) else {
+                throw TimelineEditorError.invalidClip(clipID)
+            }
+            project.primaryStoryline.clips[clipIndex] = clip.replacingSelection(with: selection)
+        case let .resetTrim(clipID):
+            let clipIndex = try clipIndex(for: clipID, in: project)
+            let clip = project.primaryStoryline.clips[clipIndex]
+            project.primaryStoryline.clips[clipIndex] = clip.replacingSelection(with: clip.availableRange)
+        case let .split(clipID, projectTime):
+            let clipIndex = try clipIndex(for: clipID, in: project)
+            let clip = project.primaryStoryline.clips[clipIndex]
+            let snapshot = try makeSnapshot(project: project)
+            guard let snapshotClip = snapshot.clips.first(where: { $0.id == clipID }),
+                  let sourceTime = TimelineSplitRules.sourceTime(
+                    selection: snapshotClip.selection,
+                    projectTimeRange: snapshotClip.projectTimeRange,
+                    at: projectTime
+                  ) else {
+                throw TimelineEditorError.invalidClip(clipID)
+            }
+            let left = TimelineClip(
+                takeID: clip.takeID,
+                availableRange: TakeRange(
+                    start: clip.availableRange.start,
+                    end: sourceTime
+                ),
+                selection: TakeRange(
+                    start: clip.selection.start,
+                    end: sourceTime
+                ),
+                isMuted: clip.isMuted
+            )
+            let right = TimelineClip(
+                takeID: clip.takeID,
+                availableRange: TakeRange(
+                    start: sourceTime,
+                    end: clip.availableRange.end
+                ),
+                selection: TakeRange(
+                    start: sourceTime,
+                    end: clip.selection.end
+                ),
+                isMuted: clip.isMuted
+            )
+            project.primaryStoryline.clips.replaceSubrange(
+                clipIndex...clipIndex,
+                with: [left, right]
+            )
+            focusedClipID = right.id
+        case let .move(clipID, destinationIndex):
+            let sourceIndex = try clipIndex(for: clipID, in: project)
+            guard project.primaryStoryline.clips.indices.contains(destinationIndex),
+                  destinationIndex != sourceIndex else {
+                throw TimelineEditorError.invalidClip(clipID)
+            }
+            let clip = project.primaryStoryline.clips.remove(at: sourceIndex)
+            project.primaryStoryline.clips.insert(clip, at: destinationIndex)
+            focusedClipID = clip.id
+        case let .remove(clipID):
+            let clipIndex = try clipIndex(for: clipID, in: project)
+            let placement = TimelineRemovalRules.placement(
+                removingAt: clipIndex,
+                from: project.primaryStoryline.clips
+            )
+            let clip = project.primaryStoryline.clips.remove(at: clipIndex)
+            project.removedClips.append(RemovedTimelineClip(clip: clip, placement: placement))
+            if !project.primaryStoryline.clips.isEmpty {
+                focusedClipID = project.primaryStoryline.clips[
+                    min(clipIndex, project.primaryStoryline.clips.count - 1)
+                ].id
+            }
+        case let .restore(clipID):
+            guard let removedIndex = project.removedClips.firstIndex(where: { $0.id == clipID }) else {
+                throw TimelineEditorError.invalidClip(clipID)
+            }
+            let removed = project.removedClips.remove(at: removedIndex)
+            let destination = TimelineRemovalRules.restorationIndex(
+                placement: removed.placement,
+                activeClips: project.primaryStoryline.clips
+            )
+            project.primaryStoryline.clips.insert(removed.clip, at: destination)
+            focusedClipID = removed.clip.id
+        case let .deleteRemovedClipPermanently(clipID):
+            guard let removedIndex = project.removedClips.firstIndex(where: { $0.id == clipID }) else {
+                throw TimelineEditorError.invalidClip(clipID)
+            }
+            project.removedClips.remove(at: removedIndex)
+        case let .addFullTakeToStoryline(takeID):
+            guard !project.primaryStoryline.clips.contains(where: { $0.takeID == takeID }),
+                  let take = project.takes.first(where: { $0.id == takeID }),
+                  take.duration.isFinite,
+                  take.duration > 0 else {
+                throw TimelineEditorError.missingTake(takeID)
+            }
+            let fullRange = TakeRange(startSeconds: 0, endSeconds: take.duration)
+            let clip = TimelineClip(
+                takeID: take.id,
+                availableRange: fullRange,
+                selection: fullRange
+            )
+            project.primaryStoryline.clips.append(clip)
+            focusedClipID = clip.id
+        case let .setMuted(clipID, isMuted):
+            let clipIndex = try clipIndex(for: clipID, in: project)
+            let clip = project.primaryStoryline.clips[clipIndex]
+            guard clip.isMuted != isMuted else {
+                throw TimelineEditorError.invalidClip(clipID)
+            }
+            project.primaryStoryline.clips[clipIndex] = clip.replacingMutedState(with: isMuted)
+        case let .approveCaptionTimelineIssue(issueID):
+            guard let issueIndex = project.captionTimelineIssues.firstIndex(where: {
+                $0.id == issueID && $0.reviewState == .needsReview
+            }) else {
+                throw TimelineEditorError.captionTimelineIssueNotFound(issueID)
+            }
+            project.captionTimelineIssues[issueIndex].reviewState = .approved
+        case let .nudgeTrim(clipID, edge, direction):
+            let clipIndex = try clipIndex(for: clipID, in: project)
+            let clip = project.primaryStoryline.clips[clipIndex]
+            guard let selection = TimelineTrimRules.nudgedSelection(
+                selection: clip.selection,
+                availableRange: clip.availableRange,
+                edge: edge,
+                direction: direction
+            ) else {
+                throw TimelineEditorError.invalidClip(clipID)
+            }
+            project.primaryStoryline.clips[clipIndex] = clip.replacingSelection(with: selection)
+        }
+
+        project.captionTimelineIssues = CaptionTimelineProjection.reconciledIssues(in: project)
+        project.primaryStoryline.revision = try project.primaryStoryline.revision.incremented()
+        project.modifiedAt = modifiedAt
+        do {
+            try projectStore.persist(project, expectedRevision: expectedRevision)
+        } catch let ProjectStoreError.staleRevision(expected, actual) {
+            throw TimelineEditorError.staleRevision(expected: expected, actual: actual)
+        }
+        let committed = try projectStore.load(id: projectID)
+        let committedSnapshot = try makeSnapshot(project: committed)
+        let focus = focusedClipID.flatMap { clipID in
+            committedSnapshot.clips.first(where: { $0.id == clipID }).map {
+                TimelineEditFocus(clipID: clipID, projectTime: $0.projectTimeRange.start)
+            }
+        }
+        return TimelineEditOutcome(
+            project: committed,
+            snapshot: committedSnapshot,
+            focus: focus
+        )
+    }
+
+    func restoreSessionState(
+        _ state: TimelineSessionState,
+        expectedRevision: StorylineRevision,
+        focusClipID: TimelineClip.ID?,
+        modifiedAt: Date = Date()
+    ) throws -> TimelineEditOutcome {
+        var project = try projectStore.load(id: projectID)
+        guard project.primaryStoryline.revision == expectedRevision else {
+            throw TimelineEditorError.staleRevision(
+                expected: expectedRevision,
+                actual: project.primaryStoryline.revision
+            )
+        }
+        guard Self.sessionStateIsValid(state, in: project) else {
+            throw TimelineEditorError.corruptPrimaryStoryline
+        }
+
+        project.primaryStoryline.clips = state.clips
+        project.removedClips = state.removedClips
+        project.captionTimelineIssues = state.captionTimelineIssues
+        project.captionTimelineIssues = CaptionTimelineProjection.reconciledIssues(in: project)
+        project.primaryStoryline.revision = try project.primaryStoryline.revision.incremented()
+        project.modifiedAt = modifiedAt
+        do {
+            try projectStore.persist(project, expectedRevision: expectedRevision)
+        } catch let ProjectStoreError.staleRevision(expected, actual) {
+            throw TimelineEditorError.staleRevision(expected: expected, actual: actual)
+        }
+
+        let committed = try projectStore.load(id: projectID)
+        let committedSnapshot = try makeSnapshot(project: committed)
+        let focus = focusClipID.flatMap { clipID in
+            committedSnapshot.clips.first(where: { $0.id == clipID }).map {
+                TimelineEditFocus(clipID: clipID, projectTime: $0.projectTimeRange.start)
+            }
+        }
+        return TimelineEditOutcome(
+            project: committed,
+            snapshot: committedSnapshot,
+            focus: focus
+        )
+    }
+
     private nonisolated static func resolveSnapshot(
         project: ProjectManifest,
         projectStore: ProjectStore
@@ -164,34 +628,53 @@ actor TimelineEditor {
             }
             let start = cursor
             cursor += clip.selection.duration
-            let approvedCaptions: TakeCaptionTrack?
-            if let captions = take.captions,
-               captions.reviewState == .approved,
-               captions.localeIdentifier == project.captionConfiguration?.localeIdentifier,
-               captions.sourceRange == clip.selection {
-                approvedCaptions = captions
+            let trimSuggestion: TakeRange?
+            if case let .suggestion(suggestion) = take.trimAnalysis {
+                let adapted = TakeRange(
+                    startSeconds: max(
+                        clip.availableRange.start.seconds,
+                        suggestion.range.start.seconds
+                    ),
+                    endSeconds: min(
+                        clip.availableRange.end.seconds,
+                        suggestion.range.end.seconds
+                    )
+                )
+                trimSuggestion = adapted.isValid(inside: take.duration, minimumDuration: 1)
+                    ? adapted
+                    : nil
             } else {
-                approvedCaptions = nil
+                trimSuggestion = nil
             }
             return ExportSnapshot.Clip(
                 id: clip.id,
                 takeID: take.id,
                 mediaURL: projectStore.takeMovieURL(projectID: project.id, takeID: take.id),
+                thumbnailURL: projectStore.takeThumbnailURL(projectID: project.id, takeID: take.id),
+                sourceCreatedAt: take.createdAt,
                 sourceRange: sourceRange,
                 availableRange: clip.availableRange,
                 selection: clip.selection,
+                trimSuggestion: trimSuggestion,
+                isMuted: clip.isMuted,
                 projectTimeRange: ProjectTimeRange(
                     start: ProjectTime(seconds: start),
                     end: ProjectTime(seconds: cursor)
-                ),
-                approvedCaptions: approvedCaptions
+                )
             )
         }
+        let reconciledIssues = CaptionTimelineProjection.reconciledIssues(in: project)
+        let captionTimeline = CaptionTimelineProjection.makeTimeline(
+            project: project,
+            clips: clips,
+            issues: reconciledIssues
+        )
         return ExportSnapshot(
             projectID: project.id,
             revision: project.primaryStoryline.revision,
             format: project.format,
             captionConfiguration: project.captionConfiguration,
+            captionTimeline: captionTimeline,
             clips: clips,
             duration: ProjectTime(seconds: cursor)
         )
@@ -199,5 +682,63 @@ actor TimelineEditor {
 
     private func makeSnapshot(project: ProjectManifest) throws -> ExportSnapshot {
         try Self.resolveSnapshot(project: project, projectStore: projectStore)
+    }
+
+    private func clipIndex(
+        for clipID: TimelineClip.ID,
+        in project: ProjectManifest
+    ) throws -> Int {
+        guard let index = project.primaryStoryline.clips.firstIndex(where: { $0.id == clipID }) else {
+            throw TimelineEditorError.invalidClip(clipID)
+        }
+        return index
+    }
+
+    private nonisolated static func selectionIsValid(
+        _ selection: TakeRange,
+        for clip: TimelineClip
+    ) -> Bool {
+        TimelineTrimRules.isValid(selection, inside: clip.availableRange)
+    }
+
+    private nonisolated static func sessionStateIsValid(
+        _ state: TimelineSessionState,
+        in project: ProjectManifest
+    ) -> Bool {
+        let allClips = state.clips + state.removedClips.map(\.clip)
+        guard Set(allClips.map(\.id)).count == allClips.count,
+              state.removedClips.allSatisfy({ $0.placement.originalIndex >= 0 }) else {
+            return false
+        }
+        let takesByID = Dictionary(uniqueKeysWithValues: project.takes.map { ($0.id, $0) })
+        return allClips.allSatisfy { clip in
+            guard let take = takesByID[clip.takeID] else { return false }
+            return clip.availableRange.isValid(inside: take.duration, minimumDuration: 0.001)
+                && selectionIsValid(clip.selection, for: clip)
+        } && state.captionTimelineIssues.allSatisfy { issue in
+            takesByID[issue.takeID]?.captions?.cues.contains(where: { $0.id == issue.cueID }) == true
+        }
+    }
+}
+
+private extension TimelineClip {
+    func replacingSelection(with selection: TakeRange) -> TimelineClip {
+        TimelineClip(
+            id: id,
+            takeID: takeID,
+            availableRange: availableRange,
+            selection: selection,
+            isMuted: isMuted
+        )
+    }
+
+    func replacingMutedState(with isMuted: Bool) -> TimelineClip {
+        TimelineClip(
+            id: id,
+            takeID: takeID,
+            availableRange: availableRange,
+            selection: selection,
+            isMuted: isMuted
+        )
     }
 }

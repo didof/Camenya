@@ -255,14 +255,14 @@ final class CaptionPersistenceTests: XCTestCase {
         let withDraft = try store.recordCaptionDraft(projectID: project.id, takeID: takeID, draft: draft)
 
         let unreviewedPlan = try await exportPlan(projectID: withDraft.id, store: store)
-        XCTAssertNil(unreviewedPlan.sources.first?.captions)
+        XCTAssertEqual(unreviewedPlan.captionTimeline?.cues, [])
 
         let approved = try store.approveCaptions(projectID: project.id, takeID: takeID)
         let approvedPlan = try await exportPlan(projectID: approved.id, store: store)
 
         XCTAssertEqual(approvedPlan.captionConfiguration, configuration)
-        XCTAssertEqual(approvedPlan.sources.first?.captions?.reviewState, .approved)
-        XCTAssertEqual(approvedPlan.sources.first?.captions?.cues, [cue])
+        XCTAssertEqual(approvedPlan.captionTimeline?.cues.map(\.text), [cue.text])
+        XCTAssertEqual(approvedPlan.captionTimeline?.cues.map(\.range), [cue.range])
     }
 
     func testDraftCannotInjectApprovalAtThePersistenceBoundary() async throws {
@@ -283,7 +283,7 @@ final class CaptionPersistenceTests: XCTestCase {
 
         XCTAssertEqual(saved.takes.first?.captions?.reviewState, .needsReview)
         let plan = try await exportPlan(projectID: saved.id, store: fixture.store)
-        XCTAssertNil(plan.sources.first?.captions)
+        XCTAssertEqual(plan.captionTimeline?.cues, [])
     }
 
     func testLocaleStaleTrackCannotBeReapprovedOrExported() async throws {
@@ -301,7 +301,7 @@ final class CaptionPersistenceTests: XCTestCase {
             takeID: fixture.takeID
         ))
         let plan = try await exportPlan(projectID: changed.id, store: fixture.store)
-        XCTAssertNil(plan.sources.first?.captions)
+        XCTAssertEqual(plan.captionTimeline?.cues, [])
     }
 
     func testChangingTheEffectiveRangeMakesApprovedCaptionsStale() async throws {
@@ -350,7 +350,7 @@ final class CaptionPersistenceTests: XCTestCase {
         let exportPlan = try await exportPlan(projectID: trimmed.id, store: store)
 
         XCTAssertEqual(trimmed.takes.first?.captions?.reviewState, .stale)
-        XCTAssertNil(exportPlan.sources.first?.captions)
+        XCTAssertEqual(exportPlan.captionTimeline?.cues, [])
     }
 
     func testResettingTrimMakesCaptionsForTheTrimmedRangeStale() async throws {
@@ -367,7 +367,7 @@ final class CaptionPersistenceTests: XCTestCase {
 
         XCTAssertEqual(reset.takes.first?.captions?.reviewState, .stale)
         let plan = try await exportPlan(projectID: reset.id, store: fixture.store)
-        XCTAssertNil(plan.sources.first?.captions)
+        XCTAssertEqual(plan.captionTimeline?.cues, [])
     }
 
     func testChangingCaptionLanguageMakesExistingTracksStale() async throws {
@@ -383,7 +383,7 @@ final class CaptionPersistenceTests: XCTestCase {
 
         XCTAssertEqual(changed.takes.first?.captions?.reviewState, .stale)
         let plan = try await exportPlan(projectID: changed.id, store: fixture.store)
-        XCTAssertNil(plan.sources.first?.captions)
+        XCTAssertEqual(plan.captionTimeline?.cues, [])
     }
 
     func testCaptionDraftRejectsOverlappingCuesAndOutOfRangeTimedSpans() throws {

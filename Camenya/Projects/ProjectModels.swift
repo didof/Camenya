@@ -166,7 +166,7 @@ struct ProjectTake: Codable, Equatable, Hashable, Identifiable, Sendable {
 }
 
 struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
-    static let currentSchemaVersion = 4
+    static let currentSchemaVersion = 6
 
     var schemaVersion: Int
     var manifestRevision: UInt64
@@ -178,8 +178,10 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
     var note: String
     var takes: [ProjectTake]
     var primaryStoryline: PrimaryStoryline
+    var removedClips: [RemovedTimelineClip]
     var recoveryState: ProjectRecoveryState?
     var captionConfiguration: ProjectCaptionConfiguration?
+    var captionTimelineIssues: [CaptionTimelineIssue]
 
     init(
         schemaVersion: Int = ProjectManifest.currentSchemaVersion,
@@ -192,8 +194,10 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
         note: String = "",
         takes: [ProjectTake] = [],
         primaryStoryline: PrimaryStoryline? = nil,
+        removedClips: [RemovedTimelineClip] = [],
         recoveryState: ProjectRecoveryState? = .clean,
-        captionConfiguration: ProjectCaptionConfiguration? = nil
+        captionConfiguration: ProjectCaptionConfiguration? = nil,
+        captionTimelineIssues: [CaptionTimelineIssue] = []
     ) {
         self.schemaVersion = schemaVersion
         self.manifestRevision = manifestRevision
@@ -205,12 +209,19 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
         self.note = note
         self.takes = takes
         self.primaryStoryline = primaryStoryline ?? .migrating(takes: takes)
+        self.removedClips = removedClips
         self.recoveryState = recoveryState
         self.captionConfiguration = captionConfiguration
+        self.captionTimelineIssues = captionTimelineIssues
     }
 
     var approximateDuration: TimeInterval {
         primaryStoryline.clips.reduce(0) { $0 + $1.selection.duration }
+    }
+
+    var unusedTakes: [ProjectTake] {
+        let activeTakeIDs = Set(primaryStoryline.clips.map(\.takeID))
+        return takes.filter { !activeTakeIDs.contains($0.id) }
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -224,8 +235,10 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
         case note
         case takes
         case primaryStoryline
+        case removedClips
         case recoveryState
         case captionConfiguration
+        case captionTimelineIssues
     }
 
     init(from decoder: Decoder) throws {
@@ -243,10 +256,18 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
             PrimaryStoryline.self,
             forKey: .primaryStoryline
         ) ?? .migrating(takes: takes)
+        removedClips = try container.decodeIfPresent(
+            [RemovedTimelineClip].self,
+            forKey: .removedClips
+        ) ?? []
         recoveryState = try container.decodeIfPresent(ProjectRecoveryState.self, forKey: .recoveryState)
         captionConfiguration = try container.decodeIfPresent(
             ProjectCaptionConfiguration.self,
             forKey: .captionConfiguration
         )
+        captionTimelineIssues = try container.decodeIfPresent(
+            [CaptionTimelineIssue].self,
+            forKey: .captionTimelineIssues
+        ) ?? []
     }
 }

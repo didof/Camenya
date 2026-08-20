@@ -3,33 +3,33 @@ import SwiftUI
 struct TakeEdgeCleanupPresentation: Equatable, Sendable {
     let label: String
     let systemImage: String
-    let canReset: Bool
     let actionTitle: String
 
-    init(label: String, systemImage: String, canReset: Bool, actionTitle: String) {
+    init(label: String, systemImage: String, actionTitle: String) {
         self.label = label
         self.systemImage = systemImage
-        self.canReset = canReset
         self.actionTitle = actionTitle
     }
 
-    init(take: ProjectTake) {
-        switch take.trimDecision {
-        case .useSelection:
-            self = Self(label: "Cleaned selection", systemImage: "crop", canReset: true, actionTitle: "Edit Silence Trim")
-        case .keepOriginal:
-            self = Self(label: "Original kept", systemImage: "rectangle", canReset: true, actionTitle: "Edit Silence Trim")
+    init(take: ProjectTake, clips: [TimelineClip] = []) {
+        let takeClips = clips.filter { $0.takeID == take.id }
+        if takeClips.contains(where: { $0.selection != $0.availableRange }) {
+            self = Self(
+                label: "Storyline Clip trimmed",
+                systemImage: "crop",
+                actionTitle: "Edit Storyline Trim"
+            )
+            return
+        }
+        switch take.trimAnalysis {
+        case .suggestion:
+            self = Self(label: "Cleanup review needed", systemImage: "waveform.badge.magnifyingglass", actionTitle: "Review Silence Trim")
+        case .noSuggestion:
+            self = Self(label: "No edge trim suggested", systemImage: "waveform.slash", actionTitle: "Adjust Silence Trim")
+        case .failed:
+            self = Self(label: "Cleanup unavailable", systemImage: "exclamationmark.triangle", actionTitle: "Retry Silence Analysis")
         case nil:
-            switch take.trimAnalysis {
-            case .suggestion:
-                self = Self(label: "Cleanup review needed", systemImage: "waveform.badge.magnifyingglass", canReset: true, actionTitle: "Review Silence Trim")
-            case .noSuggestion:
-                self = Self(label: "No edge trim suggested", systemImage: "waveform.slash", canReset: true, actionTitle: "Adjust Silence Trim")
-            case .failed:
-                self = Self(label: "Cleanup unavailable", systemImage: "exclamationmark.triangle", canReset: true, actionTitle: "Retry Silence Analysis")
-            case nil:
-                self = Self(label: "Original range", systemImage: "rectangle", canReset: false, actionTitle: "Analyze Silence")
-            }
+            self = Self(label: "Original range", systemImage: "rectangle", actionTitle: "Analyze Silence")
         }
     }
 }
@@ -85,7 +85,10 @@ struct TakeListScreen: View {
             List {
                 Section {
                     ForEach(Array(model.project.takes.enumerated()), id: \.element.id) { index, take in
-                        let cleanup = TakeEdgeCleanupPresentation(take: take)
+                        let cleanup = TakeEdgeCleanupPresentation(
+                            take: take,
+                            clips: model.project.primaryStoryline.clips
+                        )
                         takeRow(take, index: index)
                             .swipeActions(edge: .leading, allowsFullSwipe: false) {
                                 Button(cleanup.actionTitle, systemImage: "waveform.badge.magnifyingglass") {
@@ -98,7 +101,7 @@ struct TakeListScreen: View {
                 } header: {
                     Text("Recorded Takes")
                 } footer: {
-                    Text("Each finalized Take is kept as source media and currently appears once in Project order.")
+                    Text("Finalized Takes are kept as source media. Edit their Clips and order in the Primary Storyline.")
                 }
 
             }
@@ -124,7 +127,10 @@ struct TakeListScreen: View {
     }
 
     private func takeRow(_ take: ProjectTake, index: Int) -> some View {
-        let cleanup = TakeEdgeCleanupPresentation(take: take)
+        let cleanup = TakeEdgeCleanupPresentation(
+            take: take,
+            clips: model.project.primaryStoryline.clips
+        )
         let captions = TakeCaptionPresentation(
             take: take,
             configuration: model.captionConfiguration
@@ -140,7 +146,10 @@ struct TakeListScreen: View {
                     cornerRadius: 10
                 )
                 .frame(width: 92, height: 58)
-                .background(Color.black, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .background(
+                    Color(uiColor: .secondarySystemBackground),
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                )
 
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(alignment: .firstTextBaseline) {
@@ -178,12 +187,6 @@ struct TakeListScreen: View {
                     onRequestProjectAction(.manageCaptions(takeID: take.id))
                 }
                 .disabled(!model.canManageTakes)
-                if cleanup.canReset {
-                    Button("Reset Edge Cleanup", systemImage: "arrow.counterclockwise") {
-                        model.resetTrim(takeID: take.id)
-                    }
-                    .disabled(!model.canManageTakes)
-                }
             } label: {
                 Image(systemName: "ellipsis.circle")
                     .font(.title3)
@@ -199,45 +202,18 @@ struct TakeListScreen: View {
 
     private var projectControls: some View {
         VStack(spacing: 8) {
-            HStack(spacing: 8) {
-                Button {
-                    onRequestProjectAction(.playProject)
-                } label: {
-                    Label("Play", systemImage: "play.rectangle.fill")
-                        .frame(maxWidth: .infinity, minHeight: 44)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    playProjectButton
+                    cleanEdgesMenu
+                    captionsMenu
                 }
-                Menu {
-                    if !model.trimReviewTakeIDs.isEmpty {
-                        Button("Review Pending Trims", systemImage: "slider.horizontal.3") {
-                            onRequestProjectAction(.reviewEdges)
-                        }
+                VStack(spacing: 8) {
+                    playProjectButton
+                    HStack(spacing: 8) {
+                        cleanEdgesMenu
+                        captionsMenu
                     }
-                    Button("Analyze Take Edges", systemImage: "waveform.badge.magnifyingglass") {
-                        onRequestProjectAction(.analyzeEdges)
-                    }
-                    .disabled(!model.hasTakesNeedingEdgeAnalysis)
-                } label: {
-                    Label(
-                        "Clean Edges",
-                        systemImage: "waveform.badge.magnifyingglass"
-                    )
-                    .frame(maxWidth: .infinity, minHeight: 44)
-                }
-                Menu {
-                    if model.hasReviewableCaptions {
-                        Button("Review & Edit Captions", systemImage: "text.bubble") {
-                            onRequestProjectAction(.reviewCaptions)
-                        }
-                    }
-                    Button("Language, Position & Regenerate", systemImage: "gearshape") {
-                        onRequestProjectAction(.captionSettings)
-                    }
-                } label: {
-                    Label(
-                        "Captions",
-                        systemImage: "captions.bubble.fill"
-                    )
-                    .frame(maxWidth: .infinity, minHeight: 44)
                 }
             }
             .frame(maxWidth: .infinity)
@@ -253,6 +229,10 @@ struct TakeListScreen: View {
                 .frame(maxWidth: .infinity, minHeight: 44)
             }
             .buttonStyle(.borderedProminent)
+            .disabled(!model.canExportProject)
+            .accessibilityHint(model.canExportProject
+                ? "Creates the explicit finalized Project Export before saving to Photos."
+                : "Add at least one Clip to the Primary Storyline before exporting.")
         }
         .font(.caption.weight(.semibold))
         .buttonStyle(.bordered)
@@ -263,6 +243,48 @@ struct TakeListScreen: View {
         .frame(maxWidth: .infinity)
         .background(.bar)
         .accessibilityIdentifier("take-project-controls")
+    }
+
+    private var playProjectButton: some View {
+        Button {
+            onRequestProjectAction(.playProject)
+        } label: {
+            Label("Play", systemImage: "play.rectangle.fill")
+                .frame(maxWidth: .infinity, minHeight: 44)
+        }
+    }
+
+    private var cleanEdgesMenu: some View {
+        Menu {
+            if !model.trimReviewTakeIDs.isEmpty {
+                Button("Review Pending Trims", systemImage: "slider.horizontal.3") {
+                    onRequestProjectAction(.reviewEdges)
+                }
+            }
+            Button("Analyze Take Edges", systemImage: "waveform.badge.magnifyingglass") {
+                onRequestProjectAction(.analyzeEdges)
+            }
+            .disabled(!model.hasTakesNeedingEdgeAnalysis)
+        } label: {
+            Label("Clean Edges", systemImage: "waveform.badge.magnifyingglass")
+                .frame(maxWidth: .infinity, minHeight: 44)
+        }
+    }
+
+    private var captionsMenu: some View {
+        Menu {
+            if model.hasReviewableCaptions {
+                Button("Review & Edit Captions", systemImage: "text.bubble") {
+                    onRequestProjectAction(.reviewCaptions)
+                }
+            }
+            Button("Language, Position & Regenerate", systemImage: "gearshape") {
+                onRequestProjectAction(.captionSettings)
+            }
+        } label: {
+            Label("Captions", systemImage: "captions.bubble.fill")
+                .frame(maxWidth: .infinity, minHeight: 44)
+        }
     }
 
     private func duration(_ interval: TimeInterval) -> String {

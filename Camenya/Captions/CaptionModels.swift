@@ -135,6 +135,46 @@ struct TakeCaptionTrack: Codable, Equatable, Hashable, Sendable {
     var cues: [CaptionCue]
 }
 
+enum CaptionTimelineIssueReason: String, Codable, Equatable, Hashable, Sendable {
+    case boundaryCut
+    case discontinuousProjection
+}
+
+enum CaptionTimelineIssueReviewState: String, Codable, Equatable, Hashable, Sendable {
+    case needsReview
+    case approved
+}
+
+struct CaptionTimelineFragment: Codable, Equatable, Hashable, Sendable {
+    let clipID: TimelineClip.ID
+    let sourceRange: TakeRange
+}
+
+struct CaptionTimelineIssue: Codable, Equatable, Hashable, Identifiable, Sendable {
+    let id: UUID
+    let takeID: UUID
+    let cueID: UUID
+    let fragments: [CaptionTimelineFragment]
+    let reason: CaptionTimelineIssueReason
+    var reviewState: CaptionTimelineIssueReviewState
+
+    init(
+        id: UUID = UUID(),
+        takeID: UUID,
+        cueID: UUID,
+        fragments: [CaptionTimelineFragment],
+        reason: CaptionTimelineIssueReason,
+        reviewState: CaptionTimelineIssueReviewState = .needsReview
+    ) {
+        self.id = id
+        self.takeID = takeID
+        self.cueID = cueID
+        self.fragments = fragments
+        self.reason = reason
+        self.reviewState = reviewState
+    }
+}
+
 enum CaptionTranscriptionScope: Equatable, Sendable {
     case missingOrOutdated
     case all

@@ -33,6 +33,7 @@ struct ProjectStore: Sendable {
         var project = try decoder.decode(ProjectManifest.self, from: Data(contentsOf: manifestURL(id: id)))
         if project.schemaVersion < ProjectManifest.currentSchemaVersion {
             let expectedRevision = project.primaryStoryline.revision
+            project.captionTimelineIssues = CaptionTimelineProjection.reconciledIssues(in: project)
             project.schemaVersion = ProjectManifest.currentSchemaVersion
             try save(project, expectedRevision: expectedRevision)
         }
@@ -91,6 +92,7 @@ struct ProjectStore: Sendable {
             }
         }
         project.captionConfiguration = configuration
+        project.captionTimelineIssues = CaptionTimelineProjection.reconciledIssues(in: project)
         project.modifiedAt = modifiedAt
         try save(project, expectedRevision: expectedRevision)
         return project
@@ -128,6 +130,7 @@ struct ProjectStore: Sendable {
         var persistedDraft = draft
         persistedDraft.reviewState = .needsReview
         project.takes[index].captions = persistedDraft
+        project.captionTimelineIssues = CaptionTimelineProjection.reconciledIssues(in: project)
         project.modifiedAt = modifiedAt
         try save(project, expectedRevision: expectedRevision)
         return project
@@ -157,6 +160,7 @@ struct ProjectStore: Sendable {
         }
         captions.reviewState = .approved
         project.takes[index].captions = captions
+        project.captionTimelineIssues = CaptionTimelineProjection.reconciledIssues(in: project)
         project.modifiedAt = modifiedAt
         try save(project, expectedRevision: expectedRevision)
         return project
@@ -295,7 +299,8 @@ struct ProjectStore: Sendable {
         guard let index = project.takes.firstIndex(where: { $0.id == takeID }) else {
             throw ProjectStoreError.takeNotFound(takeID)
         }
-        guard !project.primaryStoryline.clips.contains(where: { $0.takeID == takeID }) else {
+        guard !project.primaryStoryline.clips.contains(where: { $0.takeID == takeID }),
+              !project.removedClips.contains(where: { $0.clip.takeID == takeID }) else {
             throw ProjectStoreError.takeReferencedByStoryline(takeID)
         }
         let sourceDirectory = takeDirectory(projectID: projectID, takeID: takeID)
@@ -312,6 +317,7 @@ struct ProjectStore: Sendable {
         }
 
         project.takes.remove(at: index)
+        project.captionTimelineIssues.removeAll { $0.takeID == takeID }
         project.modifiedAt = modifiedAt
         do {
             try save(project, expectedRevision: expectedRevision)
@@ -472,7 +478,8 @@ struct ProjectStore: Sendable {
             id: clip.id,
             takeID: clip.takeID,
             availableRange: clip.availableRange,
-            selection: selection
+            selection: selection,
+            isMuted: clip.isMuted
         )
         project.primaryStoryline.revision = try project.primaryStoryline.revision.incremented()
         if var captions = project.takes[index].captions {
@@ -491,6 +498,7 @@ struct ProjectStore: Sendable {
                 project.takes[index].captions = captions
             }
         }
+        project.captionTimelineIssues = CaptionTimelineProjection.reconciledIssues(in: project)
         project.modifiedAt = modifiedAt
         try save(project, expectedRevision: expectedRevision)
         return project
@@ -601,7 +609,8 @@ struct ProjectStore: Sendable {
             id: clip.id,
             takeID: clip.takeID,
             availableRange: clip.availableRange,
-            selection: TakeRange(startSeconds: 0, endSeconds: project.takes[index].duration)
+            selection: TakeRange(startSeconds: 0, endSeconds: project.takes[index].duration),
+            isMuted: clip.isMuted
         )
         project.primaryStoryline.revision = try project.primaryStoryline.revision.incremented()
         if var captions = project.takes[index].captions {
@@ -614,6 +623,7 @@ struct ProjectStore: Sendable {
                 project.takes[index].captions = captions
             }
         }
+        project.captionTimelineIssues = CaptionTimelineProjection.reconciledIssues(in: project)
         project.modifiedAt = modifiedAt
         try save(project, expectedRevision: expectedRevision)
         try? FileManager.default.removeItem(at: takeTrimEnvelopeURL(projectID: projectID, takeID: takeID))

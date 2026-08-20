@@ -9,8 +9,8 @@ struct CameraScreen: View {
     @State private var reviewingTake: ProjectTake?
     @State private var managingTakes = false
     @State private var reviewingTimeline = false
-    @State private var timelineSources: [TimelinePlaybackSource] = []
-    @State private var reviewingTrim = false
+    @State private var timelineSnapshot: ExportSnapshot?
+    @State private var initialTimelineClipID: TimelineClip.ID?
     @State private var configuringCaptions = false
     @State private var reviewingCaptions = false
     @State private var takeListActionCoordinator = TakeListActionCoordinator()
@@ -30,6 +30,7 @@ struct CameraScreen: View {
             cameraChrome
                 .allowsHitTesting(
                     !model.isExportingProject
+                        && !model.isEditingTimeline
                         && !model.isAnalyzingTrim
                         && !model.isTranscribingCaptions
                 )
@@ -78,14 +79,15 @@ struct CameraScreen: View {
                 .presentationDragIndicator(.visible)
         }
         .sheet(isPresented: $reviewingTimeline) {
-            TimelineReviewScreen(
-                sources: timelineSources,
-                title: model.project.name,
-                format: model.project.format ?? .portrait
-            )
-        }
-        .sheet(isPresented: $reviewingTrim) {
-            TrimReviewQueueScreen(model: model)
+            if let timelineSnapshot {
+                TimelineReviewScreen(
+                    snapshot: timelineSnapshot,
+                    title: model.project.name,
+                    format: model.project.format ?? .portrait,
+                    model: model,
+                    initialSelectedClipID: initialTimelineClipID
+                )
+            }
         }
         .sheet(isPresented: $configuringCaptions) {
             CaptionSetupScreen(
@@ -105,7 +107,7 @@ struct CameraScreen: View {
         }
         .onChange(of: model.isAnalyzingTrim) { wasAnalyzing, isAnalyzing in
             if wasAnalyzing, !isAnalyzing, !model.trimReviewTakeIDs.isEmpty {
-                reviewingTrim = true
+                openTimeline(preferredTakeID: model.trimReviewTakeIDs.first)
             }
         }
         .onChange(of: model.isTranscribingCaptions) { wasTranscribing, isTranscribing in
@@ -143,16 +145,11 @@ struct CameraScreen: View {
         ) else { return }
         switch action {
         case .playProject:
-            guard let sources = model.timelinePlaybackSources else {
-                model.reportInvalidTrimRange()
-                return
-            }
-            timelineSources = sources
-            reviewingTimeline = true
+            openTimeline()
         case .analyzeEdges:
             model.cleanUpEdges()
         case .reviewEdges:
-            reviewingTrim = true
+            openTimeline(preferredTakeID: model.trimReviewTakeIDs.first)
         case .captionSettings:
             configuringCaptions = true
         case .reviewCaptions:
@@ -163,11 +160,23 @@ struct CameraScreen: View {
             else { configuringCaptions = true }
         case let .manageEdges(takeID):
             if model.prepareTrimReview(takeID: takeID) {
-                reviewingTrim = true
+                openTimeline(preferredTakeID: takeID)
             }
         case .exportProject:
             model.exportProject()
         }
+    }
+
+    private func openTimeline(preferredTakeID: UUID? = nil) {
+        guard let snapshot = model.timelinePlaybackSnapshot else {
+            model.reportInvalidTrimRange()
+            return
+        }
+        timelineSnapshot = snapshot
+        initialTimelineClipID = preferredTakeID.flatMap { takeID in
+            snapshot.clips.first(where: { $0.takeID == takeID })?.id
+        }
+        reviewingTimeline = true
     }
 
     private var previewScrim: some View {
@@ -344,10 +353,20 @@ struct CameraScreen: View {
             case .paused where model.isInterrupted:
                 interruptedControls
             case .paused:
-                HStack(spacing: 10) {
-                    utilityButton("Flip", systemImage: "camera.rotate") { model.flip() }
-                    destructiveUtilityButton("Stop", systemImage: "stop.fill", action: model.stop)
-                    primaryActionButton("Resume", systemImage: "play.fill", action: model.resume)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 10) {
+                        utilityButton("Flip", systemImage: "camera.rotate") { model.flip() }
+                        destructiveUtilityButton("Stop", systemImage: "stop.fill", action: model.stop)
+                        primaryActionButton("Resume", systemImage: "play.fill", action: model.resume)
+                    }
+                    VStack(spacing: 10) {
+                        HStack(spacing: 10) {
+                            utilityButton("Flip", systemImage: "camera.rotate") { model.flip() }
+                            destructiveUtilityButton("Stop", systemImage: "stop.fill", action: model.stop)
+                        }
+                        primaryActionButton("Resume", systemImage: "play.fill", action: model.resume)
+                            .frame(maxWidth: .infinity)
+                    }
                 }
             case .storingTake where model.canRetrySave:
                 primaryActionButton("Retry Add", systemImage: "arrow.clockwise", action: model.retrySave)
@@ -688,12 +707,12 @@ private struct CameraPressStyle: ButtonStyle {
 }
 
 private enum CamenyaStyle {
-    static let ink = Color(red: 0.035, green: 0.039, blue: 0.051)
-    static let paper = Color(red: 0.965, green: 0.965, blue: 0.945)
-    static let recording = Color(red: 1, green: 0.27, blue: 0.23)
-    static let warning = Color(red: 1, green: 0.78, blue: 0.22)
-    static let chrome = ink.opacity(0.84)
-    static let panel = ink.opacity(0.94)
-    static let muted = paper.opacity(0.68)
-    static let hairline = paper.opacity(0.16)
+    static let ink = Color(uiColor: .systemBackground)
+    static let paper = Color(uiColor: .label)
+    static let recording = Color(uiColor: .systemRed)
+    static let warning = Color(uiColor: .systemYellow)
+    static let chrome = Color(uiColor: .systemBackground).opacity(0.88)
+    static let panel = Color(uiColor: .systemBackground).opacity(0.96)
+    static let muted = Color(uiColor: .secondaryLabel)
+    static let hairline = Color(uiColor: .separator)
 }

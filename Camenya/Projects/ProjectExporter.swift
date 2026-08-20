@@ -8,13 +8,28 @@ struct ProjectExportSource: Equatable, Sendable {
     let url: URL
     let selection: TakeRange?
     let duration: TimeInterval
-    let captions: TakeCaptionTrack?
+    let isMuted: Bool
+
+    init(
+        takeID: UUID,
+        url: URL,
+        selection: TakeRange?,
+        duration: TimeInterval,
+        isMuted: Bool = false
+    ) {
+        self.takeID = takeID
+        self.url = url
+        self.selection = selection
+        self.duration = duration
+        self.isMuted = isMuted
+    }
 }
 
 struct ProjectExportPlan: Equatable, Sendable {
     let sources: [ProjectExportSource]
     let format: ProjectFormat
     let captionConfiguration: ProjectCaptionConfiguration?
+    let captionTimeline: ProjectCaptionExportTimeline?
     let revision: StorylineRevision
 
     var urls: [URL] { sources.map(\.url) }
@@ -23,11 +38,13 @@ struct ProjectExportPlan: Equatable, Sendable {
         sources: [ProjectExportSource],
         format: ProjectFormat,
         captionConfiguration: ProjectCaptionConfiguration?,
+        captionTimeline: ProjectCaptionExportTimeline? = nil,
         revision: StorylineRevision = .zero
     ) {
         self.sources = sources
         self.format = format
         self.captionConfiguration = captionConfiguration
+        self.captionTimeline = captionTimeline
         self.revision = revision
     }
 
@@ -40,11 +57,12 @@ struct ProjectExportPlan: Equatable, Sendable {
                 url: clip.mediaURL,
                 selection: clip.selection,
                 duration: clip.selection.duration,
-                captions: clip.approvedCaptions
+                isMuted: clip.isMuted
             )
         }
         self.format = format
         captionConfiguration = snapshot.captionConfiguration
+        captionTimeline = snapshot.captionTimeline
         revision = snapshot.revision
     }
 
@@ -54,6 +72,7 @@ enum ProjectExportError: Error, LocalizedError, Equatable {
     case emptyTimeline
     case missingFormat
     case missingVideoTrack(String)
+    case missingAudioTrack(String)
     case invalidTakeRange(UUID)
     case exportUnavailable
     case exportFailed(String)
@@ -61,9 +80,10 @@ enum ProjectExportError: Error, LocalizedError, Equatable {
 
     var errorDescription: String? {
         switch self {
-        case .emptyTimeline: "A Project needs at least one Take before export."
+        case .emptyTimeline: "A Project needs at least one Storyline Clip before export."
         case .missingFormat: "The Project format is unavailable."
         case let .missingVideoTrack(name): "\(name) has no video track."
+        case let .missingAudioTrack(name): "\(name) has no audio track for an unmuted Storyline Clip."
         case .invalidTakeRange: "An approved Take selection is outside its original media. Reset it and try again."
         case .exportUnavailable: "Project export is unavailable."
         case let .exportFailed(message): message
@@ -121,7 +141,8 @@ final class ProjectExporter {
             }
             let duration = videoRange.duration
             try compositionVideo.insertTimeRange(videoRange, of: sourceVideo, at: cursor)
-            if let sourceAudio = try await asset.loadTracks(withMediaType: .audio).first {
+            if !source.isMuted,
+               let sourceAudio = try await asset.loadTracks(withMediaType: .audio).first {
                 let audioRange = try await sourceAudio.load(.timeRange)
                 let sharedRange = CMTimeRangeGetIntersection(videoRange, otherRange: audioRange)
                 if sharedRange.isValid, !sharedRange.isEmpty {
@@ -155,7 +176,7 @@ final class ProjectExporter {
             track: compositionVideo,
             descriptions: descriptions,
             format: plan.format,
-            captions: ProjectCaptionExportTimeline.make(plan: plan)
+            captions: plan.captionTimeline
         )
         let outputDirectory = outputURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
@@ -174,7 +195,10 @@ final class ProjectExporter {
             try checkCancellation()
             try await exporter.export(to: outputURL, as: .mov)
             try checkCancellation()
-            _ = try await SegmentValidator().validate(outputURL)
+            _ = try await ProjectExportValidator().validate(
+                outputURL,
+                requiresAudio: plan.sources.contains(where: { !$0.isMuted })
+            )
             logger.info("Project export completed")
             return outputURL
         } catch {
@@ -251,6 +275,33 @@ final class ProjectExporter {
             y: (canvas.height - height * scale) / 2
         ))
         return result
+    }
+}
+
+private struct ProjectExportValidator {
+    private let minimumDuration: TimeInterval = 0.05
+
+    func validate(_ url: URL, requiresAudio: Bool) async throws -> TimeInterval {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw ProjectExportError.exportFailed("The Project export is missing.")
+        }
+        let values = try url.resourceValues(forKeys: [.fileSizeKey])
+        guard (values.fileSize ?? 0) > 0 else {
+            throw ProjectExportError.exportFailed("The Project export is empty.")
+        }
+        let asset = AVURLAsset(url: url)
+        guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
+            throw ProjectExportError.missingVideoTrack(url.lastPathComponent)
+        }
+        if requiresAudio,
+           try await asset.loadTracks(withMediaType: .audio).isEmpty {
+            throw ProjectExportError.missingAudioTrack(url.lastPathComponent)
+        }
+        let duration = try await videoTrack.load(.timeRange).duration.seconds
+        guard duration.isFinite, duration > minimumDuration else {
+            throw ProjectExportError.exportFailed("The Project export is too short to recover.")
+        }
+        return duration
     }
 }
 
