@@ -8,6 +8,11 @@ CAMENYA_CONFIG_DIR=${CAMENYA_CONFIG_PATH:h}
 CAMENYA_INSTALL_AFTER_CONFIGURATION=0
 CAMENYA_SHOW_DESTINATIONS=0
 
+read_local_setting() {
+  local key=$1
+  plutil -extract "$key" raw -o - "$CAMENYA_CONFIG_PATH" 2>/dev/null || true
+}
+
 print_usage() {
   cat <<'USAGE'
 Configure local signing for a self-built copy of Camenya.
@@ -60,15 +65,27 @@ if [[ -L "$CAMENYA_CONFIG_PATH" ]]; then
   exit 1
 fi
 
-if (( CAMENYA_SHOW_DESTINATIONS == 1 )) || [[ -z ${CAMENYA_DEVICE_ID:-} ]]; then
+CAMENYA_TEAM_VALUE=${CAMENYA_TEAM_ID:-}
+CAMENYA_DEVICE_VALUE=${CAMENYA_DEVICE_ID:-}
+CAMENYA_BUNDLE_VALUE=${CAMENYA_BUNDLE_ID:-}
+
+if [[ -f "$CAMENYA_CONFIG_PATH" ]]; then
+  CAMENYA_CONFIG_MODE=$(stat -f '%Lp' "$CAMENYA_CONFIG_PATH")
+  if (( (8#$CAMENYA_CONFIG_MODE & 8#077) != 0 )); then
+    print -u2 "Local signing configuration is readable by another user. Run chmod 600 on it and retry."
+    exit 1
+  fi
+
+  CAMENYA_TEAM_VALUE=${CAMENYA_TEAM_VALUE:-$(read_local_setting TeamID)}
+  CAMENYA_DEVICE_VALUE=${CAMENYA_DEVICE_VALUE:-$(read_local_setting DeviceID)}
+  CAMENYA_BUNDLE_VALUE=${CAMENYA_BUNDLE_VALUE:-$(read_local_setting BundleID)}
+fi
+
+if (( CAMENYA_SHOW_DESTINATIONS == 1 )) || [[ -z "$CAMENYA_DEVICE_VALUE" ]]; then
   print "Devices visible to Xcode:"
   xcodebuild -project Camenya.xcodeproj -scheme Camenya -showdestinations
   print
 fi
-
-CAMENYA_TEAM_VALUE=${CAMENYA_TEAM_ID:-}
-CAMENYA_DEVICE_VALUE=${CAMENYA_DEVICE_ID:-}
-CAMENYA_BUNDLE_VALUE=${CAMENYA_BUNDLE_ID:-}
 
 if [[ -z "$CAMENYA_TEAM_VALUE" ]]; then
   read "CAMENYA_TEAM_VALUE?Apple Development Team ID (10 letters or digits): "
