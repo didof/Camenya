@@ -11,8 +11,6 @@ struct CameraScreen: View {
     @State private var reviewingTimeline = false
     @State private var timelineSnapshot: ExportSnapshot?
     @State private var initialTimelineClipID: TimelineClip.ID?
-    @State private var configuringCaptions = false
-    @State private var reviewingCaptions = false
     @State private var confirmingCurrentTakeDiscard = false
     @State private var focusPoint: CGPoint?
     @State private var focusPulse = 0
@@ -59,11 +57,17 @@ struct CameraScreen: View {
                 if model.isExportingProject {
                     projectExportOverlay
                 }
+                if let exportError = model.projectExportErrorMessage,
+                   !model.isExportingProject {
+                    VStack {
+                        Spacer()
+                        projectExportErrorBanner(exportError)
+                            .padding(.horizontal, 12)
+                            .padding(.bottom, 108)
+                    }
+                }
                 if model.isAnalyzingTrim {
                     trimAnalysisOverlay
-                }
-                if model.isTranscribingCaptions {
-                    captionTranscriptionOverlay
                 }
                 if model.phase == .idle, let take = model.recoverableTakes.first {
                     recoveryOverlay(take)
@@ -88,6 +92,14 @@ struct CameraScreen: View {
             )
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
+        }
+        .sheet(item: Binding(
+            get: { model.shareableProjectExport },
+            set: { if $0 == nil { model.projectExportSharingFinished(completed: false) } }
+        )) { item in
+            SystemShareSheet(url: item.url) { completed in
+                model.projectExportSharingFinished(completed: completed)
+            }
         }
         .sheet(item: $reviewingTake) { take in
             TakeReviewScreen(
@@ -115,30 +127,9 @@ struct CameraScreen: View {
                 )
             }
         }
-        .sheet(isPresented: $configuringCaptions) {
-            CaptionSetupScreen(
-                existingConfiguration: model.captionConfiguration,
-                captionedTakeCount: model.captionedTakeCount,
-                totalTakeCount: model.project.takes.count,
-                onStart: { configuration in
-                    model.createCaptions(configuration: configuration)
-                },
-                onRegenerateAll: { configuration in
-                    model.createCaptions(configuration: configuration, regenerateAll: true)
-                }
-            )
-        }
-        .sheet(isPresented: $reviewingCaptions) {
-            CaptionReviewQueueScreen(model: model)
-        }
         .onChange(of: model.isAnalyzingTrim) { wasAnalyzing, isAnalyzing in
             if wasAnalyzing, !isAnalyzing, !model.trimReviewTakeIDs.isEmpty {
                 openTimeline(preferredTakeID: model.trimReviewTakeIDs.first)
-            }
-        }
-        .onChange(of: model.isTranscribingCaptions) { wasTranscribing, isTranscribing in
-            if wasTranscribing, !isTranscribing, !model.captionReviewTakeIDs.isEmpty {
-                reviewingCaptions = true
             }
         }
         .onChange(of: model.completedTakeForReview) { _, take in
@@ -156,9 +147,6 @@ struct CameraScreen: View {
         )) {
             if model.canRetrySave {
                 Button("Retry Save") { model.retrySave() }
-            }
-            if model.canRetryProjectExportSave {
-                Button("Retry Photos Save") { model.retryProjectExportSave() }
             }
             if model.canOpenSettingsForCurrentError {
                 Button("Open Settings") { model.openSettings() }
@@ -193,20 +181,12 @@ struct CameraScreen: View {
             model.cleanUpEdges()
         case .reviewEdges:
             openTimeline(preferredTakeID: model.trimReviewTakeIDs.first)
-        case .captionSettings:
-            configuringCaptions = true
-        case .reviewCaptions:
-            if model.prepareCaptionReview() { reviewingCaptions = true }
-            else { configuringCaptions = true }
-        case let .manageCaptions(takeID):
-            if model.prepareCaptionReview(takeID: takeID) { reviewingCaptions = true }
-            else { configuringCaptions = true }
         case let .manageEdges(takeID):
             if model.prepareTrimReview(takeID: takeID) {
                 openTimeline(preferredTakeID: takeID)
             }
         case .exportProject:
-            model.exportProject()
+            model.exportProject(includeCaptions: model.hasCompletedProjectCaptions)
         }
     }
 
@@ -763,6 +743,35 @@ struct CameraScreen: View {
         .accessibilityElement(children: .contain)
     }
 
+    private func projectExportErrorBanner(_ message: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.circle.fill")
+                .foregroundStyle(.orange)
+            Text(message)
+                .font(.footnote)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button("Dismiss") { model.dismissProjectExportError() }
+                .font(.footnote.weight(.semibold))
+                .frame(minWidth: 44, minHeight: 44)
+            if model.hasFailedProjectExportRetry {
+                Button("Retry") { model.retryFailedProjectExport() }
+                    .font(.footnote.weight(.semibold))
+                    .frame(minWidth: 44, minHeight: 44)
+                    .disabled(model.isTranscribingCaptions)
+                    .accessibilityHint(model.isTranscribingCaptions
+                        ? "Wait for caption generation to finish"
+                        : "Retry the same export operation")
+            }
+        }
+        .padding(12)
+        .background(CamenyaStyle.panel, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(CamenyaStyle.hairline, lineWidth: 1)
+        )
+        .accessibilityElement(children: .contain)
+    }
+
     private var trimAnalysisOverlay: some View {
         VStack(spacing: 14) {
             ProgressView(value: model.trimAnalysisProgress)
@@ -775,27 +784,6 @@ struct CameraScreen: View {
                 .multilineTextAlignment(.center)
                 .foregroundStyle(CamenyaStyle.muted)
             Button("Cancel Analysis", role: .cancel) { model.cancelTrimAnalysis() }
-                .buttonStyle(.bordered)
-        }
-        .padding(26)
-        .frame(maxWidth: 320)
-        .background(CamenyaStyle.panel, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(CamenyaStyle.hairline, lineWidth: 1))
-        .accessibilityElement(children: .contain)
-    }
-
-    private var captionTranscriptionOverlay: some View {
-        VStack(spacing: 14) {
-            ProgressView(value: model.captionTranscriptionProgress)
-                .progressViewStyle(.linear)
-                .tint(CamenyaStyle.paper)
-            Text(model.captionTranscriptionStatus ?? "Creating captions…")
-                .font(.headline)
-            Text("Speech recognition stays on this iPhone. Original Takes are never changed.")
-                .font(.footnote)
-                .multilineTextAlignment(.center)
-                .foregroundStyle(CamenyaStyle.muted)
-            Button("Cancel Transcription", role: .cancel) { model.cancelCaptionTranscription() }
                 .buttonStyle(.bordered)
         }
         .padding(26)

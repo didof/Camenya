@@ -34,46 +34,6 @@ struct TakeEdgeCleanupPresentation: Equatable, Sendable {
     }
 }
 
-struct TakeCaptionPresentation: Equatable, Sendable {
-    let label: String
-    let systemImage: String
-    let requiresAttention: Bool
-    let actionTitle: String
-
-    init(label: String, systemImage: String, requiresAttention: Bool, actionTitle: String) {
-        self.label = label
-        self.systemImage = systemImage
-        self.requiresAttention = requiresAttention
-        self.actionTitle = actionTitle
-    }
-
-    init(take: ProjectTake, configuration: ProjectCaptionConfiguration?) {
-        guard let captions = take.captions else {
-            self = Self(label: "No captions", systemImage: "captions.bubble", requiresAttention: false, actionTitle: "Create Captions")
-            return
-        }
-        let matchesProject = configuration?.localeIdentifier == captions.localeIdentifier
-        let matchesRange = take.concreteEffectiveRange == captions.sourceRange
-        if captions.reviewState == .stale || !matchesProject || !matchesRange {
-            self = Self(
-                label: "Captions need update",
-                systemImage: "exclamationmark.arrow.triangle.2.circlepath",
-                requiresAttention: true,
-                actionTitle: "Regenerate Captions"
-            )
-        } else if captions.reviewState == .needsReview {
-            self = Self(
-                label: "Captions to review",
-                systemImage: "exclamationmark.bubble",
-                requiresAttention: true,
-                actionTitle: "Review Captions"
-            )
-        } else {
-            self = Self(label: "Captions approved", systemImage: "checkmark.bubble", requiresAttention: false, actionTitle: "Edit Captions")
-        }
-    }
-}
-
 struct TakeListScreen: View {
     @ObservedObject var model: AppModel
     let onRequestProjectAction: (TakeListProjectAction) -> Void
@@ -131,10 +91,6 @@ struct TakeListScreen: View {
             take: take,
             clips: model.project.primaryStoryline.clips
         )
-        let captions = TakeCaptionPresentation(
-            take: take,
-            configuration: model.captionConfiguration
-        )
         return HStack(spacing: 10) {
             Button {
                 reviewingTake = take
@@ -166,9 +122,6 @@ struct TakeListScreen: View {
                     Label(cleanup.label, systemImage: cleanup.systemImage)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Label(captions.label, systemImage: captions.systemImage)
-                        .font(.caption.weight(captions.requiresAttention ? .semibold : .regular))
-                        .foregroundStyle(captions.requiresAttention ? .orange : .secondary)
                 }
                 }
                 .contentShape(Rectangle())
@@ -181,10 +134,6 @@ struct TakeListScreen: View {
                 }
                 Button(cleanup.actionTitle, systemImage: "waveform.badge.magnifyingglass") {
                     requestSilenceTrim(for: take)
-                }
-                .disabled(!model.canManageTakes)
-                Button(captions.actionTitle, systemImage: "captions.bubble") {
-                    onRequestProjectAction(.manageCaptions(takeID: take.id))
                 }
                 .disabled(!model.canManageTakes)
             } label: {
@@ -206,14 +155,10 @@ struct TakeListScreen: View {
                 HStack(spacing: 8) {
                     playProjectButton
                     cleanEdgesMenu
-                    captionsMenu
                 }
                 VStack(spacing: 8) {
                     playProjectButton
-                    HStack(spacing: 8) {
-                        cleanEdgesMenu
-                        captionsMenu
-                    }
+                    cleanEdgesMenu
                 }
             }
             .frame(maxWidth: .infinity)
@@ -221,9 +166,9 @@ struct TakeListScreen: View {
                 onRequestProjectAction(.exportProject)
             } label: {
                 Label(
-                    model.canRetryProjectExportSave ? "Save Export to Photos" : "Export Project to Photos",
-                    systemImage: model.canRetryProjectExportSave
-                        ? "photo.badge.arrow.down"
+                    model.canRetryProjectExportShare ? "Share Finished Video" : "Share Project",
+                    systemImage: model.canRetryProjectExportShare
+                        ? "square.and.arrow.up.circle.fill"
                         : "square.and.arrow.up"
                 )
                 .frame(maxWidth: .infinity, minHeight: 44)
@@ -231,7 +176,7 @@ struct TakeListScreen: View {
             .buttonStyle(.borderedProminent)
             .disabled(!model.canExportProject)
             .accessibilityHint(model.canExportProject
-                ? "Creates the explicit finalized Project Export before saving to Photos."
+                ? "Creates the explicit finalized Project Export and opens the system share sheet."
                 : "Add at least one Clip to the Primary Storyline before exporting.")
         }
         .font(.caption.weight(.semibold))
@@ -267,22 +212,6 @@ struct TakeListScreen: View {
             .disabled(!model.hasTakesNeedingEdgeAnalysis)
         } label: {
             Label("Clean Edges", systemImage: "waveform.badge.magnifyingglass")
-                .frame(maxWidth: .infinity, minHeight: 44)
-        }
-    }
-
-    private var captionsMenu: some View {
-        Menu {
-            if model.hasReviewableCaptions {
-                Button("Review & Edit Captions", systemImage: "text.bubble") {
-                    onRequestProjectAction(.reviewCaptions)
-                }
-            }
-            Button("Language, Position & Regenerate", systemImage: "gearshape") {
-                onRequestProjectAction(.captionSettings)
-            }
-        } label: {
-            Label("Captions", systemImage: "captions.bubble.fill")
                 .frame(maxWidth: .infinity, minHeight: 44)
         }
     }

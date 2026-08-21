@@ -278,7 +278,7 @@ final class ProjectExporter {
     }
 }
 
-private struct ProjectExportValidator {
+struct ProjectExportValidator {
     private let minimumDuration: TimeInterval = 0.05
 
     func validate(_ url: URL, requiresAudio: Bool) async throws -> TimeInterval {

@@ -2,6 +2,103 @@ import XCTest
 @testable import Camenya
 
 final class ProjectStoreTests: XCTestCase {
+    func testUnmarkedWorkingExportIsNeverRecoverableAcrossStoreRelaunch() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let staged = store.pendingExportWorkingURL(projectID: project.id)
+        try FileManager.default.createDirectory(
+            at: staged.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("partial export".utf8).write(to: staged)
+
+        let relaunchedStore = ProjectStore(projectsRoot: root)
+
+        XCTAssertNil(relaunchedStore.recoverableStagedExport(projectID: project.id))
+        XCTAssertFalse(relaunchedStore.pendingExportNeedsHandoff(projectID: project.id))
+    }
+
+    func testLegacyPhotosSaveRecoveryStateDecodesAsGenericExportHandoff() throws {
+        let state = try JSONDecoder().decode(
+            ProjectRecoveryState.self,
+            from: Data("\"photosSaveCompleted\"".utf8)
+        )
+
+        XCTAssertEqual(state, .exportHandoffCompleted)
+    }
+
+    func testFailedPendingExportCommitRestoresThePreviousFinishedMovie() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let pending = store.pendingExportURL(projectID: project.id)
+        try FileManager.default.createDirectory(
+            at: pending.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("previous export".utf8).write(to: pending)
+        let missingStagedFile = store.pendingExportWorkingURL(projectID: project.id)
+
+        XCTAssertThrowsError(try store.commitPendingExport(
+            projectID: project.id,
+            stagedURL: missingStagedFile
+        ))
+
+        XCTAssertEqual(try Data(contentsOf: pending), Data("previous export".utf8))
+    }
+
+    func testPendingExportIsReusableOnlyForTheExactVariantAndManifestRevision() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let pending = store.pendingExportURL(projectID: project.id)
+        try FileManager.default.createDirectory(
+            at: pending.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("finished".utf8).write(to: pending)
+        _ = try store.setPendingExportState(projectID: project.id, pending: true)
+        try store.recordPendingExportDescriptor(projectID: project.id, includeCaptions: true)
+
+        XCTAssertTrue(store.pendingExportMatches(projectID: project.id, includeCaptions: true))
+        XCTAssertFalse(store.pendingExportMatches(projectID: project.id, includeCaptions: false))
+
+        _ = try store.renameProject(id: project.id, name: "Changed after export")
+
+        XCTAssertFalse(store.pendingExportMatches(projectID: project.id, includeCaptions: true))
+    }
+
+    func testInvalidExportRecoveryMetadataStopsRetryWithoutDeletingTheMovie() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let pending = store.pendingExportURL(projectID: project.id)
+        try FileManager.default.createDirectory(
+            at: pending.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("finished".utf8).write(to: pending)
+        _ = try store.setPendingExportState(projectID: project.id, pending: true)
+        try store.recordPendingExportDescriptor(projectID: project.id, includeCaptions: false)
+
+        XCTAssertTrue(store.pendingExportMatches(projectID: project.id, includeCaptions: false))
+
+        store.invalidateExportRecoveryMetadata(projectID: project.id)
+
+        XCTAssertFalse(store.pendingExportMatches(projectID: project.id, includeCaptions: false))
+        XCTAssertFalse(store.pendingExportNeedsHandoff(projectID: project.id))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: pending.path))
+    }
+
     func testSchemaSevenProjectDoesNotInventLineageForComplementaryClipsFromDifferentSplits() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -181,7 +278,6 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertEqual(migrated.primaryStoryline.clips.map(\.takeID), migrated.takes.map(\.id))
         XCTAssertNil(migrated.takes.first?.trimDecision)
         XCTAssertNil(migrated.captionConfiguration)
-        XCTAssertNil(migrated.takes.first?.captions)
     }
 
     func testSchemaFourProjectMigratesRemovedClipBaselineWithoutChangingStoryline() throws {
@@ -240,143 +336,58 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertTrue(migrated.removedClips.isEmpty)
     }
 
-    func testSchemaFiveProjectMigratesCaptionTimelineIssueBaseline() throws {
+    func testSchemaNineMigrationRemovesDerivedTakeCaptionsButKeepsPreferences() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = ProjectStore(projectsRoot: root)
         let projectID = UUID()
-        let cue = CaptionCue(
-            range: TakeRange(startSeconds: 3, endSeconds: 7),
-            recognizedText: "legacy unsafe caption",
-            text: "legacy unsafe caption",
-            confidence: 0.9,
-            alternatives: [],
-            timedSpans: []
-        )
         let take = ProjectTake(
-            id: UUID(),
             createdAt: Date(timeIntervalSince1970: 0),
-            duration: 10,
-            captions: TakeCaptionTrack(
-                localeIdentifier: "en-US",
-                sourceRange: TakeRange(startSeconds: 0, endSeconds: 10),
-                recognizer: .speechRecognizerIOS18,
-                reviewState: .approved,
-                cues: [cue]
-            )
+            duration: 3
         )
-        let clip = TimelineClip(
-            takeID: take.id,
-            availableRange: TakeRange(startSeconds: 0, endSeconds: 10),
-            selection: TakeRange(startSeconds: 5, endSeconds: 10)
+        let configuration = ProjectCaptionConfiguration(
+            localeIdentifier: "en-US",
+            placement: .upper,
+            style: .highContrast,
+            density: .more
         )
+        var expectedConfiguration = configuration
+        expectedConfiguration.style = .clean
         let legacy = ProjectManifest(
-            schemaVersion: 5,
+            schemaVersion: 9,
             id: projectID,
             createdAt: Date(timeIntervalSince1970: 0),
             modifiedAt: Date(timeIntervalSince1970: 1),
-            name: "Schema Five",
+            name: "Legacy Captions",
             format: .portrait,
             takes: [take],
-            primaryStoryline: PrimaryStoryline(clips: [clip]),
-            captionConfiguration: ProjectCaptionConfiguration(
-                localeIdentifier: "en-US",
-                placement: .lower
-            )
+            captionConfiguration: configuration
         )
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        var object = try XCTUnwrap(
-            JSONSerialization.jsonObject(with: encoder.encode(legacy)) as? [String: Any]
-        )
-        object.removeValue(forKey: "captionTimelineIssues")
         let directory = store.projectDirectory(id: projectID)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try JSONSerialization.data(withJSONObject: object).write(
-            to: directory.appendingPathComponent("project.json")
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        var json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoder.encode(legacy)) as? [String: Any]
         )
+        var legacyTakes = try XCTUnwrap(json["takes"] as? [[String: Any]])
+        legacyTakes[0]["captions"] = ["legacyDerivedTrack": true]
+        json["takes"] = legacyTakes
+        json["captionTimelineIssues"] = [["legacyBoundaryRepair": true]]
+        let manifestURL = directory.appendingPathComponent("project.json")
+        try JSONSerialization.data(withJSONObject: json).write(to: manifestURL)
 
         let migrated = try store.load(id: projectID)
+        let persisted = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as? [String: Any]
+        )
+        let persistedTakes = try XCTUnwrap(persisted["takes"] as? [[String: Any]])
 
         XCTAssertEqual(migrated.schemaVersion, ProjectManifest.currentSchemaVersion)
-        XCTAssertEqual(migrated.captionTimelineIssues.count, 1)
-        XCTAssertEqual(migrated.captionTimelineIssues.first?.takeID, take.id)
-        XCTAssertEqual(migrated.captionTimelineIssues.first?.cueID, cue.id)
-        XCTAssertEqual(migrated.captionTimelineIssues.first?.reason, .boundaryCut)
-        XCTAssertEqual(migrated.captionTimelineIssues.first?.reviewState, .needsReview)
-    }
-
-    func testTakeTrimMutationsReconcilePersistedCaptionTimelineIssues() async throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let store = ProjectStore(projectsRoot: root)
-        let project = try store.createProject()
-        let takeID = UUID()
-        let withTake = try store.addTake(
-            projectID: project.id,
-            takeID: takeID,
-            movieAt: makeMovie(),
-            orientation: .portrait,
-            duration: 10,
-            createdAt: Date()
-        )
-        let cue = CaptionCue(
-            range: TakeRange(startSeconds: 3, endSeconds: 7),
-            recognizedText: "caption across trim",
-            text: "caption across trim",
-            confidence: 0.9,
-            alternatives: [],
-            timedSpans: []
-        )
-        var seeded = try store.load(id: project.id)
-        seeded.captionConfiguration = ProjectCaptionConfiguration(
-            localeIdentifier: "en-US",
-            placement: .lower
-        )
-        seeded.takes[0].captions = TakeCaptionTrack(
-            localeIdentifier: "en-US",
-            sourceRange: TakeRange(startSeconds: 0, endSeconds: 10),
-            recognizer: .speechRecognizerIOS18,
-            reviewState: .approved,
-            cues: [cue]
-        )
-        try store.persist(seeded, expectedRevision: withTake.primaryStoryline.revision)
-        let editor = TimelineEditor(projectID: project.id, projectStore: store)
-        let clipID = try XCTUnwrap(seeded.primaryStoryline.clips.first?.id)
-        let trimmed = try await editor.perform(
-            .trim(
-                clipID: clipID,
-                selection: TakeRange(startSeconds: 5, endSeconds: 10)
-            ),
-            expectedRevision: seeded.primaryStoryline.revision
-        )
-        XCTAssertEqual(trimmed.project.captionTimelineIssues.first?.fragments.first?.sourceRange,
-                       TakeRange(startSeconds: 5, endSeconds: 7))
-
-        let reset = try store.resetTrim(projectID: project.id, takeID: takeID)
-
-        XCTAssertEqual(reset.captionTimelineIssues.count, 1)
-        XCTAssertTrue(reset.captionTimelineIssues[0].fragments.isEmpty)
-
-        let trimmedAgain = try await editor.perform(
-            .trim(
-                clipID: clipID,
-                selection: TakeRange(startSeconds: 5, endSeconds: 10)
-            ),
-            expectedRevision: reset.primaryStoryline.revision
-        )
-        XCTAssertFalse(trimmedAgain.project.captionTimelineIssues.isEmpty)
-
-        let takeTrimmed = try store.setTrimDecision(
-            projectID: project.id,
-            takeID: takeID,
-            decision: .useSelection(TakeRange(startSeconds: 6, endSeconds: 10))
-        )
-
-        XCTAssertEqual(takeTrimmed.takes.first?.captions?.reviewState, .stale)
-        XCTAssertTrue(takeTrimmed.captionTimelineIssues.isEmpty)
+        XCTAssertEqual(migrated.captionConfiguration, expectedConfiguration)
+        XCTAssertNil(persisted["captionTimelineIssues"])
+        XCTAssertNil(persistedTakes.first?["captions"])
     }
 
     func testUnreviewedTrimSuggestionPersistsWithoutChangingEffectiveDuration() throws {
@@ -893,7 +904,7 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertTrue(store.pendingExportURL(projectID: project.id).path.hasPrefix(store.projectDirectory(id: project.id).path))
     }
 
-    func testCompletedPhotosExportIsNotOfferedForRetryAndIsCleanedOnLaunch() throws {
+    func testCompletedExportHandoffIsNotOfferedForRetryAndIsCleanedOnLaunch() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = ProjectStore(projectsRoot: root)
@@ -902,16 +913,16 @@ final class ProjectStoreTests: XCTestCase {
         try FileManager.default.createDirectory(at: export.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("export".utf8).write(to: export)
 
-        try store.recordPhotosSaveCompleted(projectID: project.id)
+        try store.recordExportHandoffCompleted(projectID: project.id)
 
-        XCTAssertFalse(store.pendingExportNeedsPhotoSave(projectID: project.id))
-        XCTAssertEqual(try store.load(id: project.id).recoveryState, .photosSaveCompleted)
+        XCTAssertFalse(store.pendingExportNeedsHandoff(projectID: project.id))
+        XCTAssertEqual(try store.load(id: project.id).recoveryState, .exportHandoffCompleted)
         store.finishCompletedExports()
         XCTAssertFalse(FileManager.default.fileExists(atPath: export.path))
         XCTAssertEqual(try store.load(id: project.id).recoveryState, .clean)
     }
 
-    func testPendingPhotosExportRemainsAvailableForRetry() throws {
+    func testUndescribedPendingExportIsPreservedButNotOfferedForRetry() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = ProjectStore(projectsRoot: root)
@@ -925,7 +936,7 @@ final class ProjectStoreTests: XCTestCase {
 
         _ = try store.setPendingExportState(projectID: project.id, pending: true)
 
-        XCTAssertTrue(store.pendingExportNeedsPhotoSave(projectID: project.id))
+        XCTAssertFalse(store.pendingExportNeedsHandoff(projectID: project.id))
         XCTAssertTrue(FileManager.default.fileExists(atPath: export.path))
         XCTAssertEqual(try store.load(id: project.id).recoveryState, .pendingExport)
     }

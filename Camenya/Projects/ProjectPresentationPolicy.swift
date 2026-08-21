@@ -17,6 +17,20 @@ enum ProjectViewerPrimaryAction: Equatable, Sendable {
 }
 
 enum ProjectPresentationPolicy {
+    static func captionLanguageIdentifiers(
+        including persistedIdentifiers: [String],
+        currentLocaleIdentifier: String = Locale.current.identifier
+    ) -> [String] {
+        let defaults = ["en-US", "en-GB", "it-IT", "de-DE", "fr-FR", "es-ES"]
+        var seen = Set<String>()
+        return ([currentLocaleIdentifier] + persistedIdentifiers + defaults).compactMap { identifier in
+            let trimmed = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalizedKey = trimmed.replacingOccurrences(of: "_", with: "-").lowercased()
+            guard !trimmed.isEmpty, seen.insert(normalizedKey).inserted else { return nil }
+            return trimmed
+        }
+    }
+
     static func coverTake(in project: ProjectManifest) -> ProjectTake? {
         coverSource(in: project)?.take
     }
@@ -58,21 +72,6 @@ enum ProjectPresentationPolicy {
         return now - revealStartedAt >= 2
     }
 
-    static func preparationIssueCount(
-        for clip: TimelineClip,
-        trimReviewTakeIDs: [UUID],
-        captionReviewTakeIDs: [UUID],
-        captionTimelineIssues: [CaptionTimelineIssue]
-    ) -> Int {
-        preparationIssueCount(
-            clipID: clip.id,
-            takeID: clip.takeID,
-            trimReviewTakeIDs: trimReviewTakeIDs,
-            captionReviewTakeIDs: captionReviewTakeIDs,
-            captionTimelineIssues: captionTimelineIssues
-        )
-    }
-
     static func shouldDiscardDraft(
         _ project: ProjectManifest,
         hasRecoverableMedia: Bool
@@ -83,21 +82,6 @@ enum ProjectPresentationPolicy {
             && project.primaryStoryline.clips.isEmpty
             && project.removedClips.isEmpty
             && !hasRecoverableMedia
-    }
-
-    private static func preparationIssueCount(
-        clipID: TimelineClip.ID,
-        takeID: UUID,
-        trimReviewTakeIDs: [UUID],
-        captionReviewTakeIDs: [UUID],
-        captionTimelineIssues: [CaptionTimelineIssue]
-    ) -> Int {
-        (trimReviewTakeIDs.contains(takeID) ? 1 : 0)
-            + (captionReviewTakeIDs.contains(takeID) ? 1 : 0)
-            + captionTimelineIssues.filter {
-                $0.reviewState == .needsReview
-                    && $0.fragments.contains(where: { $0.clipID == clipID })
-            }.count
     }
 
 }

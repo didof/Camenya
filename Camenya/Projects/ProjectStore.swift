@@ -1,5 +1,28 @@
 import Foundation
 
+private struct PendingExportDescriptor: Codable, Equatable {
+    let manifestRevision: UInt64
+    let includeCaptions: Bool
+}
+
+private struct StagedExportDescriptor: Codable, Equatable {
+    let manifestRevision: UInt64
+    let includeCaptions: Bool
+    let fileName: String
+}
+
+private struct CompletedStagedExportIdentity: Equatable {
+    let manifestRevision: UInt64
+    let includeCaptions: Bool
+}
+
+struct RecoverableStagedExport: Equatable, Sendable {
+    let url: URL
+    let manifestRevision: UInt64
+    let includeCaptions: Bool
+    let isCommitted: Bool
+}
+
 struct ProjectStore: Sendable {
     private static let persistenceLock = NSLock()
 
@@ -34,7 +57,15 @@ struct ProjectStore: Sendable {
         var project = try decoder.decode(ProjectManifest.self, from: Data(contentsOf: manifestURL(id: id)))
         if project.schemaVersion < ProjectManifest.currentSchemaVersion {
             let expectedRevision = project.primaryStoryline.revision
-            project.captionTimelineIssues = CaptionTimelineProjection.reconciledIssues(in: project)
+            if project.schemaVersion < 10 {
+                // Take-owned captions were derived data from the pre-Picture-Lock workflow.
+                // Keep the user's caption configuration, but remove tracks that can no longer
+                // be presented or exported safely against an editable Storyline. Their retired
+                // JSON keys decode as unknown fields and disappear when schema 10 is persisted.
+                if project.captionConfiguration?.style == .highContrast {
+                    project.captionConfiguration?.style = .clean
+                }
+            }
             project.schemaVersion = ProjectManifest.currentSchemaVersion
             try save(project, expectedRevision: expectedRevision)
         }
@@ -80,91 +111,290 @@ struct ProjectStore: Sendable {
     }
 
     @discardableResult
-    func setCaptionConfiguration(
+    func setTakeSpokenLanguage(
+        projectID: UUID,
+        takeID: UUID,
+        localeIdentifier: String?,
+        modifiedAt: Date = Date()
+    ) throws -> ProjectManifest {
+        var project = try load(id: projectID)
+        let expectedRevision = project.primaryStoryline.revision
+        guard project.pictureLock == nil else { throw ProjectStoreError.pictureLocked }
+        guard let index = project.takes.firstIndex(where: { $0.id == takeID }) else {
+            throw ProjectStoreError.takeNotFound(takeID)
+        }
+        let normalized = localeIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines)
+        project.takes[index].spokenLanguageIdentifier = normalized?.isEmpty == false ? normalized : nil
+        project.modifiedAt = modifiedAt
+        try save(project, expectedRevision: expectedRevision)
+        return project
+    }
+
+    @discardableResult
+    func updateProjectCaptionPresentation(
         projectID: UUID,
         configuration: ProjectCaptionConfiguration,
+        reflowedCues: [CaptionCue]? = nil,
         modifiedAt: Date = Date()
     ) throws -> ProjectManifest {
         var project = try load(id: projectID)
         let expectedRevision = project.primaryStoryline.revision
-        if project.captionConfiguration?.localeIdentifier != configuration.localeIdentifier {
-            for index in project.takes.indices {
-                guard var captions = project.takes[index].captions,
-                      captions.localeIdentifier != configuration.localeIdentifier else { continue }
-                captions.reviewState = .stale
-                project.takes[index].captions = captions
+        guard let pictureLock = project.pictureLock,
+              var track = project.projectCaptionTrack,
+              track.pictureLockID == pictureLock.id else {
+            throw ProjectStoreError.pictureLockRequired
+        }
+        guard configuration.localeIdentifier == project.captionConfiguration?.localeIdentifier else {
+            throw ProjectStoreError.projectCaptionLanguageChangeRequiresRegeneration
+        }
+        if let reflowedCues {
+            guard reflowedCues.allSatisfy({ cue in
+                cue.range.start.seconds.isFinite
+                    && cue.range.end.seconds.isFinite
+                    && cue.range.duration > 0
+                    && cue.range.start.seconds >= 0
+                    && cue.range.end.seconds <= pictureLock.duration.seconds
+            }) else {
+                throw ProjectStoreError.invalidProjectCaptionTrack
+            }
+            let sorted = reflowedCues.sorted { $0.range.start.seconds < $1.range.start.seconds }
+            if sorted != track.cues {
+                track.cues = sorted
+                track.reviewState = .needsReview
             }
         }
+        if track.isGenerationComplete,
+           !ProjectCaptionTrackValidator.canComplete(
+                track,
+                duration: pictureLock.duration.seconds,
+                format: project.format ?? .portrait,
+                configuration: configuration
+           ) {
+            throw ProjectStoreError.invalidProjectCaptionTrack
+        }
+        project.projectCaptionTrack = track
         project.captionConfiguration = configuration
-        project.captionTimelineIssues = CaptionTimelineProjection.reconciledIssues(in: project)
         project.modifiedAt = modifiedAt
         try save(project, expectedRevision: expectedRevision)
         return project
     }
 
     @discardableResult
-    func recordCaptionDraft(
+    func createPictureLock(
         projectID: UUID,
-        takeID: UUID,
+        configuration: ProjectCaptionConfiguration,
+        createdAt: Date = Date()
+    ) throws -> ProjectManifest {
+        var project = try load(id: projectID)
+        let expectedRevision = project.primaryStoryline.revision
+        guard ProjectPictureLockReadiness.isReady(project) else {
+            throw ProjectStoreError.projectNotReadyForPictureLock
+        }
+        if project.pictureLock != nil, project.projectCaptionTrack != nil {
+            return project
+        }
+        let pictureLock = project.pictureLock ?? ProjectPictureLock(
+            createdAt: createdAt,
+            storylineRevision: expectedRevision,
+            clips: project.primaryStoryline.clips
+        )
+        let regions = try makeProjectCaptionRegions(
+            pictureLock: pictureLock,
+            project: project,
+            configuration: configuration
+        )
+        project.captionConfiguration = configuration
+        project.pictureLock = pictureLock
+        project.projectCaptionTrack = ProjectCaptionTrack(
+            pictureLockID: pictureLock.id,
+            reviewState: .needsReview,
+            regions: regions,
+            cues: []
+        )
+        project.modifiedAt = createdAt
+        try save(project, expectedRevision: expectedRevision)
+        return project
+    }
+
+    @discardableResult
+    func recordProjectCaptionRegion(
+        projectID: UUID,
+        regionID: UUID,
         draft: TakeCaptionTrack,
-        expectedStorylineRevision: StorylineRevision? = nil,
         modifiedAt: Date = Date()
     ) throws -> ProjectManifest {
         var project = try load(id: projectID)
         let expectedRevision = project.primaryStoryline.revision
-        if let expectedStorylineRevision,
-           expectedStorylineRevision != expectedRevision {
-            throw ProjectStoreError.staleRevision(
-                expected: expectedStorylineRevision,
-                actual: expectedRevision
-            )
+        guard let pictureLock = project.pictureLock,
+              var track = project.projectCaptionTrack,
+              track.pictureLockID == pictureLock.id else {
+            throw ProjectStoreError.pictureLockRequired
         }
-        guard let index = project.takes.firstIndex(where: { $0.id == takeID }) else {
-            throw ProjectStoreError.takeNotFound(takeID)
+        guard let regionIndex = track.regions.firstIndex(where: { $0.id == regionID }) else {
+            throw ProjectStoreError.captionRegionNotFound(regionID)
         }
-        guard project.captionConfiguration?.localeIdentifier == draft.localeIdentifier else {
+        let region = track.regions[regionIndex]
+        guard region.state == .pending else { return project }
+        guard draft.localeIdentifier == region.localeIdentifier else {
             throw ProjectStoreError.captionLocaleMismatch
         }
-        guard captionDraftIsValid(
-            draft,
-            takeDuration: project.takes[index].duration
-        ) else {
-            throw ProjectStoreError.invalidCaptionRange(takeID)
+        guard draft.sourceRange == region.sourceRange,
+              let take = project.takes.first(where: { $0.id == region.takeID }),
+              captionDraftIsValid(draft, takeDuration: take.duration) else {
+            throw ProjectStoreError.invalidCaptionRange(region.takeID)
         }
-        var persistedDraft = draft
-        persistedDraft.reviewState = .needsReview
-        project.takes[index].captions = persistedDraft
-        project.captionTimelineIssues = CaptionTimelineProjection.reconciledIssues(in: project)
+        let configuration = project.captionConfiguration
+            ?? ProjectCaptionConfiguration(localeIdentifier: region.localeIdentifier, placement: .lower)
+        let mapped = CaptionPresentationComposer.compose(
+            CaptionDensityReflow.apply(
+                configuration.density,
+                to: draft.cues.map { ProjectCaptionTimeRebaser.rebase($0, from: region) },
+                regions: [region],
+                configuration: configuration,
+                format: project.format ?? .portrait
+            ),
+            configuration: configuration,
+            format: project.format ?? .portrait
+        )
+        guard mapped.allSatisfy({ cue in
+            cue.range.start.seconds >= region.projectTimeRange.start.seconds
+                && cue.range.end.seconds <= region.projectTimeRange.end.seconds
+        }) else {
+            throw ProjectStoreError.invalidProjectCaptionTrack
+        }
+        track.cues.append(contentsOf: mapped)
+        track.cues.sort { $0.range.start.seconds < $1.range.start.seconds }
+        track.regions[regionIndex].state = .completed
+        track.regions[regionIndex].recognizer = draft.recognizer
+        track.reviewState = .needsReview
+        project.projectCaptionTrack = track
         project.modifiedAt = modifiedAt
         try save(project, expectedRevision: expectedRevision)
         return project
     }
 
     @discardableResult
-    func approveCaptions(
+    func cancelProjectCaptionGeneration(
         projectID: UUID,
-        takeID: UUID,
         modifiedAt: Date = Date()
     ) throws -> ProjectManifest {
         var project = try load(id: projectID)
         let expectedRevision = project.primaryStoryline.revision
-        guard let index = project.takes.firstIndex(where: { $0.id == takeID }) else {
-            throw ProjectStoreError.takeNotFound(takeID)
+        guard project.pictureLock != nil else { throw ProjectStoreError.pictureLockRequired }
+        if project.projectCaptionTrack?.reviewState != .approved {
+            project.projectCaptionTrack = nil
         }
-        guard var captions = project.takes[index].captions else {
-            throw ProjectStoreError.captionsNotFound(takeID)
+        project.modifiedAt = modifiedAt
+        try save(project, expectedRevision: expectedRevision)
+        return project
+    }
+
+    @discardableResult
+    func regenerateProjectCaptions(
+        projectID: UUID,
+        configuration: ProjectCaptionConfiguration,
+        takeLanguageOverrides: [UUID: String],
+        modifiedAt: Date = Date()
+    ) throws -> ProjectManifest {
+        var project = try load(id: projectID)
+        let expectedRevision = project.primaryStoryline.revision
+        guard let pictureLock = project.pictureLock else {
+            throw ProjectStoreError.pictureLockRequired
         }
-        guard let effectiveRange = project.takes[index].concreteEffectiveRange else {
-            throw ProjectStoreError.invalidTakeRange(takeID)
+        for index in project.takes.indices {
+            guard let value = takeLanguageOverrides[project.takes[index].id] else { continue }
+            let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            project.takes[index].spokenLanguageIdentifier = normalized.isEmpty ? nil : normalized
         }
-        guard captions.reviewState != .stale,
-              captions.localeIdentifier == project.captionConfiguration?.localeIdentifier,
-              captions.sourceRange == effectiveRange else {
-            throw ProjectStoreError.staleCaptions(takeID)
+        let regions = try makeProjectCaptionRegions(
+            pictureLock: pictureLock,
+            project: project,
+            configuration: configuration
+        )
+        project.captionConfiguration = configuration
+        project.projectCaptionTrack = ProjectCaptionTrack(
+            pictureLockID: pictureLock.id,
+            reviewState: .needsReview,
+            regions: regions,
+            cues: []
+        )
+        project.modifiedAt = modifiedAt
+        try save(project, expectedRevision: expectedRevision)
+        return project
+    }
+
+    @discardableResult
+    func saveProjectCaptionCues(
+        projectID: UUID,
+        cues: [CaptionCue],
+        modifiedAt: Date = Date()
+    ) throws -> ProjectManifest {
+        var project = try load(id: projectID)
+        let expectedRevision = project.primaryStoryline.revision
+        guard let pictureLock = project.pictureLock,
+              var track = project.projectCaptionTrack,
+              track.pictureLockID == pictureLock.id else {
+            throw ProjectStoreError.pictureLockRequired
         }
-        captions.reviewState = .approved
-        project.takes[index].captions = captions
-        project.captionTimelineIssues = CaptionTimelineProjection.reconciledIssues(in: project)
+        guard cues.allSatisfy({ cue in
+            cue.range.start.seconds.isFinite
+                && cue.range.end.seconds.isFinite
+                && cue.range.duration > 0
+                && cue.range.start.seconds >= 0
+                && cue.range.end.seconds <= pictureLock.duration.seconds
+        }) else {
+            throw ProjectStoreError.invalidProjectCaptionTrack
+        }
+        track.cues = cues.sorted { $0.range.start.seconds < $1.range.start.seconds }
+        track.reviewState = .needsReview
+        project.projectCaptionTrack = track
+        project.modifiedAt = modifiedAt
+        try save(project, expectedRevision: expectedRevision)
+        return project
+    }
+
+    @discardableResult
+    func approveProjectCaptionTrack(
+        projectID: UUID,
+        modifiedAt: Date = Date()
+    ) throws -> ProjectManifest {
+        var project = try load(id: projectID)
+        let expectedRevision = project.primaryStoryline.revision
+        guard let pictureLock = project.pictureLock,
+              var track = project.projectCaptionTrack,
+              track.pictureLockID == pictureLock.id else {
+            throw ProjectStoreError.pictureLockRequired
+        }
+        guard track.isGenerationComplete else {
+            throw ProjectStoreError.incompleteProjectCaptions
+        }
+        guard let configuration = project.captionConfiguration else {
+            throw ProjectStoreError.invalidProjectCaptionTrack
+        }
+        guard ProjectCaptionTrackValidator.canComplete(
+            track,
+            duration: pictureLock.duration.seconds,
+            format: project.format ?? .portrait,
+            configuration: configuration
+        ) else {
+            throw ProjectStoreError.invalidProjectCaptionTrack
+        }
+        track.reviewState = .approved
+        project.projectCaptionTrack = track
+        project.modifiedAt = modifiedAt
+        try save(project, expectedRevision: expectedRevision)
+        return project
+    }
+
+    @discardableResult
+    func unlockPictureLock(
+        projectID: UUID,
+        modifiedAt: Date = Date()
+    ) throws -> ProjectManifest {
+        var project = try load(id: projectID)
+        let expectedRevision = project.primaryStoryline.revision
+        project.pictureLock = nil
+        project.projectCaptionTrack = nil
         project.modifiedAt = modifiedAt
         try save(project, expectedRevision: expectedRevision)
         return project
@@ -182,6 +412,7 @@ struct ProjectStore: Sendable {
     ) throws -> ProjectManifest {
         var project = try load(id: projectID)
         let expectedRevision = project.primaryStoryline.revision
+        guard project.pictureLock == nil else { throw ProjectStoreError.pictureLocked }
         let format = ProjectFormat(orientation: orientation)
         if let existing = project.format, existing != format {
             throw ProjectStoreError.formatMismatch(expected: existing, received: format)
@@ -321,7 +552,6 @@ struct ProjectStore: Sendable {
         }
 
         project.takes.remove(at: index)
-        project.captionTimelineIssues.removeAll { $0.takeID == takeID }
         project.modifiedAt = modifiedAt
         do {
             try save(project, expectedRevision: expectedRevision)
@@ -434,6 +664,198 @@ struct ProjectStore: Sendable {
             .appendingPathComponent("project.mov")
     }
 
+    func pendingExportWorkingURL(projectID: UUID) -> URL {
+        pendingExportURL(projectID: projectID)
+            .deletingLastPathComponent()
+            .appendingPathComponent("working-\(UUID().uuidString).mov")
+    }
+
+    /// Atomically promotes an export only after the exporter's media validator has succeeded.
+    /// The completed filename is the durable recovery marker if descriptor persistence fails.
+    func markValidatedStagedExportCompleted(
+        projectID: UUID,
+        stagedURL: URL,
+        includeCaptions: Bool
+    ) throws -> URL {
+        let directory = pendingExportURL(projectID: projectID).deletingLastPathComponent()
+        guard stagedURL.deletingLastPathComponent().standardizedFileURL == directory.standardizedFileURL,
+              stagedURL.lastPathComponent.hasPrefix("working-"),
+              stagedURL.pathExtension == "mov" else {
+            throw ProjectStoreError.mediaNotFound(stagedURL)
+        }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let project = try load(id: projectID)
+        let completedURL = directory.appendingPathComponent(
+            "completed-r\(project.manifestRevision)-c\(includeCaptions ? 1 : 0)-\(UUID().uuidString).mov"
+        )
+        try FileManager.default.moveItem(at: stagedURL, to: completedURL)
+        return completedURL
+    }
+
+    func recordStagedExportDescriptor(
+        projectID: UUID,
+        stagedURL: URL,
+        includeCaptions: Bool
+    ) throws {
+        let directory = pendingExportURL(projectID: projectID).deletingLastPathComponent()
+        let project = try load(id: projectID)
+        guard FileManager.default.fileExists(atPath: stagedURL.path),
+              let identity = completedStagedExportIdentity(for: stagedURL, in: directory),
+              identity.manifestRevision == project.manifestRevision,
+              identity.includeCaptions == includeCaptions else {
+            throw ProjectStoreError.mediaNotFound(stagedURL)
+        }
+        let descriptor = StagedExportDescriptor(
+            manifestRevision: identity.manifestRevision,
+            includeCaptions: includeCaptions,
+            fileName: stagedURL.lastPathComponent
+        )
+        try JSONEncoder().encode(descriptor).write(
+            to: stagedExportDescriptorURL(projectID: projectID),
+            options: .atomic
+        )
+    }
+
+    func recoverableStagedExport(projectID: UUID) -> RecoverableStagedExport? {
+        let directory = pendingExportURL(projectID: projectID).deletingLastPathComponent()
+        guard let project = try? load(id: projectID) else { return nil }
+        if let data = try? Data(contentsOf: stagedExportDescriptorURL(projectID: projectID)),
+           let descriptor = try? JSONDecoder().decode(StagedExportDescriptor.self, from: data),
+           URL(fileURLWithPath: descriptor.fileName).lastPathComponent == descriptor.fileName {
+            let stagedURL = directory.appendingPathComponent(descriptor.fileName)
+            let identity = completedStagedExportIdentity(for: stagedURL, in: directory)
+            let stagedExists = FileManager.default.fileExists(atPath: stagedURL.path)
+                && identity?.manifestRevision == descriptor.manifestRevision
+                && identity?.includeCaptions == descriptor.includeCaptions
+            let pendingURL = pendingExportURL(projectID: projectID)
+            let pendingExists = FileManager.default.fileExists(atPath: pendingURL.path)
+            let committedByRecoveryState = descriptor.manifestRevision < UInt64.max
+                && project.manifestRevision == descriptor.manifestRevision + 1
+                && project.recoveryState == .pendingExport
+            if stagedExists, project.manifestRevision == descriptor.manifestRevision {
+                return RecoverableStagedExport(
+                    url: stagedURL,
+                    manifestRevision: descriptor.manifestRevision,
+                    includeCaptions: descriptor.includeCaptions,
+                    isCommitted: false
+                )
+            }
+            if !stagedExists,
+               pendingExists,
+               project.manifestRevision == descriptor.manifestRevision || committedByRecoveryState {
+                return RecoverableStagedExport(
+                    url: pendingURL,
+                    manifestRevision: descriptor.manifestRevision,
+                    includeCaptions: descriptor.includeCaptions,
+                    isCommitted: true
+                )
+            }
+        }
+        let candidates = ((try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []).compactMap { url -> (URL, Date)? in
+            guard let identity = completedStagedExportIdentity(for: url, in: directory),
+                  identity.manifestRevision == project.manifestRevision else { return nil }
+            let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate ?? .distantPast
+            return (url, date)
+        }
+        guard let candidate = candidates.max(by: { $0.1 < $1.1 }),
+              let identity = completedStagedExportIdentity(for: candidate.0, in: directory) else {
+            return nil
+        }
+        return RecoverableStagedExport(
+            url: candidate.0,
+            manifestRevision: identity.manifestRevision,
+            includeCaptions: identity.includeCaptions,
+            isCommitted: false
+        )
+    }
+
+    func clearStagedExportRequest(projectID: UUID) throws {
+        let descriptor = stagedExportDescriptorURL(projectID: projectID)
+        guard FileManager.default.fileExists(atPath: descriptor.path) else { return }
+        try FileManager.default.removeItem(at: descriptor)
+    }
+
+    func invalidateExportRecoveryMetadata(projectID: UUID) {
+        for descriptor in [
+            stagedExportDescriptorURL(projectID: projectID),
+            pendingExportDescriptorURL(projectID: projectID)
+        ] where FileManager.default.fileExists(atPath: descriptor.path) {
+            try? FileManager.default.removeItem(at: descriptor)
+        }
+    }
+
+    @discardableResult
+    func quarantineInvalidStagedExport(projectID: UUID, stagedURL: URL) -> URL? {
+        invalidateExportRecoveryMetadata(projectID: projectID)
+        let directory = pendingExportURL(projectID: projectID).deletingLastPathComponent()
+        guard completedStagedExportIdentity(for: stagedURL, in: directory) != nil,
+              FileManager.default.fileExists(atPath: stagedURL.path) else { return nil }
+        let quarantinedURL = directory.appendingPathComponent(
+            "invalid-\(UUID().uuidString)-\(stagedURL.lastPathComponent)"
+        )
+        do {
+            try FileManager.default.moveItem(at: stagedURL, to: quarantinedURL)
+            return quarantinedURL
+        } catch {
+            return nil
+        }
+    }
+
+    func recordPendingExportDescriptor(
+        projectID: UUID,
+        includeCaptions: Bool
+    ) throws {
+        let project = try load(id: projectID)
+        let descriptor = PendingExportDescriptor(
+            manifestRevision: project.manifestRevision,
+            includeCaptions: includeCaptions
+        )
+        try JSONEncoder().encode(descriptor).write(
+            to: pendingExportDescriptorURL(projectID: projectID),
+            options: .atomic
+        )
+    }
+
+    func pendingExportMatches(projectID: UUID, includeCaptions: Bool) -> Bool {
+        let export = pendingExportURL(projectID: projectID)
+        guard FileManager.default.fileExists(atPath: export.path),
+              let project = try? load(id: projectID) else { return false }
+        if let data = try? Data(contentsOf: pendingExportDescriptorURL(projectID: projectID)),
+           let descriptor = try? JSONDecoder().decode(PendingExportDescriptor.self, from: data) {
+            return descriptor.manifestRevision == project.manifestRevision
+                && descriptor.includeCaptions == includeCaptions
+        }
+        guard let staged = recoverableStagedExport(projectID: projectID),
+              staged.isCommitted else { return false }
+        return staged.includeCaptions == includeCaptions
+    }
+
+    func commitPendingExport(projectID: UUID, stagedURL: URL) throws -> URL {
+        let destination = pendingExportURL(projectID: projectID)
+        let directory = destination.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let backup = directory.appendingPathComponent("previous-\(UUID().uuidString).mov")
+        let hadPrevious = FileManager.default.fileExists(atPath: destination.path)
+        if hadPrevious { try FileManager.default.moveItem(at: destination, to: backup) }
+        do {
+            try FileManager.default.moveItem(at: stagedURL, to: destination)
+            if hadPrevious { try? FileManager.default.removeItem(at: backup) }
+            return destination
+        } catch {
+            if hadPrevious,
+               !FileManager.default.fileExists(atPath: destination.path),
+               FileManager.default.fileExists(atPath: backup.path) {
+                try? FileManager.default.moveItem(at: backup, to: destination)
+            }
+            throw error
+        }
+    }
+
     @discardableResult
     func setThumbnail(
         projectID: UUID,
@@ -460,6 +882,7 @@ struct ProjectStore: Sendable {
     ) throws -> ProjectManifest {
         var project = try load(id: projectID)
         let expectedRevision = project.primaryStoryline.revision
+        guard project.pictureLock == nil else { throw ProjectStoreError.pictureLocked }
         guard let index = project.takes.firstIndex(where: { $0.id == takeID }) else {
             throw ProjectStoreError.takeNotFound(takeID)
         }
@@ -492,23 +915,24 @@ struct ProjectStore: Sendable {
             trailingSplitBoundaryID: clip.trailingSplitBoundaryID
         )
         project.primaryStoryline.revision = try project.primaryStoryline.revision.incremented()
-        if var captions = project.takes[index].captions {
-            let effectiveRange: TakeRange
-            switch decision {
-            case .keepOriginal:
-                effectiveRange = TakeRange(
-                    startSeconds: 0,
-                    endSeconds: project.takes[index].duration
-                )
-            case let .useSelection(range):
-                effectiveRange = range
-            }
-            if captions.sourceRange != effectiveRange {
-                captions.reviewState = .stale
-                project.takes[index].captions = captions
-            }
+        project.modifiedAt = modifiedAt
+        try save(project, expectedRevision: expectedRevision)
+        return project
+    }
+
+    @discardableResult
+    func markStorylineChecked(
+        projectID: UUID,
+        modifiedAt: Date = Date()
+    ) throws -> ProjectManifest {
+        var project = try load(id: projectID)
+        let expectedRevision = project.primaryStoryline.revision
+        guard project.pictureLock == nil else { throw ProjectStoreError.pictureLocked }
+        guard !project.primaryStoryline.clips.isEmpty,
+              ProjectPictureLockReadiness.unresolvedTakeIDs(in: project).isEmpty else {
+            throw ProjectStoreError.projectNotReadyForPictureLock
         }
-        project.captionTimelineIssues = CaptionTimelineProjection.reconciledIssues(in: project)
+        project.checkedStorylineRevision = expectedRevision
         project.modifiedAt = modifiedAt
         try save(project, expectedRevision: expectedRevision)
         return project
@@ -603,6 +1027,7 @@ struct ProjectStore: Sendable {
     ) throws -> ProjectManifest {
         var project = try load(id: projectID)
         let expectedRevision = project.primaryStoryline.revision
+        guard project.pictureLock == nil else { throw ProjectStoreError.pictureLocked }
         guard let index = project.takes.firstIndex(where: { $0.id == takeID }) else {
             throw ProjectStoreError.takeNotFound(takeID)
         }
@@ -625,17 +1050,6 @@ struct ProjectStore: Sendable {
             trailingSplitBoundaryID: clip.trailingSplitBoundaryID
         )
         project.primaryStoryline.revision = try project.primaryStoryline.revision.incremented()
-        if var captions = project.takes[index].captions {
-            let originalRange = TakeRange(
-                startSeconds: 0,
-                endSeconds: project.takes[index].duration
-            )
-            if captions.sourceRange != originalRange {
-                captions.reviewState = .stale
-                project.takes[index].captions = captions
-            }
-        }
-        project.captionTimelineIssues = CaptionTimelineProjection.reconciledIssues(in: project)
         project.modifiedAt = modifiedAt
         try save(project, expectedRevision: expectedRevision)
         try? FileManager.default.removeItem(at: takeTrimEnvelopeURL(projectID: projectID, takeID: takeID))
@@ -648,10 +1062,40 @@ struct ProjectStore: Sendable {
         try FileManager.default.removeItem(at: directory)
     }
 
-    func recordPhotosSaveCompleted(projectID: UUID) throws {
+    private func pendingExportDescriptorURL(projectID: UUID) -> URL {
+        pendingExportURL(projectID: projectID)
+            .deletingLastPathComponent()
+            .appendingPathComponent("descriptor.json")
+    }
+
+    private func stagedExportDescriptorURL(projectID: UUID) -> URL {
+        pendingExportURL(projectID: projectID)
+            .deletingLastPathComponent()
+            .appendingPathComponent("staged-descriptor.json")
+    }
+
+    private func completedStagedExportIdentity(
+        for url: URL,
+        in directory: URL
+    ) -> CompletedStagedExportIdentity? {
+        guard url.deletingLastPathComponent().standardizedFileURL == directory.standardizedFileURL,
+              url.pathExtension == "mov" else { return nil }
+        let components = url.deletingPathExtension().lastPathComponent.split(separator: "-")
+        guard components.count >= 4,
+              components[0] == "completed",
+              components[1].first == "r",
+              let revision = UInt64(components[1].dropFirst()),
+              components[2] == "c0" || components[2] == "c1" else { return nil }
+        return CompletedStagedExportIdentity(
+            manifestRevision: revision,
+            includeCaptions: components[2] == "c1"
+        )
+    }
+
+    func recordExportHandoffCompleted(projectID: UUID) throws {
         var project = try load(id: projectID)
         let expectedRevision = project.primaryStoryline.revision
-        project.recoveryState = .photosSaveCompleted
+        project.recoveryState = .exportHandoffCompleted
         try save(project, expectedRevision: expectedRevision)
     }
 
@@ -664,12 +1108,13 @@ struct ProjectStore: Sendable {
         return project
     }
 
-    func pendingExportNeedsPhotoSave(projectID: UUID) -> Bool {
-        let export = pendingExportURL(projectID: projectID)
-        let marker = export.deletingLastPathComponent().appendingPathComponent("saved-to-photos")
-        return FileManager.default.fileExists(atPath: export.path)
-            && (try? load(id: projectID).recoveryState) != .photosSaveCompleted
-            && !FileManager.default.fileExists(atPath: marker.path)
+    func pendingExportNeedsHandoff(projectID: UUID) -> Bool {
+        let handoffCompleted = (try? load(id: projectID).recoveryState) == .exportHandoffCompleted
+        return !handoffCompleted && (
+            pendingExportMatches(projectID: projectID, includeCaptions: true)
+                || pendingExportMatches(projectID: projectID, includeCaptions: false)
+                || recoverableStagedExport(projectID: projectID) != nil
+        )
     }
 
     func finishCompletedExports() {
@@ -677,8 +1122,7 @@ struct ProjectStore: Sendable {
         for project in projects {
             let export = pendingExportURL(projectID: project.id)
             let directory = export.deletingLastPathComponent()
-            let marker = directory.appendingPathComponent("saved-to-photos")
-            if project.recoveryState == .photosSaveCompleted || FileManager.default.fileExists(atPath: marker.path) {
+            if project.recoveryState == .exportHandoffCompleted {
                 try? FileManager.default.removeItem(at: directory)
                 _ = try? setPendingExportState(projectID: project.id, pending: false)
             }
@@ -772,6 +1216,39 @@ struct ProjectStore: Sendable {
         expectedRevision: StorylineRevision
     ) throws {
         try persist(project, expectedRevision: expectedRevision)
+    }
+
+    private func makeProjectCaptionRegions(
+        pictureLock: ProjectPictureLock,
+        project: ProjectManifest,
+        configuration: ProjectCaptionConfiguration
+    ) throws -> [ProjectCaptionRegion] {
+        let takesByID = Dictionary(uniqueKeysWithValues: project.takes.map { ($0.id, $0) })
+        var cursor: TimeInterval = 0
+        var previousLocale: String?
+        var languageRegionID = UUID()
+        return try pictureLock.clips.map { clip in
+            guard let take = takesByID[clip.takeID] else {
+                throw ProjectStoreError.takeNotFound(clip.takeID)
+            }
+            let start = cursor
+            cursor += clip.selection.duration
+            let locale = take.spokenLanguageIdentifier ?? configuration.localeIdentifier
+            if previousLocale != locale { languageRegionID = UUID() }
+            previousLocale = locale
+            return ProjectCaptionRegion(
+                languageRegionID: languageRegionID,
+                clipID: clip.id,
+                takeID: clip.takeID,
+                sourceRange: clip.selection,
+                projectTimeRange: ProjectTimeRange(
+                    start: ProjectTime(seconds: start),
+                    end: ProjectTime(seconds: cursor)
+                ),
+                localeIdentifier: locale,
+                state: clip.isMuted ? .completed : .pending
+            )
+        }
     }
 
     private func decodeManifest(id: UUID) throws -> ProjectManifest {
@@ -881,14 +1358,19 @@ enum ProjectStoreError: Error, Equatable {
     case invalidTakeRange(UUID)
     case invalidCaptionRange(UUID)
     case captionLocaleMismatch
-    case captionsNotFound(UUID)
-    case staleCaptions(UUID)
     case mediaNotFound(URL)
     case invalidPrimaryStoryline
+    case projectNotReadyForPictureLock
     case takeReferencedByStoryline(UUID)
     case staleRevision(expected: StorylineRevision, actual: StorylineRevision)
     case projectAlreadyExists(UUID)
     case staleManifest(expected: UInt64, actual: UInt64)
     case manifestRevisionExhausted
     case invalidProjectName
+    case pictureLocked
+    case pictureLockRequired
+    case captionRegionNotFound(UUID)
+    case invalidProjectCaptionTrack
+    case incompleteProjectCaptions
+    case projectCaptionLanguageChangeRequiresRegeneration
 }

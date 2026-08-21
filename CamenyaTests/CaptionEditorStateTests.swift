@@ -2,374 +2,395 @@ import XCTest
 @testable import Camenya
 
 final class CaptionEditorStateTests: XCTestCase {
-    func testNudgeMovesCueStartEarlierByExactlyOneTenth() throws {
-        let cueID = UUID()
-        var editor = makeNudgeEditor(cueID: cueID)
-
-        try editor.nudge(cueID: cueID, boundary: .start, direction: .earlier)
-
-        XCTAssertEqual(editor.track.cues[0].range.start.seconds, 0.9, accuracy: 0.001)
-    }
-
-    func testNudgeMovesCueStartLaterByExactlyOneTenth() throws {
-        let cueID = UUID()
-        var editor = makeNudgeEditor(cueID: cueID)
-
-        try editor.nudge(cueID: cueID, boundary: .start, direction: .later)
-
-        XCTAssertEqual(editor.track.cues[0].range.start.seconds, 1.1, accuracy: 0.001)
-    }
-
-    func testNudgeMovesCueEndEarlierByExactlyOneTenth() throws {
-        let cueID = UUID()
-        var editor = makeNudgeEditor(cueID: cueID)
-
-        try editor.nudge(cueID: cueID, boundary: .end, direction: .earlier)
-
-        XCTAssertEqual(editor.track.cues[0].range.end.seconds, 2.9, accuracy: 0.001)
-    }
-
-    func testNudgeMovesCueEndLaterByExactlyOneTenth() throws {
-        let cueID = UUID()
-        var editor = makeNudgeEditor(cueID: cueID)
-
-        try editor.nudge(cueID: cueID, boundary: .end, direction: .later)
-
-        XCTAssertEqual(editor.track.cues[0].range.end.seconds, 3.1, accuracy: 0.001)
-    }
-
-    func testRepeatedCueNudgesRemainTenthSecondSteps() throws {
-        let cueID = UUID()
-        var editor = makeNudgeEditor(cueID: cueID)
-
-        try editor.nudge(cueID: cueID, boundary: .start, direction: .later)
-        try editor.nudge(cueID: cueID, boundary: .start, direction: .later)
-        try editor.nudge(cueID: cueID, boundary: .start, direction: .later)
-
-        XCTAssertEqual(editor.track.cues[0].range.start.seconds, 1.3, accuracy: 0.001)
-    }
-
-    func testCueNudgesStopAtTheSourceBoundaries() throws {
-        let cueID = UUID()
-        let editor = makeNudgeEditor(
-            cueID: cueID,
-            range: TakeRange(startSeconds: 0, endSeconds: 5)
-        )
-
-        XCTAssertNil(try editor.rangeAfterNudge(cueID: cueID, boundary: .start, direction: .earlier))
-        XCTAssertNil(try editor.rangeAfterNudge(cueID: cueID, boundary: .end, direction: .later))
-    }
-
-    func testCueNudgesStopAtAdjacentCueBoundaries() throws {
-        let targetID = UUID()
-        let editor = CaptionEditorState(track: TakeCaptionTrack(
-            localeIdentifier: "it-IT",
-            sourceRange: TakeRange(startSeconds: 0, endSeconds: 5),
-            recognizer: .speechRecognizerIOS18,
-            reviewState: .approved,
-            cues: [
-                makeCue(range: TakeRange(startSeconds: 0, endSeconds: 1)),
-                makeCue(id: targetID, range: TakeRange(startSeconds: 1, endSeconds: 3)),
-                makeCue(range: TakeRange(startSeconds: 3, endSeconds: 5))
-            ]
-        ))
-
-        XCTAssertNil(try editor.rangeAfterNudge(cueID: targetID, boundary: .start, direction: .earlier))
-        XCTAssertNil(try editor.rangeAfterNudge(cueID: targetID, boundary: .end, direction: .later))
-    }
-
-    func testCueNudgesPreserveTheMinimumDuration() throws {
-        let cueID = UUID()
-        let editor = makeNudgeEditor(
-            cueID: cueID,
-            range: TakeRange(startSeconds: 1, endSeconds: 1.1)
-        )
-
-        XCTAssertNil(try editor.rangeAfterNudge(cueID: cueID, boundary: .start, direction: .later))
-        XCTAssertNil(try editor.rangeAfterNudge(cueID: cueID, boundary: .end, direction: .earlier))
-    }
-
-    func testSuccessfulCueNudgeMarksTheTrackAsNeedingReview() throws {
-        let cueID = UUID()
-        var editor = makeNudgeEditor(cueID: cueID)
-
-        try editor.nudge(cueID: cueID, boundary: .start, direction: .earlier)
-
-        XCTAssertEqual(editor.track.reviewState, .needsReview)
-    }
-
-    func testDraftCheckpointTracksOnlyChangesAfterTheLastSuccessfulSave() {
-        let cueID = UUID()
-        let track = TakeCaptionTrack(
-            localeIdentifier: "it-IT",
-            sourceRange: TakeRange(startSeconds: 0, endSeconds: 2),
-            recognizer: .speechRecognizerIOS18,
-            reviewState: .needsReview,
-            cues: [CaptionCue(
-                id: cueID,
-                range: TakeRange(startSeconds: 0, endSeconds: 2),
-                recognizedText: "Ciao",
-                text: "Ciao",
-                confidence: 0.8,
-                alternatives: [],
-                timedSpans: []
+    func testProjectCaptionSplitUsesRequestedTextBoundaryAndDropsUntrustworthyWordTiming() throws {
+        let cue = CaptionCue(
+            range: TakeRange(startSeconds: 1, endSeconds: 5),
+            recognizedText: "one two three four",
+            text: "one two three four",
+            confidence: 0.9,
+            alternatives: [],
+            timedSpans: [CaptionTimedSpan(
+                range: TakeRange(startSeconds: 1, endSeconds: 2),
+                text: "one",
+                granularity: .word,
+                confidence: 0.9
             )]
         )
-        var editor = CaptionEditorState(track: track)
-        var checkpoint = CaptionDraftCheckpoint(track: track)
+        var state = ProjectCaptionEditorState(duration: 8, cues: [cue])
 
-        XCTAssertFalse(checkpoint.hasUnsavedChanges(in: editor.track))
-        editor.updateText(cueID: cueID, text: "Ciao Camenya")
-        XCTAssertTrue(checkpoint.hasUnsavedChanges(in: editor.track))
+        let selectedID = try XCTUnwrap(state.split(cueID: cue.id, characterOffset: 7))
 
-        checkpoint.markSaved(editor.track)
-        XCTAssertFalse(checkpoint.hasUnsavedChanges(in: editor.track))
+        XCTAssertEqual(state.cues.map(\.text), ["one two", "three four"])
+        XCTAssertTrue(state.cues.allSatisfy { $0.timedSpans.isEmpty })
+        XCTAssertEqual(selectedID, state.cues.last?.id)
     }
 
-    func testEditingTextFallsBackToCueTimingAndRestoreRecoversWordTiming() throws {
-        let cueID = UUID()
-        var editor = CaptionEditorState(track: TakeCaptionTrack(
-            localeIdentifier: "it-IT",
-            sourceRange: TakeRange(startSeconds: 0, endSeconds: 4),
-            recognizer: .speechRecognizerIOS18,
-            reviewState: .needsReview,
-            cues: [CaptionCue(
-                id: cueID,
-                range: TakeRange(startSeconds: 0, endSeconds: 2),
-                recognizedText: "Ciao mondo",
-                text: "Ciao mondo",
-                confidence: 0.8,
-                alternatives: [],
-                timedSpans: [
-                    CaptionTimedSpan(
-                        range: TakeRange(startSeconds: 0, endSeconds: 0.8),
-                        text: "Ciao",
-                        granularity: .word,
-                        confidence: 0.9
-                    ),
-                    CaptionTimedSpan(
-                        range: TakeRange(startSeconds: 1, endSeconds: 2),
-                        text: "mondo",
-                        granularity: .word,
-                        confidence: 0.7
-                    )
-                ]
-            )]
-        ))
-
-        editor.updateText(cueID: cueID, text: "Ciao Camenya")
-
-        XCTAssertNil(CaptionOverlayResolver.active(in: editor.track, at: 0.5)?.timedSpan)
-        XCTAssertEqual(CaptionOverlayResolver.active(in: editor.track, at: 0.5)?.cue.text, "Ciao Camenya")
-
-        try editor.restore(cueID: cueID)
-
-        XCTAssertEqual(editor.track.cues.first?.text, "Ciao mondo")
-        XCTAssertEqual(CaptionOverlayResolver.active(in: editor.track, at: 0.5)?.timedSpan?.text, "Ciao")
-    }
-
-    func testCueCanBeSplitAndMergedWithoutLeavingTheSourceRange() throws {
-        let cueID = UUID()
-        var editor = CaptionEditorState(track: TakeCaptionTrack(
-            localeIdentifier: "it-IT",
-            sourceRange: TakeRange(startSeconds: 0, endSeconds: 4),
-            recognizer: .speechRecognizerIOS18,
-            reviewState: .needsReview,
-            cues: [CaptionCue(
-                id: cueID,
-                range: TakeRange(startSeconds: 0, endSeconds: 4),
-                recognizedText: "Una frase breve",
-                text: "Una frase breve",
-                confidence: nil,
-                alternatives: [],
-                timedSpans: []
-            )]
-        ))
-
-        try editor.split(cueID: cueID)
-
-        XCTAssertEqual(editor.track.cues.map(\.text), ["Una frase", "breve"])
-        XCTAssertEqual(editor.track.cues.map(\.range), [
-            TakeRange(startSeconds: 0, endSeconds: 2),
-            TakeRange(startSeconds: 2, endSeconds: 4)
-        ])
-
-        try editor.mergeWithNext(cueID: editor.track.cues[0].id)
-
-        XCTAssertEqual(editor.track.cues.map(\.text), ["Una frase breve"])
-        XCTAssertEqual(editor.track.cues.first?.range, TakeRange(startSeconds: 0, endSeconds: 4))
-    }
-
-    func testSplittingEditedTextDoesNotClaimRecognizerWordTiming() throws {
-        let cueID = UUID()
-        var editor = CaptionEditorState(track: TakeCaptionTrack(
-            localeIdentifier: "it-IT",
-            sourceRange: TakeRange(startSeconds: 0, endSeconds: 4),
-            recognizer: .speechRecognizerIOS18,
-            reviewState: .needsReview,
-            cues: [CaptionCue(
-                id: cueID,
-                range: TakeRange(startSeconds: 0, endSeconds: 4),
-                recognizedText: "Una frase breve",
-                text: "Una frase breve",
-                confidence: nil,
-                alternatives: [],
-                timedSpans: [CaptionTimedSpan(
-                    range: TakeRange(startSeconds: 0, endSeconds: 1),
-                    text: "Una",
-                    granularity: .word,
-                    confidence: nil
-                )]
-            )]
-        ))
-        editor.updateText(cueID: cueID, text: "Testo corretto qui")
-
-        try editor.split(cueID: cueID)
-
-        XCTAssertTrue(editor.track.cues.allSatisfy { $0.timedSpans.isEmpty })
-    }
-
-    func testTimingEditCannotOverlapTheNextCue() throws {
-        let firstID = UUID()
-        var editor = CaptionEditorState(track: TakeCaptionTrack(
-            localeIdentifier: "it-IT",
-            sourceRange: TakeRange(startSeconds: 0, endSeconds: 5),
-            recognizer: .speechRecognizerIOS18,
-            reviewState: .needsReview,
-            cues: [
-                CaptionCue(
-                    id: firstID,
-                    range: TakeRange(startSeconds: 1, endSeconds: 2),
-                    recognizedText: "Prima",
-                    text: "Prima",
-                    confidence: nil,
-                    alternatives: [],
-                    timedSpans: []
-                ),
-                CaptionCue(
-                    range: TakeRange(startSeconds: 3, endSeconds: 4),
-                    recognizedText: "Dopo",
-                    text: "Dopo",
-                    confidence: nil,
-                    alternatives: [],
-                    timedSpans: []
-                )
-            ]
-        ))
-
-        XCTAssertThrowsError(try editor.updateRange(
-            cueID: firstID,
-            range: TakeRange(startSeconds: 1, endSeconds: 3.2)
-        ))
-    }
-
-    func testSpanAlternativeTargetsTheSelectedRepeatedOccurrence() throws {
-        let cueID = UUID()
-        let secondRange = TakeRange(startSeconds: 1, endSeconds: 2)
-        var editor = CaptionEditorState(track: TakeCaptionTrack(
-            localeIdentifier: "it-IT",
-            sourceRange: TakeRange(startSeconds: 0, endSeconds: 3),
-            recognizer: .speechRecognizerIOS18,
-            reviewState: .needsReview,
-            cues: [CaptionCue(
-                id: cueID,
-                range: TakeRange(startSeconds: 0, endSeconds: 2),
-                recognizedText: "go go",
-                text: "go go",
-                confidence: nil,
-                alternatives: [],
-                timedSpans: [
-                    CaptionTimedSpan(
-                        range: TakeRange(startSeconds: 0, endSeconds: 1),
-                        text: "go",
-                        granularity: .word,
-                        confidence: nil,
-                        alternatives: ["no"]
-                    ),
-                    CaptionTimedSpan(
-                        range: secondRange,
-                        text: "go",
-                        granularity: .word,
-                        confidence: nil,
-                        alternatives: ["slow"]
-                    )
-                ]
-            )]
-        ))
-
-        editor.applyAlternative(cueID: cueID, spanRange: secondRange, alternative: "slow")
-
-        XCTAssertEqual(editor.track.cues.first?.text, "go slow")
-    }
-
-    func testNextUncertainCueAdvancesAndWraps() {
-        let firstID = UUID()
-        let certainID = UUID()
-        let lastID = UUID()
-        let editor = CaptionEditorState(track: TakeCaptionTrack(
-            localeIdentifier: "it-IT",
-            sourceRange: TakeRange(startSeconds: 0, endSeconds: 6),
-            recognizer: .speechRecognizerIOS18,
-            reviewState: .needsReview,
-            cues: [
-                CaptionCue(
-                    id: firstID,
-                    range: TakeRange(startSeconds: 0, endSeconds: 1),
-                    recognizedText: "Forse",
-                    text: "Forse",
-                    confidence: 0.4,
-                    alternatives: [],
-                    timedSpans: []
-                ),
-                CaptionCue(
-                    id: certainID,
-                    range: TakeRange(startSeconds: 2, endSeconds: 3),
-                    recognizedText: "Certo",
-                    text: "Certo",
-                    confidence: 0.9,
-                    alternatives: [],
-                    timedSpans: []
-                ),
-                CaptionCue(
-                    id: lastID,
-                    range: TakeRange(startSeconds: 4, endSeconds: 5),
-                    recognizedText: "Controlla",
-                    text: "Controlla",
-                    confidence: 0.5,
-                    alternatives: [],
-                    timedSpans: []
-                )
-            ]
-        ))
-
-        XCTAssertEqual(editor.uncertainCueIDs, [firstID, lastID])
-        XCTAssertEqual(editor.nextUncertainCue(after: firstID)?.id, lastID)
-        XCTAssertEqual(editor.nextUncertainCue(after: lastID)?.id, firstID)
-        XCTAssertEqual(editor.nextUncertainCue(after: certainID)?.id, lastID)
-    }
-
-    private func makeNudgeEditor(
-        cueID: UUID,
-        range: TakeRange = TakeRange(startSeconds: 1, endSeconds: 3)
-    ) -> CaptionEditorState {
-        CaptionEditorState(track: TakeCaptionTrack(
-            localeIdentifier: "it-IT",
-            sourceRange: TakeRange(startSeconds: 0, endSeconds: 5),
-            recognizer: .speechRecognizerIOS18,
-            reviewState: .approved,
-            cues: [makeCue(id: cueID, range: range)]
-        ))
-    }
-
-    private func makeCue(id: UUID = UUID(), range: TakeRange) -> CaptionCue {
-        CaptionCue(
-            id: id,
-            range: range,
-            recognizedText: "Ciao",
-            text: "Ciao",
-            confidence: nil,
+    func testProjectCaptionAddUsesAvailableGapAndEditedCueSurvivesConfigurationChanges() throws {
+        let edited = CaptionCue(
+            range: TakeRange(startSeconds: 3, endSeconds: 5),
+            recognizedText: "recognized",
+            text: "manual correction",
+            confidence: 0.5,
             alternatives: [],
             timedSpans: []
+        )
+        var state = ProjectCaptionEditorState(duration: 10, cues: [edited])
+
+        let insertedID = try XCTUnwrap(state.addCaption(at: 1))
+
+        XCTAssertEqual(state.cues.first?.id, insertedID)
+        XCTAssertEqual(state.cues.first?.range, TakeRange(startSeconds: 1, endSeconds: 3))
+        XCTAssertEqual(state.cues.last?.text, "manual correction")
+    }
+
+    func testDensityReflowNeverCrossesOrReplacesAManuallyEditedCue() {
+        let before = makeWordTimedCue(words: ["one", "two", "three"], start: 0)
+        let protected = CaptionCue(
+            range: TakeRange(startSeconds: 3, endSeconds: 5),
+            recognizedText: "old words",
+            text: "my exact correction",
+            confidence: 0.8,
+            alternatives: [],
+            timedSpans: []
+        )
+        let after = makeWordTimedCue(words: ["four", "five", "six", "seven", "eight"], start: 5)
+
+        let reflowed = CaptionDensityReflow.apply(.less, to: [before, protected, after])
+
+        XCTAssertEqual(reflowed.first?.text, "one two three")
+        XCTAssertEqual(reflowed[1], protected)
+        XCTAssertEqual(reflowed.dropFirst(2).map(\.text), ["four five six seven", "eight"])
+    }
+
+    func testDensityReflowDoesNotBridgeASpokenPause() {
+        let before = makeWordTimedCue(words: ["one", "two"], start: 0)
+        let after = makeWordTimedCue(words: ["three", "four"], start: 3)
+
+        let reflowed = CaptionDensityReflow.apply(.less, to: [before, after])
+
+        XCTAssertEqual(reflowed.map(\.text), ["one two", "three four"])
+    }
+
+    func testDensityReflowDoesNotCrossLanguageRegions() {
+        let first = makeWordTimedCue(words: ["uno", "due"], start: 0)
+        let second = makeWordTimedCue(words: ["three", "four"], start: 2)
+        let firstLanguageRegionID = UUID()
+        let secondLanguageRegionID = UUID()
+        let regions = [
+            ProjectCaptionRegion(
+                languageRegionID: firstLanguageRegionID,
+                clipID: TimelineClip.ID(),
+                takeID: UUID(),
+                sourceRange: TakeRange(startSeconds: 0, endSeconds: 2),
+                projectTimeRange: ProjectTimeRange(
+                    start: .zero,
+                    end: ProjectTime(seconds: 2)
+                ),
+                localeIdentifier: "it-IT"
+            ),
+            ProjectCaptionRegion(
+                languageRegionID: secondLanguageRegionID,
+                clipID: TimelineClip.ID(),
+                takeID: UUID(),
+                sourceRange: TakeRange(startSeconds: 0, endSeconds: 2),
+                projectTimeRange: ProjectTimeRange(
+                    start: ProjectTime(seconds: 2),
+                    end: ProjectTime(seconds: 4)
+                ),
+                localeIdentifier: "en-US"
+            )
+        ]
+
+        let reflowed = CaptionDensityReflow.apply(.less, to: [first, second], regions: regions)
+
+        XCTAssertEqual(reflowed.map { $0.text }, ["uno due", "three four"])
+    }
+
+    func testDensityReflowPrefersNaturalPunctuationNearTheWordTarget() {
+        let cue = makeWordTimedCue(
+            words: [
+                "One", "clear", "idea", "ends", "here.",
+                "Then", "another", "thought", "continues", "with", "useful", "detail."
+            ],
+            start: 0
+        )
+
+        let reflowed = CaptionDensityReflow.apply(.standard, to: [cue])
+
+        XCTAssertEqual(reflowed.first?.text, "One clear idea ends here.")
+        XCTAssertEqual(reflowed.flatMap(\.timedSpans), cue.timedSpans)
+    }
+
+    func testDensityReflowUsesCurrentPresentationFitAsAHardBoundary() {
+        let cue = makeWordTimedCue(
+            words: (0..<12).map { "substantialword\($0)" },
+            start: 0
+        )
+        let configuration = ProjectCaptionConfiguration(
+            localeIdentifier: "en-US",
+            placement: .lower,
+            style: .custom,
+            density: .more,
+            customization: CaptionStyleCustomization(fontScale: .large)
+        )
+
+        let reflowed = CaptionDensityReflow.apply(
+            .more,
+            to: [cue],
+            configuration: configuration,
+            format: .portrait
+        )
+
+        XCTAssertTrue(reflowed.allSatisfy {
+            CaptionLineComposer.fits(
+                $0.text,
+                configuration: configuration,
+                canvas: CGSize(width: 1080, height: 1920)
+            )
+        })
+        XCTAssertEqual(reflowed.flatMap(\.timedSpans), cue.timedSpans)
+    }
+
+    func testUndoAvailabilityIncludesTheCurrentUncommittedTextEdit() {
+        let before = makeWordTimedCue(words: ["before"], start: 0)
+        var after = before
+        after.text = "after"
+
+        XCTAssertTrue(CaptionEditorHistoryPolicy.canUndo(
+            undoCount: 0,
+            textBaseline: [before],
+            currentCues: [after]
+        ))
+        XCTAssertFalse(CaptionEditorHistoryPolicy.canRedo(
+            redoCount: 1,
+            textBaseline: [before],
+            currentCues: [after]
+        ))
+    }
+
+    func testApplyDensityDoesNotAcceptUnrelatedStyleOrPositionDrafts() {
+        let persisted = ProjectCaptionConfiguration(
+            localeIdentifier: "en-US",
+            placement: .lower,
+            style: .clean,
+            density: .standard
+        )
+        let draft = ProjectCaptionConfiguration(
+            localeIdentifier: "en-US",
+            placement: .upper,
+            style: .impact,
+            density: .more
+        )
+
+        let accepted = CaptionStyleDraftPolicy.densityOnlyConfiguration(
+            draft: draft,
+            persisted: persisted
+        )
+
+        XCTAssertEqual(accepted.density, .more)
+        XCTAssertEqual(accepted.placement, .lower)
+        XCTAssertEqual(accepted.style, .clean)
+    }
+
+    private func makeWordTimedCue(words: [String], start: TimeInterval) -> CaptionCue {
+        let spans = words.enumerated().map { offset, word in
+            CaptionTimedSpan(
+                range: TakeRange(
+                    startSeconds: start + Double(offset),
+                    endSeconds: start + Double(offset + 1)
+                ),
+                text: word,
+                granularity: .word,
+                confidence: 0.9
+            )
+        }
+        return CaptionCue(
+            range: TakeRange(startSeconds: start, endSeconds: start + Double(words.count)),
+            recognizedText: words.joined(separator: " "),
+            text: words.joined(separator: " "),
+            confidence: 0.9,
+            alternatives: [],
+            timedSpans: spans
+        )
+    }
+
+    func testHistoryCoordinatorAnnouncesTheExactUndoAndRedoOperation() throws {
+        let cue = makeWordTimedCue(words: ["keep", "this"], start: 0)
+        let configuration = ProjectCaptionConfiguration(
+            localeIdentifier: "en-US",
+            placement: .lower
+        )
+        var history = CaptionHistoryCoordinator()
+        history.record(
+            cues: [cue],
+            configuration: configuration,
+            operationName: "Delete Caption"
+        )
+
+        let undo = try XCTUnwrap(history.transition(
+            isUndo: true,
+            currentCues: [],
+            currentConfiguration: configuration
+        ))
+        XCTAssertEqual(undo.announcement, "Undid Delete Caption")
+        history.commit(undo)
+
+        let redo = try XCTUnwrap(history.transition(
+            isUndo: false,
+            currentCues: [cue],
+            currentConfiguration: configuration
+        ))
+        XCTAssertEqual(redo.announcement, "Redid Delete Caption")
+    }
+
+    func testFailedHistoryTransitionCannotRetryAfterTheEditorChanges() throws {
+        let cue = makeWordTimedCue(words: ["keep", "this"], start: 0)
+        var changed = cue
+        changed.text = "keep this newer correction"
+        let configuration = ProjectCaptionConfiguration(
+            localeIdentifier: "en-US",
+            placement: .lower
+        )
+        var history = CaptionHistoryCoordinator()
+        history.record(
+            cues: [cue],
+            configuration: configuration,
+            operationName: "Delete Caption"
+        )
+        let transition = try XCTUnwrap(history.transition(
+            isUndo: true,
+            currentCues: [],
+            currentConfiguration: configuration
+        ))
+
+        XCTAssertTrue(history.canApply(
+            transition,
+            currentCues: [],
+            currentConfiguration: configuration
+        ))
+        XCTAssertFalse(history.canApply(
+            transition,
+            currentCues: [changed],
+            currentConfiguration: configuration
+        ))
+        XCTAssertEqual(history.undoCount, 1)
+        XCTAssertEqual(history.redoCount, 0)
+    }
+
+    func testUndoingDensityAfterTextEditPreservesCommittedEditedText() throws {
+        let original = makeWordTimedCue(words: ["original", "caption"], start: 0)
+        var edited = original
+        edited.text = "manually edited caption"
+        let reflowed = CaptionCue(
+            range: edited.range,
+            recognizedRange: edited.recognizedRange,
+            recognizedText: edited.recognizedText,
+            text: "manually edited",
+            confidence: edited.confidence,
+            alternatives: edited.alternatives,
+            timedSpans: edited.timedSpans
+        )
+        let configuration = ProjectCaptionConfiguration(
+            localeIdentifier: "en-US",
+            placement: .lower
+        )
+        let denserConfiguration = ProjectCaptionConfiguration(
+            localeIdentifier: "en-US",
+            placement: .lower,
+            density: .more
+        )
+        var history = CaptionHistoryCoordinator()
+        history.record(
+            cues: [original],
+            configuration: configuration,
+            operationName: "Edit Caption Text"
+        )
+        history.record(
+            cues: [edited],
+            configuration: configuration,
+            operationName: "Apply Caption Density"
+        )
+
+        let undo = try XCTUnwrap(history.transition(
+            isUndo: true,
+            currentCues: [reflowed],
+            currentConfiguration: denserConfiguration
+        ))
+
+        XCTAssertEqual(undo.target.cues, [edited])
+        XCTAssertEqual(undo.target.cues.first?.text, "manually edited caption")
+        XCTAssertEqual(undo.announcement, "Undid Apply Caption Density")
+    }
+
+    func testUndoingAddCaptionAfterTextEditPreservesCommittedEditedText() throws {
+        let original = makeWordTimedCue(words: ["original", "caption"], start: 0)
+        var edited = original
+        edited.text = "manually edited caption"
+        let added = makeWordTimedCue(words: ["new", "caption"], start: 3)
+        let configuration = ProjectCaptionConfiguration(
+            localeIdentifier: "en-US",
+            placement: .lower
+        )
+        var history = CaptionHistoryCoordinator()
+        history.record(
+            cues: [original],
+            configuration: configuration,
+            operationName: "Edit Caption Text"
+        )
+        history.record(
+            cues: [edited],
+            configuration: configuration,
+            operationName: "Add Caption"
+        )
+
+        let undo = try XCTUnwrap(history.transition(
+            isUndo: true,
+            currentCues: [edited, added],
+            currentConfiguration: configuration
+        ))
+
+        XCTAssertEqual(undo.target.cues, [edited])
+        XCTAssertEqual(undo.target.cues.first?.text, "manually edited caption")
+        XCTAssertEqual(undo.announcement, "Undid Add Caption")
+    }
+
+    func testDensityPreviewRegroupsCurrentUnsavedCuesBeforeApply() throws {
+        let cue = makeWordTimedCue(
+            words: ["one", "two", "three", "four", "five", "six", "seven", "eight"],
+            start: 0
+        )
+        var edited = makeWordTimedCue(words: ["nine", "ten"], start: 8)
+        edited.text = "manual ending"
+        let less = ProjectCaptionConfiguration(
+            localeIdentifier: "en-US",
+            placement: .lower,
+            density: .less
+        )
+        let more = ProjectCaptionConfiguration(
+            localeIdentifier: "en-US",
+            placement: .lower,
+            density: .more
+        )
+
+        let lessPreview = try XCTUnwrap(CaptionDensityPreviewPolicy.cue(
+            in: [cue, edited],
+            preferredCueID: cue.id,
+            regions: [],
+            configuration: less,
+            format: .portrait
+        ))
+        let morePreview = try XCTUnwrap(CaptionDensityPreviewPolicy.cue(
+            in: [cue, edited],
+            preferredCueID: cue.id,
+            regions: [],
+            configuration: more,
+            format: .portrait
+        ))
+
+        XCTAssertNotEqual(lessPreview.text, morePreview.text)
+        XCTAssertEqual(
+            CaptionDensityPreviewPolicy.preservedEditedCueCount(in: [cue, edited]),
+            1
         )
     }
 }
