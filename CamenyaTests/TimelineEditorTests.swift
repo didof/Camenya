@@ -976,7 +976,8 @@ final class TimelineEditorTests: XCTestCase {
             expectedRevision: completed.snapshot.revision
         )
 
-        XCTAssertEqual(removed.project.unusedTakes.map(\.id), [completed.take.id])
+        XCTAssertTrue(removed.project.unusedTakes.isEmpty)
+        XCTAssertEqual(removed.project.usedTakes.map(\.id), [completed.take.id])
 
         let added = try await editor.perform(
             .addFullTakeToStoryline(takeID: completed.take.id),

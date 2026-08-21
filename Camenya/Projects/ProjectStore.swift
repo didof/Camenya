@@ -20,7 +20,8 @@ struct ProjectStore: Sendable {
         let project = ProjectManifest(
             createdAt: createdAt,
             modifiedAt: createdAt,
-            name: Self.defaultName(for: createdAt)
+            name: Self.defaultName(for: createdAt),
+            isAutomaticallyNamed: true
         )
         try FileManager.default.createDirectory(at: projectDirectory(id: project.id), withIntermediateDirectories: true)
         try saveNew(project)
@@ -59,7 +60,10 @@ struct ProjectStore: Sendable {
     func renameProject(id: UUID, name: String, modifiedAt: Date = Date()) throws -> ProjectManifest {
         var project = try load(id: id)
         let expectedRevision = project.primaryStoryline.revision
-        project.name = name
+        let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedName.isEmpty else { throw ProjectStoreError.invalidProjectName }
+        project.name = normalizedName
+        project.isAutomaticallyNamed = false
         project.modifiedAt = modifiedAt
         try save(project, expectedRevision: expectedRevision)
         return project
@@ -416,6 +420,10 @@ struct ProjectStore: Sendable {
         takeDirectory(projectID: projectID, takeID: takeID).appendingPathComponent("thumbnail.jpg")
     }
 
+    func projectCoverURL(projectID: UUID) -> URL {
+        projectDirectory(id: projectID).appendingPathComponent("cover.jpg")
+    }
+
     func takeTrimEnvelopeURL(projectID: UUID, takeID: UUID) -> URL {
         takeDirectory(projectID: projectID, takeID: takeID).appendingPathComponent("trim-envelope.json")
     }
@@ -703,6 +711,12 @@ struct ProjectStore: Sendable {
         takeManifestStore(projectID: projectID).unfinishedTakes()
     }
 
+    func hasRecoverableArtifacts(projectID: UUID) throws -> Bool {
+        let root = projectDirectory(id: projectID)
+        guard FileManager.default.fileExists(atPath: root.path) else { return false }
+        return try directoryContainsRecoverableArtifact(root, excluding: manifestURL(id: projectID))
+    }
+
     func cleanCompletedTakeArtifacts(projectID: UUID, takeID: UUID) throws {
         let directory = takeDirectory(projectID: projectID, takeID: takeID)
         let preservedNames = Set(["take.mov", "thumbnail.jpg", "trim-envelope.json"])
@@ -810,6 +824,22 @@ struct ProjectStore: Sendable {
         return formatter.string(from: date)
     }
 
+    private func directoryContainsRecoverableArtifact(
+        _ directory: URL,
+        excluding excludedURL: URL
+    ) throws -> Bool {
+        for item in try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey]
+        ) {
+            if item.standardizedFileURL == excludedURL.standardizedFileURL { continue }
+            let values = try item.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            if values.isSymbolicLink == true || values.isDirectory != true { return true }
+            if try directoryContainsRecoverableArtifact(item, excluding: excludedURL) { return true }
+        }
+        return false
+    }
+
     private func captionDraftIsValid(
         _ draft: TakeCaptionTrack,
         takeDuration: TimeInterval
@@ -856,4 +886,5 @@ enum ProjectStoreError: Error, Equatable {
     case projectAlreadyExists(UUID)
     case staleManifest(expected: UInt64, actual: UInt64)
     case manifestRevisionExhausted
+    case invalidProjectName
 }
