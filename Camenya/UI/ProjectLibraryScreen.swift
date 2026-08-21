@@ -2,7 +2,7 @@ import SwiftUI
 
 struct ProjectLibraryScreen: View {
     @ObservedObject var model: ProjectLibraryModel
-    @State private var createdProject: ProjectManifest?
+    @State private var destination: ProjectRoute?
     @State private var renamingProject: ProjectManifest?
     @State private var deletingProject: ProjectManifest?
     @State private var draftName = ""
@@ -13,22 +13,27 @@ struct ProjectLibraryScreen: View {
                 if model.projects.isEmpty {
                     emptyState
                 } else {
-                    projectList
+                    projectGrid
                 }
             }
             .background(Color(uiColor: .systemGroupedBackground))
             .navigationTitle("Projects")
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        createdProject = model.createProject()
-                    } label: {
-                        Label("New Project", systemImage: "plus")
+                    Button(action: createProject) {
+                        Image(systemName: "plus")
                     }
+                    .accessibilityLabel("New Project")
                 }
             }
-            .navigationDestination(item: $createdProject) { project in
-                ProjectWorkspaceScreen(project: project, library: model)
+            .navigationDestination(item: $destination) { route in
+                ProjectWorkspaceScreen(
+                    project: route.project,
+                    library: model,
+                    initialDestination: ProjectPresentationPolicy.initialDestination(
+                        newlyCreated: route.newlyCreated
+                    )
+                )
             }
         }
         .task { model.load() }
@@ -38,28 +43,26 @@ struct ProjectLibraryScreen: View {
         )) {
             TextField("Project name", text: $draftName)
             Button("Cancel", role: .cancel) { renamingProject = nil }
-            Button("Save") {
-                if let project = renamingProject, !draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    model.renameProject(id: project.id, name: draftName.trimmingCharacters(in: .whitespacesAndNewlines))
-                }
-                renamingProject = nil
-            }
+            Button("Rename", action: commitRename)
+                .disabled(draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
-        .confirmationDialog("Delete Project?", isPresented: Binding(
-            get: { deletingProject != nil },
-            set: { if !$0 { deletingProject = nil } }
-        ), titleVisibility: .visible) {
+        .confirmationDialog(
+            "Delete Project?",
+            isPresented: Binding(
+                get: { deletingProject != nil },
+                set: { if !$0 { deletingProject = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
             if let project = deletingProject {
-                Button("Delete \(project.takes.count) Takes Permanently", role: .destructive) {
+                Button("Delete Project", role: .destructive) {
                     model.deleteProject(id: project.id)
                     deletingProject = nil
                 }
             }
             Button("Cancel", role: .cancel) { deletingProject = nil }
         } message: {
-            if let project = deletingProject {
-                Text("This permanently removes \(project.takes.count) Takes and \(ByteCountFormatter.string(fromByteCount: model.storageBytes(for: project), countStyle: .file)) of recordings, thumbnails, and temporary files owned by the Project.")
-            }
+            Text("This deletes the Project and every recording and file it owns. This can't be undone.")
         }
         .alert("Camenya", isPresented: Binding(
             get: { model.errorMessage != nil },
@@ -71,110 +74,121 @@ struct ProjectLibraryScreen: View {
         }
     }
 
-    private var projectList: some View {
-        List {
-            ForEach(model.projects) { project in
-                NavigationLink {
-                    ProjectWorkspaceScreen(project: project, library: model)
-                } label: {
-                    ProjectRow(
-                        project: project,
-                        thumbnailURL: project.takes.first.map {
-                            model.store.takeThumbnailURL(projectID: project.id, takeID: $0.id)
-                        },
-                        storageBytes: model.storageBytes(for: project)
-                    )
-                }
-                .contextMenu {
+    private var projectGrid: some View {
+        ScrollView {
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(), spacing: 14),
+                    GridItem(.flexible(), spacing: 14)
+                ],
+                alignment: .leading,
+                spacing: 22
+            ) {
+                ForEach(model.projects) { project in
                     Button {
-                        draftName = project.name
-                        renamingProject = project
-                    } label: { Label("Rename", systemImage: "pencil") }
-                    Button(role: .destructive) {
-                        deletingProject = project
-                    } label: { Label("Delete Project", systemImage: "trash") }
-                }
-                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                    Button(role: .destructive) { deletingProject = project } label: {
-                        Label("Delete", systemImage: "trash")
+                        destination = ProjectRoute(project: project, newlyCreated: false)
+                    } label: {
+                        ProjectLibraryCard(
+                            project: project,
+                            thumbnailURL: model.coverThumbnailURL(for: project)
+                        )
                     }
-                    Button {
-                        draftName = project.name
-                        renamingProject = project
-                    } label: { Label("Rename", systemImage: "pencil") }
-                    .tint(.indigo)
+                    .buttonStyle(.plain)
+                    .contextMenu {
+                        Button("Rename", systemImage: "pencil") {
+                            beginRename(project)
+                        }
+                        Button("Delete Project", systemImage: "trash", role: .destructive) {
+                            deletingProject = project
+                        }
+                    }
                 }
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
         }
-        .listStyle(.insetGrouped)
     }
 
     private var emptyState: some View {
         ContentUnavailableView {
-            Label("No Projects", systemImage: "rectangle.stack.badge.plus")
+            Label("No Projects", systemImage: "movieclapper")
         } description: {
-            Text("Record several Takes, arrange them, and export one finished movie when you're ready.")
+            Text("Create a Project to record your next video.")
         } actions: {
-            Button("New Project") { createdProject = model.createProject() }
+            Button("New Project", systemImage: "plus", action: createProject)
                 .buttonStyle(.borderedProminent)
         }
     }
+
+    private func createProject() {
+        guard let project = model.createProject() else { return }
+        destination = ProjectRoute(project: project, newlyCreated: true)
+    }
+
+    private func beginRename(_ project: ProjectManifest) {
+        draftName = project.name
+        renamingProject = project
+    }
+
+    private func commitRename() {
+        guard let project = renamingProject else { return }
+        model.renameProject(id: project.id, name: draftName)
+        renamingProject = nil
+    }
 }
 
-private struct ProjectRow: View {
+private struct ProjectRoute: Identifiable, Hashable {
+    let project: ProjectManifest
+    let newlyCreated: Bool
+
+    var id: UUID { project.id }
+}
+
+private struct ProjectLibraryCard: View {
     let project: ProjectManifest
     let thumbnailURL: URL?
-    let storageBytes: Int64
 
     var body: some View {
-        HStack(spacing: 14) {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color(uiColor: .secondarySystemBackground).gradient)
-                .frame(width: 76, height: 58)
+        VStack(alignment: .leading, spacing: 9) {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color(uiColor: .secondarySystemGroupedBackground))
+                .aspectRatio(9 / 16, contentMode: .fit)
                 .overlay {
                     TakeThumbnailView(
                         url: thumbnailURL,
-                        placeholderSystemName: project.takes.isEmpty ? "video.badge.plus" : "play.rectangle.fill",
-                        cornerRadius: 12
+                        placeholderSystemName: "film.stack",
+                        cornerRadius: 18
                     )
-                    .font(.title2)
+                    .font(.largeTitle)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
                 }
-            VStack(alignment: .leading, spacing: 5) {
-                Text(project.name).font(.headline).lineLimit(1)
-                HStack(spacing: 8) {
-                    Text("\(project.takes.count) \(project.takes.count == 1 ? "Take" : "Takes")")
-                    Text(RecordingDurationFormatter.clock(project.approximateDuration))
-                    if let format = project.format { Text(format.rawValue.capitalized) }
-                    Text(ByteCountFormatter.string(fromByteCount: storageBytes, countStyle: .file))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(Color(uiColor: .separator).opacity(0.45), lineWidth: 0.5)
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                Text(project.modifiedAt.formatted(date: .abbreviated, time: .shortened))
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+
+            Text(project.name)
+                .font(.headline)
+                .lineLimit(1)
+
+            HStack(spacing: 5) {
+                Text(RecordingDurationFormatter.clock(project.approximateDuration))
+                    .monospacedDigit()
+                Text("·")
+                Text(project.modifiedAt, format: .dateTime.day().month(.abbreviated))
             }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
         }
-        .padding(.vertical, 4)
-        .accessibilityElement(children: .combine)
-    }
-
-}
-
-private struct ProjectWorkspaceScreen: View {
-    @StateObject private var recorder: AppModel
-    @Environment(\.dismiss) private var dismiss
-
-    init(project: ProjectManifest, library: ProjectLibraryModel) {
-        _recorder = StateObject(wrappedValue: AppModel(
-            project: project,
-            projectStore: library.store,
-            onProjectChanged: { library.upsertAndSort($0) }
-        ))
-    }
-
-    var body: some View {
-        CameraScreen(model: recorder, onBack: { recorder.leaveProject { dismiss() } })
-            .navigationBarBackButtonHidden(true)
-            .task { recorder.configure() }
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(project.name)
+        .accessibilityValue(
+            "\(RecordingDurationFormatter.clock(project.approximateDuration)), modified \(project.modifiedAt.formatted(date: .abbreviated, time: .omitted))"
+        )
+        .accessibilityHint("Opens the Project Workspace")
+        .accessibilityAddTraits(.isButton)
     }
 }

@@ -337,6 +337,16 @@ final class TimelinePlaybackSession: ObservableObject {
             return
         }
         if state.phase == .completed { state.phase = .paused }
+        guard let item = player.currentItem,
+              installedItemIndices[ObjectIdentifier(item)] == location.index else {
+            prepareQueue(startingAt: location.index, localTime: location.localTime)
+            return
+        }
+        player.seek(
+            to: CMTime(seconds: location.localTime, preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        )
     }
 
     private func seekToClip(at index: Int) {

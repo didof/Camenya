@@ -101,6 +101,9 @@ final class PlaybackControllerTests: XCTestCase {
         XCTAssertEqual(session.state.phase, .paused)
         XCTAssertEqual(session.state.playhead.seconds, 0.6, accuracy: 0.001)
         XCTAssertFalse(session.state.isPlaying)
+        await waitUntil("The viewer should follow the scrub before the gesture ends") {
+            abs(session.player.currentTime().seconds - 0.6) < 0.04
+        }
 
         session.send(.seek(session.state.playhead))
         await waitForPhase(.paused, in: session)

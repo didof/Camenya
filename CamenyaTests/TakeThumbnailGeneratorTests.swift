@@ -29,7 +29,7 @@ final class TakeThumbnailGeneratorTests: XCTestCase {
         try FileManager.default.createDirectory(at: owner, withIntermediateDirectories: true)
 
         let generation = Task {
-            try await TakeThumbnailGenerator { _ in
+            try await TakeThumbnailGenerator { _, _ in
                 await gate.suspendUntilReleased()
                 return Data("thumbnail".utf8)
             }.generate(movieAt: source, destination: destination)
@@ -45,6 +45,37 @@ final class TakeThumbnailGeneratorTests: XCTestCase {
         } catch {
             XCTAssertFalse(FileManager.default.fileExists(atPath: owner.path))
         }
+    }
+
+    func testRequestedSourceTimeIsForwardedForProjectCoverGeneration() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let source = root.appendingPathComponent("source.mov")
+        let destination = root.appendingPathComponent("cover.jpg")
+        let requestedTime = MediaTime(seconds: 3.25)
+        let receivedTime = ThumbnailRequestedTime()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        try await TakeThumbnailGenerator { _, time in
+            await receivedTime.record(time)
+            return Data("cover".utf8)
+        }.generate(
+            movieAt: source,
+            destination: destination,
+            sourceTime: requestedTime
+        )
+
+        let recordedTime = await receivedTime.value
+        XCTAssertEqual(recordedTime, requestedTime)
+        XCTAssertEqual(try Data(contentsOf: destination), Data("cover".utf8))
+    }
+}
+
+private actor ThumbnailRequestedTime {
+    private(set) var value: MediaTime?
+
+    func record(_ time: MediaTime?) {
+        value = time
     }
 }
 
