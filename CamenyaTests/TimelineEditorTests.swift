@@ -39,24 +39,28 @@ final class TimelineEditorTests: XCTestCase {
             before: initial,
             after: afterFirstCommand,
             undoFocusClipID: first.id,
-            redoFocusClipID: second.id
+            redoFocusClipID: second.id,
+            operationName: "Add Clip"
         )
         history.record(
             before: afterFirstCommand,
             after: afterSecondCommand,
             undoFocusClipID: second.id,
-            redoFocusClipID: second.id
+            redoFocusClipID: second.id,
+            operationName: "Move Clip"
         )
 
         XCTAssertEqual(history.undoTarget?.state, afterFirstCommand)
         XCTAssertTrue(history.canUndo)
         XCTAssertFalse(history.canRedo)
+        XCTAssertEqual(history.undoOperationName, "Move Clip")
 
         history.didUndo()
 
         XCTAssertEqual(history.redoTarget?.state, afterSecondCommand)
         XCTAssertEqual(history.undoTarget?.state, initial)
         XCTAssertTrue(history.canRedo)
+        XCTAssertEqual(history.redoOperationName, "Move Clip")
 
         history.didRedo()
 
@@ -531,6 +535,162 @@ final class TimelineEditorTests: XCTestCase {
         XCTAssertEqual(outcome.snapshot.duration, ProjectTime(seconds: 16))
         XCTAssertEqual(outcome.focus?.projectTime, ProjectTime(seconds: 6))
         XCTAssertEqual(outcome.focus?.clipID, outcome.snapshot.clips[1].id)
+    }
+
+    func testJoinAtomicallyReversesEligibleSplitWithoutChangingOutput() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let editor = TimelineEditor(projectID: project.id, projectStore: store)
+        let completed = try await editor.completeFinalizedTake(
+            FinalizedTake(
+                id: UUID(),
+                movieURL: try makeMovie(in: root),
+                orientation: .portrait,
+                duration: 10,
+                createdAt: .distantPast
+            ),
+            expectedRevision: .zero
+        )
+        let split = try await editor.perform(
+            .split(clipID: completed.clip.id, at: ProjectTime(seconds: 4)),
+            expectedRevision: completed.snapshot.revision
+        )
+        let leadingID = try XCTUnwrap(split.snapshot.clips.first?.id)
+
+        let joined = try await editor.perform(
+            .join(leadingClipID: leadingID),
+            expectedRevision: split.snapshot.revision
+        )
+
+        XCTAssertEqual(joined.snapshot.clips.count, 1)
+        XCTAssertEqual(joined.snapshot.duration, completed.snapshot.duration)
+        XCTAssertEqual(joined.snapshot.clips[0].takeID, completed.take.id)
+        XCTAssertEqual(joined.snapshot.clips[0].availableRange, completed.clip.availableRange)
+        XCTAssertEqual(joined.snapshot.clips[0].selection, completed.clip.selection)
+        XCTAssertEqual(joined.snapshot.clips[0].isMuted, completed.clip.isMuted)
+        XCTAssertEqual(joined.focus?.clipID, joined.snapshot.clips[0].id)
+        XCTAssertEqual(joined.focus?.projectTime, ProjectTime(seconds: 4))
+        XCTAssertEqual(try ProjectExportPlan(snapshot: joined.snapshot).sources.map(\.selection), [
+            completed.clip.selection
+        ])
+    }
+
+    func testJoinRejectsTrimGapOrMismatchedAudio() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let editor = TimelineEditor(projectID: project.id, projectStore: store)
+        let completed = try await editor.completeFinalizedTake(
+            FinalizedTake(
+                id: UUID(),
+                movieURL: try makeMovie(in: root),
+                orientation: .portrait,
+                duration: 10,
+                createdAt: .distantPast
+            ),
+            expectedRevision: .zero
+        )
+        let split = try await editor.perform(
+            .split(clipID: completed.clip.id, at: ProjectTime(seconds: 4)),
+            expectedRevision: completed.snapshot.revision
+        )
+        let leading = try XCTUnwrap(split.snapshot.clips.first)
+        let trailing = try XCTUnwrap(split.snapshot.clips.last)
+        let trimmed = try await editor.perform(
+            .trim(
+                clipID: trailing.id,
+                selection: TakeRange(startSeconds: 5, endSeconds: 10)
+            ),
+            expectedRevision: split.snapshot.revision
+        )
+
+        do {
+            _ = try await editor.perform(
+                .join(leadingClipID: leading.id),
+                expectedRevision: trimmed.snapshot.revision
+            )
+            XCTFail("Expected a trim gap to make Join unavailable")
+        } catch {
+            XCTAssertEqual(error as? TimelineEditorError, .invalidClip(leading.id))
+        }
+
+        let restored = try await editor.perform(
+            .resetTrim(clipID: trailing.id),
+            expectedRevision: trimmed.snapshot.revision
+        )
+        let muted = try await editor.perform(
+            .setMuted(clipID: trailing.id, isMuted: true),
+            expectedRevision: restored.snapshot.revision
+        )
+        do {
+            _ = try await editor.perform(
+                .join(leadingClipID: leading.id),
+                expectedRevision: muted.snapshot.revision
+            )
+            XCTFail("Expected mismatched audio to make Join unavailable")
+        } catch {
+            XCTAssertEqual(error as? TimelineEditorError, .invalidClip(leading.id))
+        }
+    }
+
+    func testJoinRejectsContiguousClipsWithoutTheSameSplitLineage() {
+        let takeID = UUID()
+        let firstBoundary = TimelineClip.SplitBoundaryID()
+        let secondBoundary = TimelineClip.SplitBoundaryID()
+        let leading = TimelineClip(
+            takeID: takeID,
+            availableRange: TakeRange(startSeconds: 0, endSeconds: 4),
+            selection: TakeRange(startSeconds: 0, endSeconds: 4),
+            trailingSplitBoundaryID: firstBoundary
+        )
+        let trailing = TimelineClip(
+            takeID: takeID,
+            availableRange: TakeRange(startSeconds: 4, endSeconds: 10),
+            selection: TakeRange(startSeconds: 4, endSeconds: 10),
+            leadingSplitBoundaryID: secondBoundary
+        )
+
+        XCTAssertNil(TimelineJoinRules.joinedClip(leading: leading, trailing: trailing))
+    }
+
+    func testMiddleClipExposesBothEligibleJoinDirectionsWithoutGuessing() {
+        let takeID = UUID()
+        let firstBoundary = TimelineClip.SplitBoundaryID()
+        let secondBoundary = TimelineClip.SplitBoundaryID()
+        let clips = [
+            TimelineClip(
+                takeID: takeID,
+                availableRange: TakeRange(startSeconds: 0, endSeconds: 4),
+                selection: TakeRange(startSeconds: 0, endSeconds: 4),
+                trailingSplitBoundaryID: firstBoundary
+            ),
+            TimelineClip(
+                takeID: takeID,
+                availableRange: TakeRange(startSeconds: 4, endSeconds: 7),
+                selection: TakeRange(startSeconds: 4, endSeconds: 7),
+                leadingSplitBoundaryID: firstBoundary,
+                trailingSplitBoundaryID: secondBoundary
+            ),
+            TimelineClip(
+                takeID: takeID,
+                availableRange: TakeRange(startSeconds: 7, endSeconds: 10),
+                selection: TakeRange(startSeconds: 7, endSeconds: 10),
+                leadingSplitBoundaryID: secondBoundary
+            )
+        ]
+
+        XCTAssertEqual(
+            TimelineJoinRules.choices(for: clips[1].id, in: clips),
+            [
+                TimelineJoinChoice(direction: .previous, leadingClipID: clips[0].id),
+                TimelineJoinChoice(direction: .next, leadingClipID: clips[1].id)
+            ]
+        )
     }
 
     func testSplitRejectsCutThatWouldCreateClipShorterThanMinimum() async throws {

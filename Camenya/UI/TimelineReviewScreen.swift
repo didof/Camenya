@@ -145,25 +145,41 @@ final class TimelinePlaybackSession: ObservableObject {
     private var preparationTask: Task<Void, Never>?
     private var installedItemIndices: [ObjectIdentifier: Int] = [:]
     private var preparationGeneration = 0
-    init(snapshot: ExportSnapshot, initialSelectedClipID: TimelineClip.ID? = nil) {
+    private var activeTrimPreviewClipID: TimelineClip.ID?
+    init(
+        snapshot: ExportSnapshot,
+        initialSelectedClipID: TimelineClip.ID? = nil,
+        initialProjectTime: ProjectTime? = nil
+    ) {
         self.snapshot = snapshot
         sources = TimelinePlaybackSource.make(snapshot: snapshot)
         let clips = Self.makeFilmstripClips(snapshot: snapshot)
-        let initialIndex = initialSelectedClipID.flatMap { requestedID in
+        let requestedTime = initialProjectTime.map {
+            ProjectTime(seconds: min(max(0, $0.seconds), snapshot.duration.seconds))
+        }
+        let initialIndex = requestedTime.flatMap { time in
+            snapshot.position(at: time).flatMap { position in
+                clips.firstIndex(where: { $0.id == position.clipID })
+            }
+        } ?? initialSelectedClipID.flatMap { requestedID in
             clips.firstIndex(where: { $0.id == requestedID })
         } ?? 0
         let initialClip = clips[safe: initialIndex]
+        let playhead = requestedTime ?? initialClip?.projectTimeRange.start ?? .zero
         state = State(
             revision: snapshot.revision,
             duration: snapshot.duration,
             clips: clips,
             phase: clips.isEmpty ? .empty : .preparing,
-            playhead: initialClip?.projectTimeRange.start ?? .zero,
+            playhead: playhead,
             selectedClipID: initialClip?.id,
             filmstripScale: .standard
         )
         observePlayerTime()
-        if !clips.isEmpty { prepareQueue(startingAt: initialIndex, localTime: 0) }
+        if !clips.isEmpty {
+            let localTime = max(0, playhead.seconds - (initialClip?.projectTimeRange.start.seconds ?? 0))
+            prepareQueue(startingAt: initialIndex, localTime: localTime)
+        }
     }
 
     var currentSnapshot: ExportSnapshot { snapshot }
@@ -210,6 +226,29 @@ final class TimelinePlaybackSession: ObservableObject {
         selection: TakeRange,
         edge: TimelineTrimEdge
     ) {
+        prepareTrimPreview(
+            clipID: clipID,
+            selection: selection,
+            edge: edge,
+            playWhenReady: false
+        )
+    }
+
+    func playTrimPreview(clipID: TimelineClip.ID, selection: TakeRange) {
+        prepareTrimPreview(
+            clipID: clipID,
+            selection: selection,
+            edge: .start,
+            playWhenReady: true
+        )
+    }
+
+    private func prepareTrimPreview(
+        clipID: TimelineClip.ID,
+        selection: TakeRange,
+        edge: TimelineTrimEdge,
+        playWhenReady: Bool
+    ) {
         guard let index = state.clips.firstIndex(where: { $0.id == clipID }),
               let source = sources[safe: index] else { return }
         preparationGeneration += 1
@@ -239,7 +278,8 @@ final class TimelinePlaybackSession: ObservableObject {
                 self.installTrimPreview(
                     item,
                     sourceIndex: index,
-                    localTime: edge == .start ? 0 : max(0, selection.duration - 1.0 / 30.0)
+                    localTime: edge == .start ? 0 : max(0, selection.duration - 1.0 / 30.0),
+                    playWhenReady: playWhenReady
                 )
             } catch {
                 guard !Task.isCancelled, let self, generation == self.preparationGeneration else { return }
@@ -416,24 +456,41 @@ final class TimelinePlaybackSession: ObservableObject {
     private func installTrimPreview(
         _ item: AVPlayerItem,
         sourceIndex: Int,
-        localTime: TimeInterval
+        localTime: TimeInterval,
+        playWhenReady: Bool
     ) {
         clearInstalledItems()
         installedItemIndices = [ObjectIdentifier(item): sourceIndex]
+        activeTrimPreviewClipID = state.clips[safe: sourceIndex]?.id
+        completionObservers.append(NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self] notification in
+            Task { @MainActor in self?.itemDidFinish(notification.object as? AVPlayerItem) }
+        })
         player.insert(item, after: nil)
         player.seek(to: CMTime(seconds: localTime, preferredTimescale: 600))
-        state.phase = .paused
+        state.phase = playWhenReady ? .playing : .paused
+        if playWhenReady { player.play() }
     }
 
     private func clearInstalledItems() {
         completionObservers.forEach(NotificationCenter.default.removeObserver)
         completionObservers.removeAll()
         installedItemIndices.removeAll()
+        activeTrimPreviewClipID = nil
         player.removeAllItems()
     }
 
     private func itemDidFinish(_ item: AVPlayerItem?) {
         guard let item, let completedIndex = installedItemIndices[ObjectIdentifier(item)] else { return }
+        if let activeTrimPreviewClipID {
+            player.pause()
+            state.selectedClipID = activeTrimPreviewClipID
+            state.phase = .completed
+            return
+        }
         let nextIndex = completedIndex + 1
         guard nextIndex < state.clips.count else {
             player.pause()
@@ -488,6 +545,30 @@ private extension Collection {
     }
 }
 
+struct TimelinePlaybackContext: Equatable, Sendable {
+    var selectedClipID: TimelineClip.ID?
+    var projectTime: ProjectTime
+
+    static let beginning = TimelinePlaybackContext(selectedClipID: nil, projectTime: .zero)
+}
+
+enum TimelineReviewPresentation: Equatable, Sendable {
+    case standalone
+    case embedded
+}
+
+enum TimelineEditCompletion: Equatable, Sendable {
+    case remainInEditor
+    case finishTrim
+}
+
+struct TimelineEditRequest: Equatable, Sendable {
+    let edit: TimelineEdit
+    let completion: TimelineEditCompletion
+
+    var retryRequest: TimelineEditRequest { self }
+}
+
 struct TimelineReviewScreen: View {
     @StateObject private var playback: TimelinePlaybackSession
     @ObservedObject private var model: AppModel
@@ -495,123 +576,155 @@ struct TimelineReviewScreen: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isCommittingEdit = false
     @State private var editErrorMessage: String?
-    @State private var editRecoveryGeneration = 0
+    @State private var failedEditRequest: TimelineEditRequest?
     @State private var sessionHistory = TimelineSessionHistory()
+    @State private var trimSession: TimelineTrimSession?
+    @State private var trimEntryContext: TimelinePlaybackContext?
     let title: String
     let format: ProjectFormat
+    let presentation: TimelineReviewPresentation
+    let onDone: (TimelinePlaybackContext) -> Void
 
     init(
         snapshot: ExportSnapshot,
         title: String,
         format: ProjectFormat,
         model: AppModel,
-        initialSelectedClipID: TimelineClip.ID? = nil
+        initialSelectedClipID: TimelineClip.ID? = nil,
+        initialProjectTime: ProjectTime? = nil,
+        presentation: TimelineReviewPresentation = .standalone,
+        onDone: @escaping (TimelinePlaybackContext) -> Void = { _ in }
     ) {
         _playback = StateObject(wrappedValue: TimelinePlaybackSession(
             snapshot: snapshot,
-            initialSelectedClipID: initialSelectedClipID
+            initialSelectedClipID: initialSelectedClipID,
+            initialProjectTime: initialProjectTime
         ))
         _model = ObservedObject(wrappedValue: model)
         self.title = title
         self.format = format
+        self.presentation = presentation
+        self.onDone = onDone
     }
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(spacing: 16) {
-                    viewer
-                    if playback.state.phase == .failed { failureState }
-                    else if playback.state.phase == .empty { emptyState }
-                    else {
-                        playbackStatus
-                        if !pendingCaptionIssues.isEmpty { captionIssuesLink }
-                        projectTimeSlider
-                        TimelineFilmstrip(
-                            playback: playback,
-                            isCommitting: isCommittingEdit || model.isEditingTimeline,
-                            onMove: { clipID, destinationIndex in
-                                commit(.move(clipID: clipID, toIndex: destinationIndex))
-                            }
-                        )
-                        playbackControls
-                        if let selectedClip = playback.state.selectedClip {
-                            TimelineTrimInspector(
-                                clip: selectedClip,
-                                clipOrdinal: playback.state.selectedClipOrdinal ?? 1,
-                                clipCount: playback.state.clipCount,
-                                projectTime: playback.state.playhead,
-                                isCommitting: isCommittingEdit,
-                                recoveryGeneration: editRecoveryGeneration,
-                                onPreview: { selection, edge in
-                                    playback.previewTrim(
-                                        clipID: selectedClip.id,
-                                        selection: selection,
-                                        edge: edge
-                                    )
-                                },
-                                onCommit: commit
-                            )
-                            .id(selectedClip.id)
-                        }
-                    }
-                }
-                .padding()
-            }
-            .navigationTitle(title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    NavigationLink {
-                        RemovedUnusedScreen(
-                            model: model,
-                            onTimelineEdit: commit,
-                            onDeleteTake: deleteTakePermanently
-                        )
-                    } label: {
-                        Label("Removed & Unused", systemImage: "archivebox")
-                    }
-                    .disabled(isCommittingEdit || model.isEditingTimeline)
-                    .accessibilityHint("Manage recoverable removed Clips and Takes not used by the Storyline.")
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                        .disabled(isCommittingEdit || model.isEditingTimeline)
-                }
-                ToolbarItemGroup(placement: .bottomBar) {
-                    Button("Undo", systemImage: "arrow.uturn.backward") {
-                        applyHistory(.undo)
-                    }
-                    .disabled(!sessionHistory.canUndo || isCommittingEdit || model.isEditingTimeline)
-                    .accessibilityHint(sessionHistory.canUndo
-                        ? "Reverses the most recent edit from this editing session."
-                        : "No edit is available to undo in this editing session.")
-
-                    Spacer()
-
-                    Button("Redo", systemImage: "arrow.uturn.forward") {
-                        applyHistory(.redo)
-                    }
-                    .disabled(!sessionHistory.canRedo || isCommittingEdit || model.isEditingTimeline)
-                    .accessibilityHint(sessionHistory.canRedo
-                        ? "Reapplies the most recently undone edit."
-                        : "No edit is available to redo in this editing session.")
-                }
+        Group {
+            if presentation == .standalone {
+                NavigationStack { editorSurface }
+            } else {
+                editorSurface
             }
         }
         .interactiveDismissDisabled(isCommittingEdit || model.isEditingTimeline)
         .onDisappear { playback.send(.pause) }
-        .alert("Edit Not Saved", isPresented: Binding(
-            get: { editErrorMessage != nil },
-            set: { if !$0 { editErrorMessage = nil } }
-        )) {
-            Button("OK", role: .cancel) { editErrorMessage = nil }
-        } message: {
-            Text(editErrorMessage ?? "The Storyline was not changed.")
+    }
+
+    private var editorSurface: some View {
+        GeometryReader { geometry in
+            ScrollView {
+                VStack(spacing: 14) {
+                    viewer(maximumHeight: min(geometry.size.height * 0.42, 300))
+                    if let editErrorMessage {
+                        editFailureRow(editErrorMessage)
+                    }
+                    if playback.state.phase == .failed {
+                        failureState
+                    } else if playback.state.phase == .empty {
+                        emptyState
+                    } else if let trimSession {
+                        trimSurface(trimSession)
+                    } else {
+                        playbackStatus
+                        if !pendingCaptionIssues.isEmpty { captionIssuesLink }
+                        TimelineFilmstrip(
+                            playback: playback,
+                            isCommitting: isCommittingEdit || model.isEditingTimeline,
+                            preparationIssueCount: model.preparationIssueCount(for:),
+                            onMove: { clipID, destinationIndex in
+                                commit(.move(clipID: clipID, toIndex: destinationIndex))
+                            }
+                        )
+                        contextualToolRow
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+            }
+        }
+        .background(Color(uiColor: .systemGroupedBackground))
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { editorToolbar }
+    }
+
+    private func editFailureRow(_ message: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.circle.fill")
+                .foregroundStyle(.orange)
+            Text(message)
+                .font(.footnote)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if let failedEditRequest {
+                Button("Retry") {
+                    commit(failedEditRequest.retryRequest)
+                }
+                .font(.footnote.weight(.semibold))
+                .disabled(isCommittingEdit)
+            }
+            Button {
+                editErrorMessage = nil
+                failedEditRequest = nil
+            } label: {
+                    Image(systemName: "xmark")
+                        .frame(width: 44, height: 44)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss edit error")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    @ToolbarContentBuilder
+    private var editorToolbar: some ToolbarContent {
+        if trimSession != nil {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Cancel", action: cancelTrim)
+                    .disabled(isCommittingEdit)
+            }
+        }
+
+        ToolbarItem(placement: .confirmationAction) {
+            Button("Done", action: doneAction)
+                .fontWeight(.semibold)
+                .disabled(isCommittingEdit || model.isEditingTimeline)
+        }
+
+        if trimSession == nil {
+            ToolbarItemGroup(placement: .bottomBar) {
+                Button("Undo", systemImage: "arrow.uturn.backward") {
+                    applyHistory(.undo)
+                }
+                .disabled(!sessionHistory.canUndo || isCommittingEdit || model.isEditingTimeline)
+                .accessibilityHint(sessionHistory.canUndo
+                    ? "Undoes \(sessionHistory.undoOperationName ?? "the most recent edit")."
+                    : "No edit is available to undo in this editing session.")
+
+                Spacer()
+
+                Button("Redo", systemImage: "arrow.uturn.forward") {
+                    applyHistory(.redo)
+                }
+                .disabled(!sessionHistory.canRedo || isCommittingEdit || model.isEditingTimeline)
+                .accessibilityHint(sessionHistory.canRedo
+                    ? "Redoes \(sessionHistory.redoOperationName ?? "the most recently undone edit")."
+                    : "No edit is available to redo in this editing session.")
+            }
         }
     }
 
-    private var viewer: some View {
+    private func viewer(maximumHeight: CGFloat) -> some View {
         GeometryReader { geometry in
             ZStack {
                 PlayerLayerView(player: playback.player)
@@ -630,15 +743,287 @@ struct TimelineReviewScreen: View {
                                 .padding(.vertical, 10)
                                 .background(.regularMaterial, in: Capsule())
                         }
+                } else if playback.state.phase != .failed,
+                          playback.state.phase != .empty {
+                    Button(action: toggleViewerPlayback) {
+                        Image(systemName: playback.state.isPlaying ? "pause.fill" : "play.fill")
+                            .font(.title2.weight(.semibold))
+                            .frame(width: 56, height: 56)
+                            .background(.regularMaterial, in: Circle())
+                    }
+                    .accessibilityLabel(playback.state.isPlaying ? "Pause" : "Play")
                 }
             }
         }
         .aspectRatio(format == .portrait ? 9 / 16 : 16 / 9, contentMode: .fit)
+        .frame(maxHeight: max(180, maximumHeight))
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .accessibilityElement(children: .ignore)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel("Project Viewer")
         .accessibilityValue(viewerAccessibilityValue)
         .accessibilitySortPriority(6)
+    }
+
+    private var contextualToolRow: some View {
+        VStack(spacing: 4) {
+            HStack(spacing: 8) {
+                Button(action: startTrim) {
+                    Label("Trim", systemImage: "timeline.selection")
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .buttonStyle(.bordered)
+                .disabled(selectedProjectClip == nil || isCommittingEdit)
+
+                Button(action: splitAtPlayhead) {
+                    Label("Split", systemImage: "scissors")
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .buttonStyle(.bordered)
+                .disabled(splitSourceTime == nil || isCommittingEdit)
+                .accessibilityHint(splitSourceTime == nil
+                    ? "Move the Playhead at least one second from each Clip edge."
+                    : "Creates two adjacent Clips at the Playhead.")
+
+                Menu {
+                    if joinChoices.count == 1, let choice = joinChoices.first {
+                        Button("Join Clip", systemImage: "rectangle.portrait.on.rectangle.portrait") {
+                            join(choice)
+                        }
+                    } else if joinChoices.count > 1 {
+                        if let choice = joinChoices.first(where: { $0.direction == .previous }) {
+                            Button("Join Previous Clip", systemImage: "rectangle.leadinghalf.inset.filled") {
+                                join(choice)
+                            }
+                        }
+                        if let choice = joinChoices.first(where: { $0.direction == .next }) {
+                            Button("Join Next Clip", systemImage: "rectangle.trailinghalf.inset.filled") {
+                                join(choice)
+                            }
+                        }
+                    } else {
+                        Button("Join Clip", systemImage: "rectangle.portrait.on.rectangle.portrait") {}
+                            .disabled(true)
+                        Text("Join needs adjacent matching split Clips.")
+                    }
+
+                    Button("Move Earlier", systemImage: "arrow.left") {
+                        moveSelectedClip(by: -1)
+                    }
+                    .disabled(!canMoveSelectedClip(by: -1))
+
+                    Button("Move Later", systemImage: "arrow.right") {
+                        moveSelectedClip(by: 1)
+                    }
+                    .disabled(!canMoveSelectedClip(by: 1))
+
+                    Divider()
+
+                    if let selectedClip = playback.state.selectedClip {
+                        Button(
+                            selectedClip.isMuted ? "Include Source Audio" : "Mute Source Audio",
+                            systemImage: selectedClip.isMuted ? "speaker.wave.2" : "speaker.slash"
+                        ) {
+                            commit(.setMuted(
+                                clipID: selectedClip.id,
+                                isMuted: !selectedClip.isMuted
+                            ))
+                        }
+                        if selectedClip.selection != selectedClip.availableRange {
+                            Button("Reset Trim", systemImage: "arrow.counterclockwise") {
+                                commit(.resetTrim(clipID: selectedClip.id))
+                            }
+                        }
+                        Divider()
+                        Button("Remove from Storyline", systemImage: "archivebox") {
+                            commit(.remove(clipID: selectedClip.id))
+                        }
+                    }
+                } label: {
+                    Label("More", systemImage: "ellipsis.circle")
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .buttonStyle(.bordered)
+                .disabled(selectedProjectClip == nil || isCommittingEdit)
+            }
+
+            if splitSourceTime == nil, playback.state.selectedClip != nil {
+                Text("Split needs at least 1.0s on each side of the Playhead.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .accessibilitySortPriority(2.5)
+    }
+
+    private func trimSurface(_ session: TimelineTrimSession) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Trim Clip")
+                    .font(.headline)
+                Spacer()
+                Text(
+                    "\(timecode(session.candidateSelection.start.seconds)) – "
+                        + timecode(session.candidateSelection.end.seconds)
+                )
+                .font(.callout.monospacedDigit())
+                .foregroundStyle(.secondary)
+            }
+
+            TimelineTrimWorkspace(
+                session: Binding(
+                    get: { trimSession ?? session },
+                    set: { trimSession = $0 }
+                ),
+                envelope: selectedTake.map(model.trimEnvelope(for:)) ?? [],
+                sourceDuration: selectedTake?.duration ?? session.availableRange.end.seconds,
+                movieURL: selectedSnapshotClip?.mediaURL,
+                fallbackThumbnailURL: selectedSnapshotClip?.thumbnailURL,
+                isGeneratingWaveform: model.isAnalyzingTrim,
+                onPreview: { selection, edge in
+                    playback.previewTrim(
+                        clipID: session.clipID,
+                        selection: selection,
+                        edge: edge
+                    )
+                }
+            )
+            .disabled(isCommittingEdit)
+        }
+        .padding(.top, 2)
+    }
+
+    private var selectedProjectClip: TimelineClip? {
+        guard let selectedClipID = playback.state.selectedClipID else { return nil }
+        return model.project.primaryStoryline.clips.first { $0.id == selectedClipID }
+    }
+
+    private var selectedTake: ProjectTake? {
+        guard let selectedClipID = playback.state.selectedClipID,
+              let takeID = playback.currentSnapshot.clips.first(where: {
+                  $0.id == selectedClipID
+              })?.takeID else { return nil }
+        return model.project.takes.first { $0.id == takeID }
+    }
+
+    private var selectedSnapshotClip: ExportSnapshot.Clip? {
+        guard let selectedClipID = playback.state.selectedClipID else { return nil }
+        return playback.currentSnapshot.clips.first { $0.id == selectedClipID }
+    }
+
+    private var splitSourceTime: MediaTime? {
+        guard let clip = playback.state.selectedClip else { return nil }
+        return TimelineSplitRules.sourceTime(
+            selection: clip.selection,
+            projectTimeRange: clip.projectTimeRange,
+            at: playback.state.playhead
+        )
+    }
+
+    private var joinChoices: [TimelineJoinChoice] {
+        guard let selectedClipID = playback.state.selectedClipID else { return [] }
+        return TimelineJoinRules.choices(
+            for: selectedClipID,
+            in: model.project.primaryStoryline.clips
+        )
+    }
+
+    private func startTrim() {
+        guard let clip = playback.state.selectedClip else { return }
+        playback.send(.pause)
+        trimEntryContext = currentPlaybackContext
+        trimSession = TimelineTrimSession(
+            clipID: clip.id,
+            availableRange: clip.availableRange,
+            selection: clip.selection
+        )
+        if let take = selectedTake, model.trimEnvelope(for: take).isEmpty {
+            model.cleanUpEdges(takeID: take.id)
+        }
+    }
+
+    private func cancelTrim() {
+        guard let trimSession else { return }
+        let context = trimEntryContext ?? TimelinePlaybackContext(
+            selectedClipID: trimSession.clipID,
+            projectTime: playback.state.playhead
+        )
+        playback.replaceSnapshot(
+            playback.currentSnapshot,
+            selectedClipID: context.selectedClipID,
+            projectTime: context.projectTime
+        )
+        self.trimSession = nil
+        trimEntryContext = nil
+    }
+
+    private func doneAction() {
+        guard let trimSession else {
+            finishEditing()
+            return
+        }
+        guard let edit = trimSession.commitEdit else {
+            cancelTrim()
+            return
+        }
+        commit(TimelineEditRequest(edit: edit, completion: .finishTrim))
+    }
+
+    private func finishEditing() {
+        playback.send(.pause)
+        onDone(currentPlaybackContext)
+        if presentation == .standalone { dismiss() }
+    }
+
+    private var currentPlaybackContext: TimelinePlaybackContext {
+        TimelinePlaybackContext(
+            selectedClipID: playback.state.selectedClipID,
+            projectTime: playback.state.playhead
+        )
+    }
+
+    private func toggleViewerPlayback() {
+        if playback.state.isPlaying {
+            playback.send(.pause)
+            return
+        }
+        if let trimSession {
+            playback.playTrimPreview(
+                clipID: trimSession.clipID,
+                selection: trimSession.candidateSelection
+            )
+        } else {
+            playback.send(.togglePlayback)
+        }
+    }
+
+    private func splitAtPlayhead() {
+        guard let clipID = playback.state.selectedClipID, splitSourceTime != nil else { return }
+        commit(.split(clipID: clipID, at: playback.state.playhead))
+    }
+
+    private func join(_ choice: TimelineJoinChoice) {
+        commit(.join(leadingClipID: choice.leadingClipID))
+    }
+
+    private func canMoveSelectedClip(by offset: Int) -> Bool {
+        guard let ordinal = playback.state.selectedClipOrdinal else { return false }
+        let destination = ordinal - 1 + offset
+        return destination >= 0 && destination < playback.state.clipCount
+    }
+
+    private func moveSelectedClip(by offset: Int) {
+        guard let clipID = playback.state.selectedClipID,
+              let ordinal = playback.state.selectedClipOrdinal else { return }
+        commit(.move(clipID: clipID, toIndex: ordinal - 1 + offset))
+    }
+
+    private var activeCaption: ActiveProjectCaptionPresentation? {
+        guard let timeline = playback.currentSnapshot.captionTimeline else { return nil }
+        return ProjectCaptionOverlayResolver.active(
+            in: timeline,
+            at: playback.state.playhead.seconds
+        )
     }
 
     private var pendingCaptionIssues: [CaptionTimelineIssue] {
@@ -648,8 +1033,7 @@ struct TimelineReviewScreen: View {
     private var captionIssuesLink: some View {
         NavigationLink {
             CaptionTimelineIssuesScreen(
-                issues: pendingCaptionIssues,
-                takes: model.project.takes,
+                model: model,
                 isCommitting: isCommittingEdit || model.isEditingTimeline,
                 onApprove: { commit(.approveCaptionTimelineIssue(issueID: $0)) }
             )
@@ -658,20 +1042,12 @@ struct TimelineReviewScreen: View {
                 "\(pendingCaptionIssues.count) Caption \(pendingCaptionIssues.count == 1 ? "Issue" : "Issues")",
                 systemImage: "captions.bubble.fill"
             )
-            .font(.headline)
+            .font(.callout.weight(.semibold))
             .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
         }
         .buttonStyle(.bordered)
         .disabled(isCommittingEdit || model.isEditingTimeline)
-        .accessibilityHint("Review captions omitted from the Storyline after an edit.")
-    }
-
-    private var activeCaption: ActiveProjectCaptionPresentation? {
-        guard let timeline = playback.currentSnapshot.captionTimeline else { return nil }
-        return ProjectCaptionOverlayResolver.active(
-            in: timeline,
-            at: playback.state.playhead.seconds
-        )
+        .accessibilityHint("Review captions omitted from preview and export after an earlier Storyline edit.")
     }
 
     private var viewerAccessibilityValue: String {
@@ -767,54 +1143,6 @@ struct TimelineReviewScreen: View {
         }
     }
 
-    private var playbackControls: some View {
-        HStack(spacing: 8) {
-            playbackButton(title: "Previous Clip", systemImage: "backward.end.fill", disabled: !playback.state.canSelectPreviousClip, intent: .selectPreviousClip)
-            playbackButton(title: playback.state.isPlaying ? "Pause" : "Play", systemImage: playback.state.isPlaying ? "pause.fill" : "play.fill", disabled: playback.state.phase == .preparing, intent: .togglePlayback)
-            playbackButton(title: "Next Clip", systemImage: "forward.end.fill", disabled: !playback.state.canSelectNextClip, intent: .selectNextClip)
-            playbackButton(title: "Zoom Out", systemImage: "minus.magnifyingglass", intent: .zoomOut)
-            playbackButton(title: "Zoom In", systemImage: "plus.magnifyingglass", intent: .zoomIn)
-        }
-        .frame(maxWidth: .infinity)
-        .accessibilitySortPriority(3)
-    }
-
-    private var projectTimeSlider: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("Project Time")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Slider(
-                value: Binding(
-                    get: { playback.state.playhead.seconds },
-                    set: { playback.send(.previewSeek(ProjectTime(seconds: $0))) }
-                ),
-                in: 0...max(0.001, playback.state.duration.seconds),
-                onEditingChanged: { editing in
-                    if !editing { playback.send(.seek(playback.state.playhead)) }
-                }
-            )
-            .accessibilityLabel("Project Time")
-        }
-        .accessibilitySortPriority(3.5)
-    }
-
-    private func playbackButton(
-        title: String,
-        systemImage: String,
-        disabled: Bool = false,
-        intent: TimelinePlaybackSession.Intent
-    ) -> some View {
-        Button { playback.send(intent) } label: {
-            Image(systemName: systemImage)
-                .font(.title3.weight(.semibold))
-                .frame(maxWidth: .infinity, minHeight: 44)
-        }
-        .buttonStyle(.bordered)
-        .disabled(disabled)
-        .accessibilityLabel(title)
-    }
-
     private func timecode(_ seconds: TimeInterval) -> String {
         let safeSeconds = max(0, seconds.isFinite ? seconds : 0)
         let minutes = Int(safeSeconds) / 60
@@ -824,7 +1152,14 @@ struct TimelineReviewScreen: View {
     }
 
     private func commit(_ edit: TimelineEdit) {
+        commit(TimelineEditRequest(edit: edit, completion: .remainInEditor))
+    }
+
+    private func commit(_ request: TimelineEditRequest) {
         guard !isCommittingEdit else { return }
+        editErrorMessage = nil
+        failedEditRequest = nil
+        let edit = request.edit
         let selectedClipID = playback.state.selectedClipID
         let projectTime = playback.state.playhead
         let expectedRevision = playback.state.revision
@@ -842,7 +1177,7 @@ struct TimelineReviewScreen: View {
                 recordSessionEdit(edit, before: beforeState, outcome: outcome)
                 let animatesStructure: Bool
                 switch edit {
-                case .move, .remove, .restore, .addFullTakeToStoryline:
+                case .move, .remove, .restore, .addFullTakeToStoryline, .join:
                     animatesStructure = true
                 case .trim, .resetTrim, .split, .deleteRemovedClipPermanently, .setMuted,
                      .nudgeTrim, .approveCaptionTimelineIssue:
@@ -883,6 +1218,16 @@ struct TimelineReviewScreen: View {
                             "Move complete. Clip \($0) of \(outcome.snapshot.clips.count) selected."
                         } ?? "Move complete."
                     )
+                } else if case .join = edit, let focus = outcome.focus {
+                    let ordinal = outcome.snapshot.clips.firstIndex(where: { $0.id == focus.clipID })
+                        .map { $0 + 1 }
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    UIAccessibility.post(
+                        notification: .announcement,
+                        argument: ordinal.map {
+                            "Join complete. Clip \($0) of \(outcome.snapshot.clips.count) selected."
+                        } ?? "Join complete. Joined Clip selected."
+                    )
                 } else if case .remove = edit {
                     let ordinal = outcome.focus.flatMap { focus in
                         outcome.snapshot.clips.firstIndex(where: { $0.id == focus.clipID })
@@ -891,7 +1236,7 @@ struct TimelineReviewScreen: View {
                     UIAccessibility.post(
                         notification: .announcement,
                         argument: outcome.snapshot.clips.isEmpty
-                            ? "Clip removed. Storyline empty. The Clip remains available in Removed and Unused."
+                            ? "Clip removed. Storyline empty. The Clip remains available in Project Media under Removed Clips."
                             : ordinal.map {
                                 "Clip removed. Clip \($0) of \(outcome.snapshot.clips.count) selected."
                             } ?? "Clip removed. Another Clip is selected."
@@ -941,14 +1286,20 @@ struct TimelineReviewScreen: View {
                         argument: "Caption approved for the current Storyline. Preview and export now use the same caption timing."
                     )
                 }
+                editErrorMessage = nil
+                failedEditRequest = nil
+                if request.completion == .finishTrim {
+                    trimSession = nil
+                    trimEntryContext = nil
+                }
             } catch {
                 playback.replaceSnapshot(
                     originalSnapshot,
                     selectedClipID: selectedClipID,
                     projectTime: projectTime
                 )
-                editRecoveryGeneration += 1
                 editErrorMessage = "Camenya couldn't save this edit. Your Takes and previous Storyline are unchanged."
+                failedEditRequest = request
             }
         }
     }
@@ -972,10 +1323,15 @@ struct TimelineReviewScreen: View {
 
     private func applyHistory(_ direction: HistoryDirection) {
         guard !isCommittingEdit else { return }
+        editErrorMessage = nil
+        failedEditRequest = nil
         let target = direction == .undo
             ? sessionHistory.undoTarget
             : sessionHistory.redoTarget
         guard let target else { return }
+        let operationName = direction == .undo
+            ? sessionHistory.undoOperationName
+            : sessionHistory.redoOperationName
         let originalSnapshot = playback.currentSnapshot
         let selectedClipID = playback.state.selectedClipID
         let projectTime = playback.state.playhead
@@ -1012,15 +1368,17 @@ struct TimelineReviewScreen: View {
                 UISelectionFeedbackGenerator().selectionChanged()
                 UIAccessibility.post(
                     notification: .announcement,
-                    argument: direction == .undo ? "Undo complete." : "Redo complete."
+                    argument: direction == .undo
+                        ? "Undid \(operationName ?? "Storyline Edit")."
+                        : "Redid \(operationName ?? "Storyline Edit")."
                 )
+                editErrorMessage = nil
             } catch {
                 playback.replaceSnapshot(
                     originalSnapshot,
                     selectedClipID: selectedClipID,
                     projectTime: projectTime
                 )
-                editRecoveryGeneration += 1
                 editErrorMessage = direction == .undo
                     ? "Camenya couldn't undo that edit. The current Storyline is unchanged."
                     : "Camenya couldn't redo that edit. The current Storyline is unchanged."
@@ -1049,7 +1407,8 @@ struct TimelineReviewScreen: View {
             before: before,
             after: after,
             undoFocusClipID: undoFocusClipID,
-            redoFocusClipID: redoFocusClipID
+            redoFocusClipID: redoFocusClipID,
+            operationName: edit.operationName
         )
     }
 
@@ -1058,6 +1417,7 @@ struct TimelineReviewScreen: View {
         case let .trim(clipID, _),
              let .resetTrim(clipID),
              let .split(clipID, _),
+             let .join(clipID),
              let .move(clipID, _),
              let .remove(clipID),
              let .restore(clipID),
@@ -1070,17 +1430,16 @@ struct TimelineReviewScreen: View {
         }
     }
 
-    private func deleteTakePermanently(_ takeID: UUID) async throws {
-        try await model.deleteUnusedTakePermanently(takeID)
-        sessionHistory.removeAll()
-    }
 }
 
 private struct CaptionTimelineIssuesScreen: View {
-    let issues: [CaptionTimelineIssue]
-    let takes: [ProjectTake]
+    @ObservedObject var model: AppModel
     let isCommitting: Bool
     let onApprove: (CaptionTimelineIssue.ID) -> Void
+
+    private var issues: [CaptionTimelineIssue] {
+        model.project.captionTimelineIssues.filter { $0.reviewState == .needsReview }
+    }
 
     var body: some View {
         Group {
@@ -1088,11 +1447,11 @@ private struct CaptionTimelineIssuesScreen: View {
                 ContentUnavailableView {
                     Label("Captions Ready", systemImage: "checkmark.circle")
                 } description: {
-                    Text("No Storyline edits need caption review.")
+                    Text("No earlier Storyline edit needs caption review.")
                 }
             } else {
                 List(issues) { issue in
-                    VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 10) {
                         Text(cueText(for: issue))
                             .font(.headline)
                             .fixedSize(horizontal: false, vertical: true)
@@ -1101,7 +1460,7 @@ private struct CaptionTimelineIssuesScreen: View {
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                         Text(reviewDetail(for: issue))
-                            .font(.callout)
+                            .font(.footnote)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                         Button("Approve Caption for Storyline") {
@@ -1110,18 +1469,9 @@ private struct CaptionTimelineIssuesScreen: View {
                         .buttonStyle(.borderedProminent)
                         .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                         .disabled(isCommitting)
-                        .accessibilityHint("Uses only the caption source time that remains in the current Storyline.")
+                        .accessibilityHint("Uses only caption source time that remains in this Storyline.")
                     }
-                    .padding(.vertical, 6)
-                }
-                .safeAreaInset(edge: .bottom) {
-                    if isCommitting {
-                        ProgressView("Saving Caption Approval…")
-                            .font(.callout.weight(.semibold))
-                            .frame(maxWidth: .infinity, minHeight: 44)
-                            .background(.bar)
-                            .accessibilityAddTraits(.updatesFrequently)
-                    }
+                    .padding(.vertical, 4)
                 }
             }
         }
@@ -1130,7 +1480,7 @@ private struct CaptionTimelineIssuesScreen: View {
     }
 
     private func cueText(for issue: CaptionTimelineIssue) -> String {
-        takes.first(where: { $0.id == issue.takeID })?
+        model.project.takes.first(where: { $0.id == issue.takeID })?
             .captions?.cues.first(where: { $0.id == issue.cueID })?.text
             ?? "Caption unavailable"
     }
@@ -1143,584 +1493,340 @@ private struct CaptionTimelineIssuesScreen: View {
         case .boundaryCut:
             "A trim cuts through this caption."
         case .discontinuousProjection:
-            "This caption crosses Clips that are no longer next to each other."
+            "This caption crosses Clips that are no longer adjacent."
         }
     }
 
     private func reviewDetail(for issue: CaptionTimelineIssue) -> String {
         guard !issue.fragments.isEmpty else {
-            return "It stays out of preview and export until you approve its return after the earlier edit."
+            return "It remains out of preview and export until you approve its return."
         }
         let duration = issue.fragments.reduce(0) { $0 + $1.sourceRange.duration }
-        let durationText = String(format: "%.1f", duration)
         let fragmentText = issue.fragments.count == 1
-            ? "\(durationText) seconds of source time remains."
-            : "\(issue.fragments.count) separated parts remain, totaling \(durationText) seconds."
-        return "\(fragmentText) The caption stays out of preview and export until you approve it. Camenya does not guess timing."
+            ? String(format: "%.1f seconds of source time remains.", duration)
+            : String(
+                format: "%d separated parts remain, totaling %.1f seconds.",
+                issue.fragments.count,
+                duration
+            )
+        return "\(fragmentText) Camenya leaves it out until you approve it."
     }
 }
 
-private struct TimelineTrimInspector: View {
-    let clip: TimelinePlaybackSession.FilmstripClip
-    let clipOrdinal: Int
-    let clipCount: Int
-    let projectTime: ProjectTime
-    let isCommitting: Bool
-    let recoveryGeneration: Int
+private struct TimelineTrimWorkspace: View {
+    @Binding var session: TimelineTrimSession
+    let envelope: [Float]
+    let sourceDuration: TimeInterval
+    let movieURL: URL?
+    let fallbackThumbnailURL: URL?
+    let isGeneratingWaveform: Bool
     let onPreview: (TakeRange, TimelineTrimEdge) -> Void
-    let onCommit: (TimelineEdit) -> Void
-    @State private var draft: TakeRange
-
-    init(
-        clip: TimelinePlaybackSession.FilmstripClip,
-        clipOrdinal: Int,
-        clipCount: Int,
-        projectTime: ProjectTime,
-        isCommitting: Bool,
-        recoveryGeneration: Int,
-        onPreview: @escaping (TakeRange, TimelineTrimEdge) -> Void,
-        onCommit: @escaping (TimelineEdit) -> Void
-    ) {
-        self.clip = clip
-        self.clipOrdinal = clipOrdinal
-        self.clipCount = clipCount
-        self.projectTime = projectTime
-        self.isCommitting = isCommitting
-        self.recoveryGeneration = recoveryGeneration
-        self.onPreview = onPreview
-        self.onCommit = onCommit
-        _draft = State(initialValue: clip.selection)
-    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("Edit Clip")
-                    .font(.headline)
-                Spacer()
-                Text("\(time(draft.start.seconds)) to \(time(draft.end.seconds))")
-                    .font(.callout.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-
-            TimelineTrimRangeControl(
-                availableRange: clip.availableRange,
-                selection: $draft,
-                onPreview: onPreview,
-                onCommit: {
-                    onCommit(.trim(clipID: clip.id, selection: draft))
-                }
+        VStack(spacing: 10) {
+            TimelineTrimImageStrip(
+                session: $session,
+                movieURL: movieURL,
+                fallbackThumbnailURL: fallbackThumbnailURL,
+                onPreview: onPreview
             )
-            .frame(height: 56)
-            .disabled(isCommitting)
+            .frame(height: 96)
 
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 8) { nudgeStartControls; nudgeEndControls }
-                VStack(spacing: 8) { nudgeStartControls; nudgeEndControls }
-            }
+            TimelineTrimWaveform(
+                session: $session,
+                envelope: envelope,
+                sourceDuration: sourceDuration
+            )
+            .frame(height: 52)
 
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 8) { trimRecoveryControls }
-                VStack(alignment: .leading, spacing: 8) { trimRecoveryControls }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 8) { reorderControls }
-                VStack(spacing: 8) { reorderControls }
-            }
-
-            Button(
-                clip.isMuted ? "Unmute Source Audio" : "Mute Source Audio",
-                systemImage: clip.isMuted ? "speaker.wave.2" : "speaker.slash"
-            ) {
-                onCommit(.setMuted(clipID: clip.id, isMuted: !clip.isMuted))
-            }
-            .buttonStyle(.bordered)
-            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-            .disabled(isCommitting)
-            .accessibilityValue(clip.isMuted ? "Muted" : "On")
-            .accessibilityHint(clip.isMuted
-                ? "Includes this Clip's source audio in preview and export."
-                : "Excludes this Clip's source audio from preview and export without changing the Take.")
-
-            if clip.selection == clip.availableRange {
-                Text("This Clip already uses its full Available Range.")
+            if envelope.isEmpty, isGeneratingWaveform {
+                Label("Building waveform", systemImage: "waveform")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            }
-
-            Button("Split at Playhead", systemImage: "scissors") {
-                onCommit(.split(clipID: clip.id, at: projectTime))
-            }
-            .buttonStyle(.bordered)
-            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-            .disabled(splitSourceTime == nil || isCommitting)
-            .accessibilityHint(splitSourceTime == nil
-                ? "Move the Playhead at least 1.0 second from each edge of this Clip."
-                : "Creates two adjacent Clips without changing the immediate output.")
-
-            if splitSourceTime == nil {
-                Text("Move the Playhead at least 1.0s from each Clip edge to Split.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Button("Remove Clip", systemImage: "archivebox") {
-                onCommit(.remove(clipID: clip.id))
-            }
-            .buttonStyle(.bordered)
-            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-            .disabled(isCommitting)
-            .accessibilityHint("Removes this Clip from the Storyline without deleting its Take media. You can restore it from Removed and Unused.")
-
-            if isCommitting {
-                ProgressView("Saving Edit…")
-                    .font(.callout)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .accessibilityAddTraits(.updatesFrequently)
             }
-        }
-        .padding(.vertical, 4)
-        .onChange(of: clip.selection) { _, selection in
-            draft = selection
-        }
-        .onChange(of: recoveryGeneration) { _, _ in
-            draft = clip.selection
+
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) {
+                    nudgeGroup(title: "In", edge: .start)
+                    Spacer(minLength: 12)
+                    nudgeGroup(title: "Out", edge: .end)
+                }
+                VStack(spacing: 8) {
+                    nudgeGroup(title: "In", edge: .start)
+                    nudgeGroup(title: "Out", edge: .end)
+                }
+            }
+
+            Button("Reset Trim", systemImage: "arrow.counterclockwise") {
+                session.update(edge: .start, to: session.availableRange.start.seconds)
+                session.update(edge: .end, to: session.availableRange.end.seconds)
+                onPreview(session.candidateSelection, .start)
+            }
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .disabled(session.candidateSelection == session.availableRange)
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Edit selected Clip")
-        .accessibilitySortPriority(2.5)
+        .accessibilityLabel("Trim selected Clip")
     }
 
-    private var nudgeStartControls: some View {
+    private func nudgeGroup(title: String, edge: TimelineTrimEdge) -> some View {
         HStack(spacing: 4) {
-            Text("In")
+            Text(title)
                 .font(.caption.weight(.semibold))
                 .frame(minWidth: 28, alignment: .leading)
-            nudgeButton(
-                title: "Earlier",
-                edge: .start,
-                direction: .earlier
-            )
-            nudgeButton(
-                title: "Later",
-                edge: .start,
-                direction: .later
-            )
-        }
-    }
-
-    @ViewBuilder
-    private var trimRecoveryControls: some View {
-        if let suggestion = clip.trimSuggestion,
-           suggestion != clip.selection {
-            Button("Use Silence Trim", systemImage: "waveform.badge.minus") {
-                onCommit(.trim(clipID: clip.id, selection: suggestion))
-            }
-            .buttonStyle(.borderedProminent)
-            .frame(minHeight: 44)
-            .disabled(isCommitting)
-        }
-        Button("Reset Trim", systemImage: "arrow.counterclockwise") {
-            onCommit(.resetTrim(clipID: clip.id))
-        }
-        .buttonStyle(.bordered)
-        .frame(minHeight: 44)
-        .disabled(clip.selection == clip.availableRange || isCommitting)
-        .accessibilityHint(clip.selection == clip.availableRange
-            ? "This Clip already uses its full Available Range."
-            : "Restores this Clip to its full Available Range.")
-    }
-
-    private var reorderControls: some View {
-        Group {
-            reorderButton(
-                title: "Move Earlier",
-                systemImage: "arrow.left",
-                destinationIndex: clipOrdinal - 2
-            )
-            reorderButton(
-                title: "Move Later",
-                systemImage: "arrow.right",
-                destinationIndex: clipOrdinal
-            )
-        }
-    }
-
-    private func reorderButton(
-        title: String,
-        systemImage: String,
-        destinationIndex: Int
-    ) -> some View {
-        let destinationOrdinal = destinationIndex + 1
-        let isAvailable = destinationIndex >= 0 && destinationIndex < clipCount
-        return Button(title, systemImage: systemImage) {
-            onCommit(.move(clipID: clip.id, toIndex: destinationIndex))
-        }
-        .buttonStyle(.bordered)
-        .frame(minHeight: 44)
-        .disabled(!isAvailable || isCommitting)
-        .accessibilityValue(isAvailable ? "Result: position \(destinationOrdinal) of \(clipCount)" : "Unavailable")
-        .accessibilityHint(isAvailable
-            ? "Commits one Storyline edit."
-            : "This Clip is already at that end of the Storyline.")
-    }
-
-    private var nudgeEndControls: some View {
-        HStack(spacing: 4) {
-            Text("Out")
-                .font(.caption.weight(.semibold))
-                .frame(minWidth: 28, alignment: .leading)
-            nudgeButton(
-                title: "Earlier",
-                edge: .end,
-                direction: .earlier
-            )
-            nudgeButton(
-                title: "Later",
-                edge: .end,
-                direction: .later
-            )
+            nudgeButton(edge: edge, direction: .earlier)
+            nudgeButton(edge: edge, direction: .later)
         }
     }
 
     private func nudgeButton(
-        title: String,
         edge: TimelineTrimEdge,
         direction: TimelineNudgeDirection
     ) -> some View {
-        let proposed = TimelineTrimRules.nudgedSelection(
-            selection: clip.selection,
-            availableRange: clip.availableRange,
-            edge: edge,
-            direction: direction
-        )
+        let current = edge == .start
+            ? session.candidateSelection.start.seconds
+            : session.candidateSelection.end.seconds
+        let delta = direction == .earlier
+            ? -TimelineTrimRules.nudgeSeconds
+            : TimelineTrimRules.nudgeSeconds
+        var proposed = session
+        proposed.update(edge: edge, to: current + delta)
+        let isAvailable = proposed.candidateSelection != session.candidateSelection
         return Button {
-            onCommit(.nudgeTrim(clipID: clip.id, edge: edge, direction: direction))
+            session.update(edge: edge, to: current + delta)
+            onPreview(session.candidateSelection, edge)
         } label: {
             Text(direction == .earlier ? "−0.1" : "+0.1")
                 .font(.callout.monospacedDigit())
                 .frame(minWidth: 44, minHeight: 44)
         }
         .buttonStyle(.bordered)
-        .disabled(proposed == nil || isCommitting)
-        .accessibilityLabel("Move trim \(edge == .start ? "start" : "end") \(title.lowercased()) by 0.1 seconds")
-        .accessibilityValue(proposed.map { selection in
-            let result = edge == .start ? selection.start.seconds : selection.end.seconds
-            return "Result: \(time(result))"
-        } ?? "Unavailable")
-        .accessibilityHint(proposed == nil
-            ? "The Clip Selection must stay within its Available Range and remain at least 1.0 second."
-            : "Commits one Storyline edit.")
-    }
-
-    private func time(_ seconds: TimeInterval) -> String {
-        seconds.formatted(.number.precision(.fractionLength(1))) + "s"
-    }
-
-    private var splitSourceTime: MediaTime? {
-        TimelineSplitRules.sourceTime(
-            selection: clip.selection,
-            projectTimeRange: clip.projectTimeRange,
-            at: projectTime
+        .disabled(!isAvailable)
+        .accessibilityLabel(
+            "Move trim \(edge == .start ? "start" : "end") "
+                + (direction == .earlier ? "earlier" : "later")
         )
+        .accessibilityValue(isAvailable
+            ? RecordingDurationFormatter.editingClock(
+                edge == .start
+                    ? proposed.candidateSelection.start.seconds
+                    : proposed.candidateSelection.end.seconds
+            )
+            : "Unavailable")
     }
 }
 
-private struct RemovedUnusedScreen: View {
-    private enum PendingDeletion: Identifiable {
-        case removedClip(TimelineClip.ID)
-        case take(UUID)
-
-        var id: String {
-            switch self {
-            case let .removedClip(id): "clip-\(id.rawValue.uuidString)"
-            case let .take(id): "take-\(id.uuidString)"
-            }
-        }
+private struct TimelineTrimImageStrip: View {
+    private struct Request: Hashable {
+        let movieURL: URL
+        let availableRange: TakeRange
     }
 
-    @ObservedObject var model: AppModel
-    let onTimelineEdit: (TimelineEdit) -> Void
-    let onDeleteTake: (UUID) async throws -> Void
-    @State private var pendingDeletion: PendingDeletion?
-    @State private var deleteErrorMessage: String?
-    @State private var isDeletingTake = false
+    @Binding var session: TimelineTrimSession
+    let movieURL: URL?
+    let fallbackThumbnailURL: URL?
+    let onPreview: (TakeRange, TimelineTrimEdge) -> Void
+    @State private var frames: [UIImage?] = []
 
     var body: some View {
-        Group {
-            if model.project.removedClips.isEmpty && model.project.unusedTakes.isEmpty {
-                ContentUnavailableView(
-                    "Nothing Removed or Unused",
-                    systemImage: "archivebox",
-                    description: Text("Removed Clips stay recoverable here. Takes appear here when no active Clip uses them.")
-                )
-            } else {
-                List {
-                    if !model.project.removedClips.isEmpty {
-                        Section("Removed Clips") {
-                            ForEach(model.project.removedClips) { removed in
-                                removedClipRow(removed)
-                            }
-                        }
-                    }
-                    if !model.project.unusedTakes.isEmpty {
-                        Section {
-                            ForEach(model.project.unusedTakes) { take in
-                                unusedTakeRow(take)
-                            }
-                        } header: {
-                            Text("Unused Takes")
-                        } footer: {
-                            Text("Adding a full Take creates a new Clip. Deleting a Take permanently removes its source media.")
-                        }
-                    }
-                }
+        GeometryReader { geometry in
+            let width = max(1, geometry.size.width)
+            let startX = x(for: session.candidateSelection.start.seconds, width: width)
+            let endX = x(for: session.candidateSelection.end.seconds, width: width)
+            ZStack(alignment: .leading) {
+                frameSurface
+                Color.black.opacity(0.54)
+                    .frame(width: max(0, startX))
+                Color.black.opacity(0.54)
+                    .frame(width: max(0, width - endX))
+                    .offset(x: endX)
+                trimHandle(edge: .start, x: startX, width: width)
+                trimHandle(edge: .end, x: endX, width: width)
+            }
+            .coordinateSpace(.named("storyline-trim-images"))
+            .background(Color(uiColor: .secondarySystemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color(uiColor: .separator), lineWidth: 1)
             }
         }
-        .navigationTitle("Removed & Unused")
-        .navigationBarTitleDisplayMode(.inline)
-        .disabled(model.isEditingTimeline || isDeletingTake)
-        .interactiveDismissDisabled(model.isEditingTimeline || isDeletingTake)
-        .confirmationDialog(
-            deletionTitle,
-            isPresented: Binding(
-                get: { pendingDeletion != nil },
-                set: { if !$0 { pendingDeletion = nil } }
-            ),
-            titleVisibility: .visible,
-            presenting: pendingDeletion
-        ) { deletion in
-            switch deletion {
-            case let .removedClip(clipID):
-                Button("Delete Removed Clip", role: .destructive) {
-                    onTimelineEdit(.deleteRemovedClipPermanently(clipID: clipID))
-                }
-            case let .take(takeID):
-                Button("Delete Take", role: .destructive) {
-                    deleteTake(takeID)
-                }
+        .task(id: request) {
+            guard let request else {
+                frames = []
+                return
             }
-            Button("Cancel", role: .cancel) {}
-        } message: { deletion in
-            Text(deletionMessage(for: deletion))
-        }
-        .alert("Take Not Deleted", isPresented: Binding(
-            get: { deleteErrorMessage != nil },
-            set: { if !$0 { deleteErrorMessage = nil } }
-        )) {
-            Button("OK", role: .cancel) { deleteErrorMessage = nil }
-        } message: {
-            Text(deleteErrorMessage ?? "The Take source media is unchanged.")
-        }
-    }
-
-    private func removedClipRow(_ removed: RemovedTimelineClip) -> some View {
-        let take = model.project.takes.first { $0.id == removed.clip.takeID }
-        let takeNumber = model.project.takes.firstIndex { $0.id == removed.clip.takeID }.map { $0 + 1 }
-        return VStack(alignment: .leading, spacing: 10) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(takeNumber.map { "Removed Clip from Take \($0)" } ?? "Removed Clip")
-                    .font(.headline)
-                if let createdAt = take?.createdAt {
-                    Text(createdAt.formatted(date: .abbreviated, time: .shortened))
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-                Text("Source \(time(removed.clip.selection.start.seconds))–\(time(removed.clip.selection.end.seconds)) · \(time(removed.clip.selection.duration))")
-                    .font(.subheadline.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                Label(removed.clip.isMuted ? "Muted" : "Audio included", systemImage: removed.clip.isMuted ? "speaker.slash" : "speaker.wave.2")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 8) { removedClipActions(removed) }
-                VStack(alignment: .leading, spacing: 8) { removedClipActions(removed) }
+            let data = await TimelineTrimFrameLoader().frameData(
+                movieURL: request.movieURL,
+                availableRange: request.availableRange,
+                count: 6
+            )
+            guard !Task.isCancelled else { return }
+            frames = data.map { data in
+                data.flatMap { UIImage(data: $0) }
             }
         }
-        .padding(.vertical, 4)
         .accessibilityElement(children: .contain)
+        .accessibilityLabel("Available Clip frames and candidate range")
     }
 
     @ViewBuilder
-    private func removedClipActions(_ removed: RemovedTimelineClip) -> some View {
-        Button("Restore Clip", systemImage: "arrow.uturn.backward") {
-            onTimelineEdit(.restore(clipID: removed.id))
-        }
-        .buttonStyle(.borderedProminent)
-        .frame(minHeight: 44)
-        .accessibilityHint("Restores the exact saved Clip near its original Storyline position.")
-
-        Button("Delete Removed Clip Permanently", systemImage: "trash", role: .destructive) {
-            pendingDeletion = .removedClip(removed.id)
-        }
-        .buttonStyle(.bordered)
-        .frame(minHeight: 44)
-        .accessibilityHint("Deletes only the removed Clip metadata, not the Take media.")
-    }
-
-    private func unusedTakeRow(_ take: ProjectTake) -> some View {
-        let takeNumber = model.project.takes.firstIndex(of: take).map { $0 + 1 }
-        let dependentClips = model.project.removedClips.filter { $0.clip.takeID == take.id }
-        return VStack(alignment: .leading, spacing: 10) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(takeNumber.map { "Take \($0)" } ?? "Unused Take")
-                    .font(.headline)
-                Text(take.createdAt.formatted(date: .abbreviated, time: .shortened))
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                Text("Full source · \(time(take.duration))")
-                    .font(.subheadline.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-            Button("Add Full Take to Storyline", systemImage: "plus.rectangle.on.rectangle") {
-                onTimelineEdit(.addFullTakeToStoryline(takeID: take.id))
-            }
-            .buttonStyle(.borderedProminent)
-            .frame(minHeight: 44)
-            .accessibilityHint("Creates a new full-length Clip at the end of the Storyline.")
-
-            if dependentClips.isEmpty {
-                Button("Delete Take Permanently", systemImage: "trash", role: .destructive) {
-                    pendingDeletion = .take(take.id)
-                }
-                .buttonStyle(.bordered)
-                .frame(minHeight: 44)
-                .accessibilityHint("Permanently deletes this unused Take source media.")
-            } else {
-                Text("Delete these removed Clips before deleting this Take:")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                ForEach(dependentClips) { removed in
-                    Label(
-                        "Removed Clip, source \(time(removed.clip.selection.start.seconds))–\(time(removed.clip.selection.end.seconds))",
-                        systemImage: "link"
-                    )
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                }
-            }
-        }
-        .padding(.vertical, 4)
-        .accessibilityElement(children: .contain)
-    }
-
-    private func deleteTake(_ takeID: UUID) {
-        guard !isDeletingTake else { return }
-        isDeletingTake = true
-        Task {
-            defer { isDeletingTake = false }
-            do {
-                try await onDeleteTake(takeID)
-                UINotificationFeedbackGenerator().notificationOccurred(.success)
-                UIAccessibility.post(notification: .announcement, argument: "Take deleted permanently.")
-            } catch {
-                deleteErrorMessage = "Camenya couldn't delete this Take. Its source media is unchanged."
-            }
-        }
-    }
-
-    private var deletionTitle: String {
-        switch pendingDeletion {
-        case .removedClip: "Delete Removed Clip Permanently?"
-        case .take: "Delete Take Permanently?"
-        case nil: "Confirm Permanent Deletion"
-        }
-    }
-
-    private func deletionMessage(for deletion: PendingDeletion) -> String {
-        switch deletion {
-        case .removedClip:
-            "This deletes the saved Clip edit metadata. The original Take media remains available."
-        case .take:
-            "This permanently deletes the Take source media. This cannot be undone."
-        }
-    }
-
-    private func time(_ seconds: TimeInterval) -> String {
-        let safeSeconds = max(0, seconds.isFinite ? seconds : 0)
-        let minutes = Int(safeSeconds) / 60
-        let remainingSeconds = safeSeconds - TimeInterval(minutes * 60)
-        return String(format: "%02d:%04.1f", minutes, remainingSeconds)
-    }
-}
-
-private struct TimelineTrimRangeControl: View {
-    let availableRange: TakeRange
-    @Binding var selection: TakeRange
-    let onPreview: (TakeRange, TimelineTrimEdge) -> Void
-    let onCommit: () -> Void
-
-    var body: some View {
-        GeometryReader { proxy in
-            let width = max(1, proxy.size.width)
-            let startX = x(for: selection.start.seconds, width: width)
-            let endX = x(for: selection.end.seconds, width: width)
-            ZStack(alignment: .leading) {
-                Capsule()
-                    .fill(.secondary.opacity(0.18))
-                    .frame(height: 10)
-                Capsule()
-                    .fill(.tint.opacity(0.45))
-                    .frame(width: max(1, endX - startX), height: 10)
-                    .offset(x: startX)
-                handle(edge: .start, width: width)
-                    .position(x: startX, y: proxy.size.height / 2)
-                handle(edge: .end, width: width)
-                    .position(x: endX, y: proxy.size.height / 2)
-            }
-            .frame(maxHeight: .infinity)
-            .coordinateSpace(.named("trimRange"))
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Clip Selection")
-        .accessibilityValue("From \(formatted(selection.start.seconds)) to \(formatted(selection.end.seconds)) seconds")
-    }
-
-    private func handle(edge: TimelineTrimEdge, width: CGFloat) -> some View {
-        Capsule()
-            .fill(.tint)
-            .frame(width: 8, height: 34)
-            .frame(width: 44, height: 56)
-            .contentShape(Rectangle())
-            .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named("trimRange"))
-                .onChanged { value in update(edge: edge, x: value.location.x, width: width) }
-                .onEnded { _ in onCommit() }
+    private var frameSurface: some View {
+        if frames.isEmpty {
+            TakeThumbnailView(
+                url: fallbackThumbnailURL,
+                placeholderSystemName: "film",
+                cornerRadius: 0
             )
-            .accessibilityLabel(edge == .start ? "Trim Start" : "Trim End")
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            HStack(spacing: 1) {
+                ForEach(Array(frames.enumerated()), id: \.offset) { _, image in
+                    if let image {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .clipped()
+                    } else {
+                        ZStack {
+                            Color(uiColor: .tertiarySystemFill)
+                            Image(systemName: "film")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                }
+            }
+        }
+    }
+
+    private var request: Request? {
+        movieURL.map { Request(movieURL: $0, availableRange: session.availableRange) }
+    }
+
+    private func trimHandle(
+        edge: TimelineTrimEdge,
+        x: CGFloat,
+        width: CGFloat
+    ) -> some View {
+        let hitCenter = min(max(22, x), max(22, width - 22))
+        let value = edge == .start
+            ? session.candidateSelection.start.seconds
+            : session.candidateSelection.end.seconds
+        return ZStack {
+            Color.clear
+            Capsule()
+                .fill(.tint)
+                .frame(width: 8, height: 72)
+                .offset(x: x - hitCenter)
+        }
+        .frame(width: 44, height: 96)
+        .contentShape(Rectangle())
+        .position(x: hitCenter, y: 48)
+        .gesture(
+            DragGesture(minimumDistance: 0, coordinateSpace: .named("storyline-trim-images"))
+                .onChanged { value in
+                    update(edge: edge, x: value.location.x, width: width)
+                }
+        )
+        .accessibilityLabel(edge == .start ? "Trim Start" : "Trim End")
+        .accessibilityValue(RecordingDurationFormatter.editingClock(value))
+        .accessibilityAdjustableAction { direction in
+            let delta: TimeInterval
+            switch direction {
+            case .increment: delta = TimelineTrimRules.nudgeSeconds
+            case .decrement: delta = -TimelineTrimRules.nudgeSeconds
+            @unknown default: return
+            }
+            session.update(edge: edge, to: value + delta)
+            onPreview(session.candidateSelection, edge)
+        }
     }
 
     private func update(edge: TimelineTrimEdge, x: CGFloat, width: CGFloat) {
-        let proposed = seconds(for: x, width: width)
-        switch edge {
-        case .start:
-            selection = TakeRange(
-                startSeconds: min(max(availableRange.start.seconds, proposed), selection.end.seconds - 1),
-                endSeconds: selection.end.seconds
-            )
-        case .end:
-            selection = TakeRange(
-                startSeconds: selection.start.seconds,
-                endSeconds: max(min(availableRange.end.seconds, proposed), selection.start.seconds + 1)
-            )
-        }
-        onPreview(selection, edge)
+        let fraction = Double(min(max(0, x / max(width, 1)), 1))
+        let seconds = session.availableRange.start.seconds
+            + fraction * session.availableRange.duration
+        session.update(edge: edge, to: seconds)
+        onPreview(session.candidateSelection, edge)
     }
 
-    private func x(for seconds: TimeInterval, width: CGFloat) -> CGFloat {
-        let fraction = (seconds - availableRange.start.seconds) / availableRange.duration
+    private func x(for sourceSeconds: TimeInterval, width: CGFloat) -> CGFloat {
+        let fraction = (sourceSeconds - session.availableRange.start.seconds)
+            / max(session.availableRange.duration, 0.001)
         return width * CGFloat(min(max(0, fraction), 1))
     }
+}
 
-    private func seconds(for x: CGFloat, width: CGFloat) -> TimeInterval {
-        let fraction = Double(min(max(0, x / width), 1))
-        return MediaTime(seconds: availableRange.start.seconds + fraction * availableRange.duration).seconds
+private struct TimelineTrimWaveform: View {
+    @Binding var session: TimelineTrimSession
+    let envelope: [Float]
+    let sourceDuration: TimeInterval
+
+    var body: some View {
+        GeometryReader { geometry in
+            let width = max(1, geometry.size.width)
+            let startX = x(for: session.candidateSelection.start.seconds, width: width)
+            let endX = x(for: session.candidateSelection.end.seconds, width: width)
+            ZStack(alignment: .leading) {
+                waveformCanvas
+                Color(uiColor: .systemGray).opacity(0.38)
+                    .frame(width: max(0, startX))
+                Color(uiColor: .systemGray).opacity(0.38)
+                    .frame(width: max(0, width - endX))
+                    .offset(x: endX)
+            }
+            .background(Color(uiColor: .secondarySystemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color(uiColor: .separator), lineWidth: 1)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Informative audio waveform for the candidate Clip range")
     }
 
-    private func formatted(_ seconds: TimeInterval) -> String {
-        seconds.formatted(.number.precision(.fractionLength(1)))
+    private var waveformCanvas: some View {
+        Canvas { context, size in
+            guard !envelope.isEmpty else {
+                var baseline = Path()
+                baseline.move(to: CGPoint(x: 0, y: size.height / 2))
+                baseline.addLine(to: CGPoint(x: size.width, y: size.height / 2))
+                context.stroke(baseline, with: .color(.secondary.opacity(0.35)), lineWidth: 1)
+                return
+            }
+            let duration = max(
+                max(sourceDuration, session.availableRange.end.seconds),
+                0.001
+            )
+            for (index, level) in envelope.enumerated() {
+                let sourceTime = duration * (Double(index) + 0.5) / Double(envelope.count)
+                guard sourceTime >= session.availableRange.start.seconds,
+                      sourceTime <= session.availableRange.end.seconds else { continue }
+                let x = x(for: sourceTime, width: size.width)
+                let height = max(2, size.height * CGFloat(level))
+                var bar = Path()
+                bar.move(to: CGPoint(x: x, y: (size.height - height) / 2))
+                bar.addLine(to: CGPoint(x: x, y: (size.height + height) / 2))
+                context.stroke(
+                    bar,
+                    with: .color(Color.accentColor.opacity(0.82)),
+                    lineWidth: 1.5
+                )
+            }
+        }
+    }
+
+    private func x(for sourceSeconds: TimeInterval, width: CGFloat) -> CGFloat {
+        let fraction = (sourceSeconds - session.availableRange.start.seconds)
+            / max(session.availableRange.duration, 0.001)
+        return width * CGFloat(min(max(0, fraction), 1))
     }
 }
 
@@ -1757,14 +1863,84 @@ enum TimelineReorderRules {
     }
 }
 
+enum TimelineReorderAutoScroll {
+    private static let edgeWidth: CGFloat = 52
+    private static let projectSecondsPerSecond: TimeInterval = 3
+
+    static func usesContinuousDriver(reduceMotion: Bool) -> Bool {
+        !reduceMotion
+    }
+
+    static func projectTimeDelta(
+        locationX: CGFloat,
+        viewportWidth: CGFloat,
+        elapsed: TimeInterval = 0.05
+    ) -> TimeInterval {
+        guard locationX.isFinite,
+              viewportWidth.isFinite,
+              viewportWidth > edgeWidth * 2,
+              elapsed.isFinite,
+              elapsed > 0 else { return 0 }
+        let delta = projectSecondsPerSecond * elapsed
+        if locationX < edgeWidth { return -delta }
+        if locationX > viewportWidth - edgeWidth { return delta }
+        return 0
+    }
+}
+
+@MainActor
+private final class TimelineReorderAutoScrollDriver: ObservableObject {
+    struct Tick: Equatable {
+        let sequence: UInt64
+        let elapsed: TimeInterval
+    }
+
+    @Published private(set) var tick = Tick(sequence: 0, elapsed: 0)
+    private var displayLink: CADisplayLink?
+
+    func setActive(_ isActive: Bool) {
+        if isActive {
+            guard displayLink == nil else { return }
+            let link = CADisplayLink(target: self, selector: #selector(displayLinkFired(_:)))
+            link.preferredFrameRateRange = CAFrameRateRange(
+                minimum: 20,
+                maximum: 30,
+                preferred: 30
+            )
+            link.add(to: .main, forMode: .common)
+            displayLink = link
+        } else {
+            stop()
+        }
+    }
+
+    func stop() {
+        displayLink?.invalidate()
+        displayLink = nil
+    }
+
+    deinit {
+        displayLink?.invalidate()
+    }
+
+    @objc private func displayLinkFired(_ link: CADisplayLink) {
+        let elapsed = max(1.0 / 120.0, min(1.0 / 15.0, link.targetTimestamp - link.timestamp))
+        tick = Tick(sequence: tick.sequence &+ 1, elapsed: elapsed)
+    }
+}
+
 private struct TimelineFilmstrip: View {
     @ObservedObject var playback: TimelinePlaybackSession
     let isCommitting: Bool
+    let preparationIssueCount: (TimelinePlaybackSession.FilmstripClip) -> Int
     let onMove: (TimelineClip.ID, Int) -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @StateObject private var autoScrollDriver = TimelineReorderAutoScrollDriver()
     @State private var dragOriginOffset: CGFloat?
     @State private var previousMagnification = 1.0
     @State private var reorderDraft: TimelineReorderDraft?
+    @State private var reorderDragTranslation: CGFloat = 0
+    @State private var reorderDragLocationX: CGFloat?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -1774,13 +1950,23 @@ private struct TimelineFilmstrip: View {
                     pointsPerSecond: playback.state.filmstripPointsPerSecond
                 )
                 filmstripSurface(geometry: geometry, viewportWidth: proxy.size.width)
+                    .onChange(of: autoScrollDriver.tick) { _, tick in
+                        continueReorderAutoScroll(
+                            tick: tick,
+                            geometry: geometry,
+                            viewportWidth: proxy.size.width
+                        )
+                    }
             }
             .frame(minHeight: 52, idealHeight: 92)
 
-            Text(reorderStatus)
-                .font(.caption)
-                .foregroundStyle(reorderDraft == nil ? .secondary : .primary)
+            if reorderDraft != nil {
+                Text(reorderStatus)
+                    .font(.caption)
+                    .foregroundStyle(.primary)
+            }
         }
+        .onDisappear { autoScrollDriver.stop() }
     }
 
     private func filmstripSurface(
@@ -1790,7 +1976,12 @@ private struct TimelineFilmstrip: View {
         ZStack {
             HStack(spacing: 0) {
                 ForEach(Array(playback.state.clips.enumerated()), id: \.element.id) { index, clip in
-                    reorderableClip(clip, sourceIndex: index, geometry: geometry)
+                    reorderableClip(
+                        clip,
+                        sourceIndex: index,
+                        geometry: geometry,
+                        viewportWidth: viewportWidth
+                    )
                 }
             }
             .frame(width: geometry.contentWidth, alignment: .leading)
@@ -1807,6 +1998,7 @@ private struct TimelineFilmstrip: View {
         .clipped()
         .background(.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .contentShape(Rectangle())
+        .coordinateSpace(.named("timeline-filmstrip"))
         .gesture(scrubGesture(geometry: geometry))
         .simultaneousGesture(zoomGesture)
         .accessibilityElement(children: .contain)
@@ -1816,13 +2008,20 @@ private struct TimelineFilmstrip: View {
             let delta = direction == .increment ? 0.5 : -0.5
             playback.send(.seek(ProjectTime(seconds: playback.state.playhead.seconds + delta)))
         }
+        .accessibilityAction(named: "Zoom In Timeline") {
+            playback.send(.zoomIn)
+        }
+        .accessibilityAction(named: "Zoom Out Timeline") {
+            playback.send(.zoomOut)
+        }
         .accessibilitySortPriority(2)
     }
 
     private func reorderableClip(
         _ clip: TimelinePlaybackSession.FilmstripClip,
         sourceIndex: Int,
-        geometry: TimelineFilmstripGeometry
+        geometry: TimelineFilmstripGeometry,
+        viewportWidth: CGFloat
     ) -> some View {
         let width = geometry.width(for: clip)
         let isDragged = reorderDraft?.clipID == clip.id
@@ -1845,7 +2044,8 @@ private struct TimelineFilmstrip: View {
             .highPriorityGesture(reorderGesture(
                 clip: clip,
                 sourceIndex: sourceIndex,
-                geometry: geometry
+                geometry: geometry,
+                viewportWidth: viewportWidth
             ))
     }
 
@@ -1884,7 +2084,11 @@ private struct TimelineFilmstrip: View {
                 .stroke(selected ? Color.accentColor : Color(uiColor: .separator), lineWidth: selected ? 3 : 1)
         }
         .accessibilityLabel("Clip \(ordinal) of \(playback.state.clipCount)")
-        .accessibilityValue(clipAccessibilityValue(clip, selected: selected))
+        .accessibilityValue(clipAccessibilityValue(
+            clip,
+            selected: selected,
+            preparationIssueCount: preparationIssueCount(clip)
+        ))
         .accessibilityAddTraits(.isButton)
         .accessibilityAction(named: "Select Clip") { playback.send(.selectClip(clip.id)) }
     }
@@ -1907,10 +2111,14 @@ private struct TimelineFilmstrip: View {
     private func reorderGesture(
         clip: TimelinePlaybackSession.FilmstripClip,
         sourceIndex: Int,
-        geometry: TimelineFilmstripGeometry
+        geometry: TimelineFilmstripGeometry,
+        viewportWidth: CGFloat
     ) -> some Gesture {
         LongPressGesture(minimumDuration: 0.3)
-            .sequenced(before: DragGesture(minimumDistance: 0))
+            .sequenced(before: DragGesture(
+                minimumDistance: 0,
+                coordinateSpace: .named("timeline-filmstrip")
+            ))
             .onChanged { value in
                 guard !isCommitting, playback.state.clipCount > 1 else { return }
                 switch value {
@@ -1920,7 +2128,9 @@ private struct TimelineFilmstrip: View {
                     beginReorder(clip: clip, sourceIndex: sourceIndex)
                     updateReorder(
                         translation: drag.translation.width,
-                        geometry: geometry
+                        dragLocationX: drag.location.x,
+                        geometry: geometry,
+                        viewportWidth: viewportWidth
                     )
                 default:
                     break
@@ -1941,31 +2151,94 @@ private struct TimelineFilmstrip: View {
             clipID: clip.id,
             sourceIndex: sourceIndex,
             destinationIndex: sourceIndex,
-            translation: 0
+            translation: 0,
+            accumulatedScrollPoints: 0
         )
+        reorderDragTranslation = 0
+        reorderDragLocationX = nil
     }
 
     private func updateReorder(
         translation: CGFloat,
+        dragLocationX: CGFloat,
+        geometry: TimelineFilmstripGeometry,
+        viewportWidth: CGFloat
+    ) {
+        guard reorderDraft != nil else { return }
+        reorderDragTranslation = translation
+        reorderDragLocationX = dragLocationX
+        let requestedDelta = TimelineReorderAutoScroll.projectTimeDelta(
+            locationX: dragLocationX,
+            viewportWidth: viewportWidth
+        )
+        if TimelineReorderAutoScroll.usesContinuousDriver(reduceMotion: reduceMotion) {
+            autoScrollDriver.setActive(requestedDelta != 0)
+        } else {
+            autoScrollDriver.stop()
+            applyReorderAutoScroll(requestedDelta, geometry: geometry)
+        }
+        updateReorderDraft(translation: translation, geometry: geometry)
+    }
+
+    private func continueReorderAutoScroll(
+        tick: TimelineReorderAutoScrollDriver.Tick,
+        geometry: TimelineFilmstripGeometry,
+        viewportWidth: CGFloat
+    ) {
+        guard reorderDraft != nil,
+              let dragLocationX = reorderDragLocationX else {
+            autoScrollDriver.stop()
+            return
+        }
+        let requestedDelta = TimelineReorderAutoScroll.projectTimeDelta(
+            locationX: dragLocationX,
+            viewportWidth: viewportWidth,
+            elapsed: tick.elapsed
+        )
+        guard requestedDelta != 0 else {
+            autoScrollDriver.stop()
+            return
+        }
+        applyReorderAutoScroll(requestedDelta, geometry: geometry)
+        updateReorderDraft(translation: reorderDragTranslation, geometry: geometry)
+    }
+
+    private func applyReorderAutoScroll(
+        _ requestedDelta: TimeInterval,
         geometry: TimelineFilmstripGeometry
     ) {
-        guard var draft = reorderDraft,
-              let destinationIndex = TimelineReorderRules.destinationIndex(
+        guard requestedDelta != 0, var draft = reorderDraft else { return }
+        let previousTime = playback.state.playhead.seconds
+        playback.send(.previewSeek(ProjectTime(seconds: previousTime + requestedDelta)))
+        let appliedDelta = playback.state.playhead.seconds - previousTime
+        draft.accumulatedScrollPoints += CGFloat(appliedDelta) * geometry.pointsPerSecond
+        reorderDraft = draft
+    }
+
+    private func updateReorderDraft(
+        translation: CGFloat,
+        geometry: TimelineFilmstripGeometry
+    ) {
+        guard var draft = reorderDraft else { return }
+        let effectiveTranslation = translation + draft.accumulatedScrollPoints
+        guard let destinationIndex = TimelineReorderRules.destinationIndex(
                 moving: draft.sourceIndex,
-                translation: translation,
+                translation: effectiveTranslation,
                 widths: playback.state.clips.map(geometry.width(for:))
-              ) else { return }
+        ) else { return }
         if destinationIndex != draft.destinationIndex {
             UISelectionFeedbackGenerator().selectionChanged()
         }
         draft.destinationIndex = destinationIndex
-        draft.translation = translation
+        draft.translation = effectiveTranslation
         reorderDraft = draft
     }
 
     private func finishReorder() {
         guard let draft = reorderDraft else { return }
+        autoScrollDriver.stop()
         reorderDraft = nil
+        reorderDragLocationX = nil
         guard draft.destinationIndex != draft.sourceIndex else {
             UIAccessibility.post(
                 notification: .announcement,
@@ -1988,9 +2261,7 @@ private struct TimelineFilmstrip: View {
     }
 
     private var reorderStatus: String {
-        guard let draft = reorderDraft else {
-            return "Long-press and drag a Clip to reorder."
-        }
+        guard let draft = reorderDraft else { return "" }
         if draft.destinationIndex == draft.sourceIndex {
             return "Clip \(draft.sourceIndex + 1) lifted. Drag to move; release to cancel."
         }
@@ -2015,13 +2286,17 @@ private struct TimelineFilmstrip: View {
 
     private func clipAccessibilityValue(
         _ clip: TimelinePlaybackSession.FilmstripClip,
-        selected: Bool
+        selected: Bool,
+        preparationIssueCount: Int
     ) -> String {
         let duration = clip.duration.formatted(.number.precision(.fractionLength(1)))
         let sourceDate = clip.sourceCreatedAt?.formatted(date: .abbreviated, time: .shortened)
         return [
             sourceDate.map { "Recorded \($0)" },
             "\(duration) seconds",
+            preparationIssueCount == 0
+                ? "preparation ready"
+                : "\(preparationIssueCount) preparation \(preparationIssueCount == 1 ? "item" : "items") need review",
             clip.isMuted ? "source audio muted" : "source audio on",
             selected ? "selected" : "not selected"
         ]
@@ -2035,6 +2310,7 @@ private struct TimelineReorderDraft: Equatable {
     let sourceIndex: Int
     var destinationIndex: Int
     var translation: CGFloat
+    var accumulatedScrollPoints: CGFloat
 }
 
 private struct TimelineFilmstripGeometry {

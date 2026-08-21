@@ -24,24 +24,38 @@ struct TimelineClip: Codable, Equatable, Hashable, Identifiable, Sendable {
         }
     }
 
+    struct SplitBoundaryID: Codable, Equatable, Hashable, Sendable {
+        let rawValue: UUID
+
+        init(rawValue: UUID = UUID()) {
+            self.rawValue = rawValue
+        }
+    }
+
     let id: ID
     let takeID: UUID
     let availableRange: TakeRange
     let selection: TakeRange
     let isMuted: Bool
+    let leadingSplitBoundaryID: SplitBoundaryID?
+    let trailingSplitBoundaryID: SplitBoundaryID?
 
     init(
         id: ID = ID(),
         takeID: UUID,
         availableRange: TakeRange,
         selection: TakeRange,
-        isMuted: Bool = false
+        isMuted: Bool = false,
+        leadingSplitBoundaryID: SplitBoundaryID? = nil,
+        trailingSplitBoundaryID: SplitBoundaryID? = nil
     ) {
         self.id = id
         self.takeID = takeID
         self.availableRange = availableRange
         self.selection = selection
         self.isMuted = isMuted
+        self.leadingSplitBoundaryID = leadingSplitBoundaryID
+        self.trailingSplitBoundaryID = trailingSplitBoundaryID
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -50,6 +64,8 @@ struct TimelineClip: Codable, Equatable, Hashable, Identifiable, Sendable {
         case availableRange
         case selection
         case isMuted
+        case leadingSplitBoundaryID
+        case trailingSplitBoundaryID
     }
 
     init(from decoder: Decoder) throws {
@@ -59,6 +75,14 @@ struct TimelineClip: Codable, Equatable, Hashable, Identifiable, Sendable {
         availableRange = try container.decode(TakeRange.self, forKey: .availableRange)
         selection = try container.decode(TakeRange.self, forKey: .selection)
         isMuted = try container.decodeIfPresent(Bool.self, forKey: .isMuted) ?? false
+        leadingSplitBoundaryID = try container.decodeIfPresent(
+            SplitBoundaryID.self,
+            forKey: .leadingSplitBoundaryID
+        )
+        trailingSplitBoundaryID = try container.decodeIfPresent(
+            SplitBoundaryID.self,
+            forKey: .trailingSplitBoundaryID
+        )
     }
 }
 

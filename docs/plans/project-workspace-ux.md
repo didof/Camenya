@@ -170,8 +170,8 @@ Redesign the complete Camenya experience around a calm, native iPhone hierarchy 
 - Join Clip is the persistent contextual inverse of Split and lives in the selected Clip's More menu rather than the permanent tool row.
 - Join is available only for adjacent Clips from the same Take whose Available Ranges share the original split boundary, whose Clip Selections meet without a gap or overlap, and whose source-audio states match.
 - A valid Join replaces the two Clips atomically with one Clip while preserving every frame and audio decision in the immediate output.
-- A valid Join replaces the two Clips atomically with one Clip while preserving every frame and audio decision in the immediate output.
 - Join never expands a trim, reintroduces excluded media, resolves mismatched audio implicitly, or guesses which content the user intended.
+- Split lineage is persisted beginning with project schema 8. A pre-schema-8 manifest does not contain enough evidence to prove that two touching fragments descend from the same Split, so migration leaves their lineage unset and Join unavailable rather than inventing structural intent. The recoverable compatibility path is to remove the legacy fragments, add the full Take back to the Storyline, and create any needed Split again.
 - Session Undo reverses the complete Join operation.
 
 ### Trimming Timeline Clips

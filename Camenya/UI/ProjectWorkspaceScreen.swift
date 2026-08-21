@@ -10,7 +10,8 @@ struct ProjectWorkspaceScreen: View {
     @State private var draftName: String
     @State private var editingNote = false
     @State private var showingProjectMedia = false
-    @State private var showingEditor = false
+    @State private var isEditingStoryline = false
+    @State private var playbackContext = TimelinePlaybackContext.beginning
     @State private var confirmingDeletion = false
 
     init(
@@ -68,17 +69,6 @@ struct ProjectWorkspaceScreen: View {
         .sheet(isPresented: $showingProjectMedia) {
             NavigationStack {
                 ProjectMediaScreen(
-                    model: recorder,
-                    onTimelineEdit: performTimelineEdit
-                )
-            }
-        }
-        .sheet(isPresented: $showingEditor) {
-            if let snapshot = recorder.timelinePlaybackSnapshot {
-                TimelineReviewScreen(
-                    snapshot: snapshot,
-                    title: recorder.project.name,
-                    format: recorder.project.format ?? .portrait,
                     model: recorder
                 )
             }
@@ -117,7 +107,7 @@ struct ProjectWorkspaceScreen: View {
 
     @ToolbarContentBuilder
     private var workspaceToolbar: some ToolbarContent {
-        if destination == .workspace {
+        if destination == .workspace, !isEditingStoryline {
             ToolbarItem(placement: .topBarLeading) {
                 Button(action: closeProject) {
                     Image(systemName: "chevron.left")
@@ -156,7 +146,7 @@ struct ProjectWorkspaceScreen: View {
 
             ToolbarItemGroup(placement: .topBarTrailing) {
                 if recorder.timelinePlaybackSnapshot?.clips.isEmpty == false {
-                    Button("Edit") { showingEditor = true }
+                    Button("Edit") { isEditingStoryline = true }
                 }
                 Button {
                     recorder.exportProject()
@@ -170,31 +160,50 @@ struct ProjectWorkspaceScreen: View {
     }
 
     private var workspaceSurface: some View {
-        VStack(spacing: 0) {
-            Group {
-                if let snapshot = recorder.timelinePlaybackSnapshot {
-                    ProjectWorkspacePlaybackView(
-                        snapshot: snapshot,
-                        model: recorder,
-                        isActive: destination == .workspace,
-                        onPrepare: { showingEditor = true }
-                    )
-                } else {
-                    ProgressView("Preparing Project…")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        Group {
+            if isEditingStoryline,
+               let snapshot = recorder.timelinePlaybackSnapshot {
+                TimelineReviewScreen(
+                    snapshot: snapshot,
+                    title: recorder.project.name,
+                    format: recorder.project.format ?? .portrait,
+                    model: recorder,
+                    initialSelectedClipID: playbackContext.selectedClipID,
+                    initialProjectTime: playbackContext.projectTime,
+                    presentation: .embedded,
+                    onDone: { context in
+                        playbackContext = context
+                        isEditingStoryline = false
+                    }
+                )
+            } else {
+                VStack(spacing: 0) {
+                    if let snapshot = recorder.timelinePlaybackSnapshot {
+                        ProjectWorkspacePlaybackView(
+                            snapshot: snapshot,
+                            model: recorder,
+                            isActive: destination == .workspace,
+                            initialContext: playbackContext,
+                            onContextChanged: { playbackContext = $0 },
+                            onPrepare: { isEditingStoryline = true }
+                        )
+                    } else {
+                        ProgressView("Preparing Project…")
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+
+                    Button(action: beginCapture) {
+                        Label("New Take", systemImage: "plus")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity, minHeight: 54)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.capsule)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 10)
+                    .disabled(!recorder.canLeaveProject)
                 }
             }
-
-            Button(action: beginCapture) {
-                Label("New Take", systemImage: "plus")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity, minHeight: 54)
-            }
-            .buttonStyle(.borderedProminent)
-            .buttonBorderShape(.capsule)
-            .padding(.horizontal, 20)
-            .padding(.vertical, 10)
-            .disabled(!recorder.canLeaveProject)
         }
         .background(Color(uiColor: .systemGroupedBackground))
     }
@@ -259,19 +268,6 @@ struct ProjectWorkspaceScreen: View {
         }
     }
 
-    private func performTimelineEdit(_ edit: TimelineEdit) {
-        guard let snapshot = recorder.timelinePlaybackSnapshot else { return }
-        Task {
-            do {
-                _ = try await recorder.performTimelineEdit(
-                    edit,
-                    expectedRevision: snapshot.revision
-                )
-            } catch {
-                recorder.errorMessage = "The Storyline wasn't changed."
-            }
-        }
-    }
 }
 
 private struct ProjectWorkspacePlaybackView: View {
@@ -279,6 +275,7 @@ private struct ProjectWorkspacePlaybackView: View {
     @ObservedObject var model: AppModel
     let snapshot: ExportSnapshot
     let isActive: Bool
+    let onContextChanged: (TimelinePlaybackContext) -> Void
     let onPrepare: () -> Void
     @State private var controlsVisible = true
     @State private var controlsRevealStartedAt: TimeInterval?
@@ -287,12 +284,19 @@ private struct ProjectWorkspacePlaybackView: View {
         snapshot: ExportSnapshot,
         model: AppModel,
         isActive: Bool,
+        initialContext: TimelinePlaybackContext,
+        onContextChanged: @escaping (TimelinePlaybackContext) -> Void,
         onPrepare: @escaping () -> Void
     ) {
-        _playback = StateObject(wrappedValue: TimelinePlaybackSession(snapshot: snapshot))
+        _playback = StateObject(wrappedValue: TimelinePlaybackSession(
+            snapshot: snapshot,
+            initialSelectedClipID: initialContext.selectedClipID,
+            initialProjectTime: initialContext.projectTime
+        ))
         self.snapshot = snapshot
         self.model = model
         self.isActive = isActive
+        self.onContextChanged = onContextChanged
         self.onPrepare = onPrepare
     }
 
@@ -343,6 +347,10 @@ private struct ProjectWorkspacePlaybackView: View {
             if !active { playback.send(.pause) }
         }
         .onChange(of: playback.state.playhead) {
+            onContextChanged(TimelinePlaybackContext(
+                selectedClipID: playback.state.selectedClipID,
+                projectTime: playback.state.playhead
+            ))
             guard ProjectPresentationPolicy.shouldHideViewerControls(
                 isPlaying: playback.state.isPlaying,
                 revealStartedAt: controlsRevealStartedAt,
@@ -350,6 +358,12 @@ private struct ProjectWorkspacePlaybackView: View {
             ) else { return }
             controlsVisible = false
             controlsRevealStartedAt = nil
+        }
+        .onChange(of: playback.state.selectedClipID) {
+            onContextChanged(TimelinePlaybackContext(
+                selectedClipID: playback.state.selectedClipID,
+                projectTime: playback.state.playhead
+            ))
         }
         .onDisappear { playback.send(.pause) }
         .sensoryFeedback(.selection, trigger: playback.state.selectedClipID)
@@ -514,6 +528,12 @@ private struct ProjectWorkspacePlaybackView: View {
     }
 }
 
+struct ProjectMediaEditFailure: Equatable, Sendable {
+    let edit: TimelineEdit
+
+    var retryEdit: TimelineEdit { edit }
+}
+
 private struct ProjectMediaScreen: View {
     private struct Preview: Identifiable {
         let take: ProjectTake
@@ -522,11 +542,12 @@ private struct ProjectMediaScreen: View {
     }
 
     @ObservedObject var model: AppModel
-    let onTimelineEdit: (TimelineEdit) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var preview: Preview?
     @State private var deletingTake: ProjectTake?
     @State private var deleteError: String?
+    @State private var editFailure: ProjectMediaEditFailure?
+    @State private var isCommittingEdit = false
 
     var body: some View {
         List {
@@ -542,8 +563,9 @@ private struct ProjectMediaScreen: View {
                             .contextMenu {
                                 previewButton(take, title: "Removed Clip")
                                 Button("Restore Clip", systemImage: "arrow.uturn.backward") {
-                                    onTimelineEdit(.restore(clipID: removed.id))
+                                    performTimelineEdit(.restore(clipID: removed.id))
                                 }
+                                .disabled(isCommittingEdit)
                             }
                         }
                     }
@@ -557,8 +579,9 @@ private struct ProjectMediaScreen: View {
                             .contextMenu {
                                 previewButton(take, title: "Unused Take")
                                 Button("Add to Storyline", systemImage: "plus.rectangle.on.rectangle") {
-                                    onTimelineEdit(.addFullTakeToStoryline(takeID: take.id))
+                                    performTimelineEdit(.addFullTakeToStoryline(takeID: take.id))
                                 }
+                                .disabled(isCommittingEdit)
                                 Button("Delete Take", systemImage: "trash", role: .destructive) {
                                     deletingTake = take
                                 }
@@ -573,6 +596,18 @@ private struct ProjectMediaScreen: View {
                         mediaRow(take: take, title: "Used Take", duration: take.duration)
                             .contextMenu {
                                 previewButton(take, title: "Used Take")
+                                if ProjectPresentationPolicy.canAddFullTakeToStoryline(
+                                    takeID: take.id,
+                                    in: model.project
+                                ) {
+                                    Button(
+                                        "Add Full Take to Storyline",
+                                        systemImage: "plus.rectangle.on.rectangle"
+                                    ) {
+                                        performTimelineEdit(.addFullTakeToStoryline(takeID: take.id))
+                                    }
+                                    .disabled(isCommittingEdit)
+                                }
                             }
                     }
                 }
@@ -580,9 +615,15 @@ private struct ProjectMediaScreen: View {
         }
         .navigationTitle("Project Media")
         .navigationBarTitleDisplayMode(.inline)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if let editFailure {
+                editFailureBar(editFailure)
+            }
+        }
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
                 Button("Done") { dismiss() }
+                    .disabled(isCommittingEdit)
             }
         }
         .sheet(item: $preview) { preview in
@@ -663,6 +704,56 @@ private struct ProjectMediaScreen: View {
     private func previewButton(_ take: ProjectTake, title: String) -> some View {
         Button("Preview", systemImage: "play") {
             preview = Preview(take: take, title: title)
+        }
+    }
+
+    private func editFailureBar(_ failure: ProjectMediaEditFailure) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.circle.fill")
+                .foregroundStyle(.orange)
+            Text("The Storyline couldn't be updated. Your media is unchanged.")
+                .font(.footnote)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button("Retry") {
+                performTimelineEdit(failure.retryEdit)
+            }
+            .font(.footnote.weight(.semibold))
+            .frame(minHeight: 44)
+            .disabled(isCommittingEdit)
+            Button {
+                editFailure = nil
+            } label: {
+                Image(systemName: "xmark")
+                    .frame(width: 44, height: 44)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss Storyline error")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.regularMaterial)
+        .overlay(alignment: .top) { Divider() }
+        .accessibilityElement(children: .contain)
+    }
+
+    private func performTimelineEdit(_ edit: TimelineEdit) {
+        guard !isCommittingEdit else { return }
+        guard let snapshot = model.timelinePlaybackSnapshot else {
+            editFailure = ProjectMediaEditFailure(edit: edit)
+            return
+        }
+        isCommittingEdit = true
+        editFailure = nil
+        Task { @MainActor in
+            defer { isCommittingEdit = false }
+            do {
+                _ = try await model.performTimelineEdit(
+                    edit,
+                    expectedRevision: snapshot.revision
+                )
+            } catch {
+                editFailure = ProjectMediaEditFailure(edit: edit)
+            }
         }
     }
 
