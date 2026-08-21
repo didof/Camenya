@@ -1,0 +1,3 @@
+# Separate Project Workspace from Capture
+
+Camenya distinguishes the Project Workspace from immersive Capture. Creating a new empty Project enters Capture directly; opening a Project that already owns recorded material enters a Workspace centered on its current Primary Storyline, and starting or completing another Take moves predictably between those two contexts. The Workspace opens for viewing and exposes Storyline editing only through an explicit Edit mode, so contextual editing controls do not compete permanently with playback and global project actions. This replaces the camera-as-container structure because capture must remain immediate for a new Project while the evolving story—not the camera—becomes the primary object once recorded material exists.

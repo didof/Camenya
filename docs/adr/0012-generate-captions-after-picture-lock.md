@@ -1,0 +1,5 @@
+# Generate captions after Picture Lock
+
+Camenya generates captions only after the user explicitly creates a Picture Lock from the completed Primary Storyline. Recognition produces one Caption Track directly in Project Time against that immutable Storyline, so Trim, Split, Join, reorder, and removal never require Take-caption projection or boundary repair. Returning to structural video editing requires confirmed removal of the Picture Lock and its derived captions. Camenya may derive a temporary audio mix or preview for recognition, but final captioned export renders the locked source Takes and overlays in one final encode rather than recompressing an already encoded master.
+
+This supersedes ADR 0007 where it assigns a Caption Track to each Take and ADR 0008 where it projects Take-owned captions through Timeline Clips. On-device recognition, explicit failure without cloud fallback, immutable Take sources, one Primary Storyline, approved-value export, and burned-in final captions remain in force.
