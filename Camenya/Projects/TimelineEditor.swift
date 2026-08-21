@@ -19,6 +19,7 @@ enum TimelineEdit: Equatable, Sendable {
     case trim(clipID: TimelineClip.ID, selection: TakeRange)
     case resetTrim(clipID: TimelineClip.ID)
     case split(clipID: TimelineClip.ID, at: ProjectTime)
+    case join(leadingClipID: TimelineClip.ID)
     case move(clipID: TimelineClip.ID, toIndex: Int)
     case remove(clipID: TimelineClip.ID)
     case restore(clipID: TimelineClip.ID)
@@ -31,6 +32,25 @@ enum TimelineEdit: Equatable, Sendable {
         edge: TimelineTrimEdge,
         direction: TimelineNudgeDirection
     )
+}
+
+extension TimelineEdit {
+    var operationName: String {
+        switch self {
+        case .trim: "Trim"
+        case .resetTrim: "Reset Trim"
+        case .split: "Split"
+        case .join: "Join"
+        case .move: "Move Clip"
+        case .remove: "Remove Clip"
+        case .restore: "Restore Clip"
+        case .deleteRemovedClipPermanently: "Delete Removed Clip"
+        case .addFullTakeToStoryline: "Add Take"
+        case let .setMuted(_, isMuted): isMuted ? "Mute Source Audio" : "Include Source Audio"
+        case .approveCaptionTimelineIssue: "Approve Caption"
+        case .nudgeTrim: "Adjust Trim"
+        }
+    }
 }
 
 enum TimelineTrimEdge: Equatable, Sendable {
@@ -103,6 +123,118 @@ enum TimelineSplitRules {
         }
         return sourceTime
     }
+}
+
+enum TimelineJoinDirection: Equatable, Sendable {
+    case previous
+    case next
+}
+
+struct TimelineJoinChoice: Equatable, Sendable {
+    let direction: TimelineJoinDirection
+    let leadingClipID: TimelineClip.ID
+}
+
+enum TimelineJoinRules {
+    static func joinedClip(
+        leading: TimelineClip,
+        trailing: TimelineClip
+    ) -> TimelineClip? {
+        guard let sharedBoundaryID = leading.trailingSplitBoundaryID,
+              sharedBoundaryID == trailing.leadingSplitBoundaryID,
+              leading.takeID == trailing.takeID,
+              leading.availableRange.end == trailing.availableRange.start,
+              leading.selection.end == trailing.selection.start,
+              leading.isMuted == trailing.isMuted else {
+            return nil
+        }
+        return TimelineClip(
+            takeID: leading.takeID,
+            availableRange: TakeRange(
+                start: leading.availableRange.start,
+                end: trailing.availableRange.end
+            ),
+            selection: TakeRange(
+                start: leading.selection.start,
+                end: trailing.selection.end
+            ),
+            isMuted: leading.isMuted,
+            leadingSplitBoundaryID: leading.leadingSplitBoundaryID,
+            trailingSplitBoundaryID: trailing.trailingSplitBoundaryID
+        )
+    }
+
+    static func choices(
+        for selectedClipID: TimelineClip.ID,
+        in clips: [TimelineClip]
+    ) -> [TimelineJoinChoice] {
+        guard let index = clips.firstIndex(where: { $0.id == selectedClipID }) else {
+            return []
+        }
+        var choices: [TimelineJoinChoice] = []
+        if index > clips.startIndex,
+           joinedClip(leading: clips[index - 1], trailing: clips[index]) != nil {
+            choices.append(TimelineJoinChoice(
+                direction: .previous,
+                leadingClipID: clips[index - 1].id
+            ))
+        }
+        if index + 1 < clips.endIndex,
+           joinedClip(leading: clips[index], trailing: clips[index + 1]) != nil {
+            choices.append(TimelineJoinChoice(
+                direction: .next,
+                leadingClipID: clips[index].id
+            ))
+        }
+        return choices
+    }
+}
+
+struct TimelineTrimSession: Equatable, Sendable {
+    let clipID: TimelineClip.ID
+    let availableRange: TakeRange
+    let originalSelection: TakeRange
+    private(set) var candidateSelection: TakeRange
+
+    init(
+        clipID: TimelineClip.ID,
+        availableRange: TakeRange,
+        selection: TakeRange
+    ) {
+        self.clipID = clipID
+        self.availableRange = availableRange
+        self.originalSelection = selection
+        self.candidateSelection = selection
+    }
+
+    mutating func update(edge: TimelineTrimEdge, to sourceSeconds: TimeInterval) {
+        guard sourceSeconds.isFinite else { return }
+        switch edge {
+        case .start:
+            candidateSelection = TakeRange(
+                startSeconds: min(
+                    max(availableRange.start.seconds, sourceSeconds),
+                    candidateSelection.end.seconds - TimelineTrimRules.minimumDuration
+                ),
+                endSeconds: candidateSelection.end.seconds
+            )
+        case .end:
+            candidateSelection = TakeRange(
+                startSeconds: candidateSelection.start.seconds,
+                endSeconds: max(
+                    min(availableRange.end.seconds, sourceSeconds),
+                    candidateSelection.start.seconds + TimelineTrimRules.minimumDuration
+                )
+            )
+        }
+    }
+
+    var commitEdit: TimelineEdit? {
+        guard candidateSelection != originalSelection else { return nil }
+        return .trim(clipID: clipID, selection: candidateSelection)
+    }
+
+    var cancelledSelection: TakeRange { originalSelection }
 }
 
 enum TimelineRemovalRules {
@@ -209,6 +341,7 @@ struct TimelineSessionHistory: Equatable, Sendable {
         let after: TimelineSessionState
         let undoFocusClipID: TimelineClip.ID?
         let redoFocusClipID: TimelineClip.ID?
+        let operationName: String
     }
 
     private var undoEntries: [Entry] = []
@@ -216,6 +349,8 @@ struct TimelineSessionHistory: Equatable, Sendable {
 
     var canUndo: Bool { !undoEntries.isEmpty }
     var canRedo: Bool { !redoEntries.isEmpty }
+    var undoOperationName: String? { undoEntries.last?.operationName }
+    var redoOperationName: String? { redoEntries.last?.operationName }
 
     var undoTarget: TimelineSessionHistoryTarget? {
         undoEntries.last.map {
@@ -233,14 +368,16 @@ struct TimelineSessionHistory: Equatable, Sendable {
         before: TimelineSessionState,
         after: TimelineSessionState,
         undoFocusClipID: TimelineClip.ID?,
-        redoFocusClipID: TimelineClip.ID?
+        redoFocusClipID: TimelineClip.ID?,
+        operationName: String = "Storyline Edit"
     ) {
         guard before != after else { return }
         undoEntries.append(Entry(
             before: before,
             after: after,
             undoFocusClipID: undoFocusClipID,
-            redoFocusClipID: redoFocusClipID
+            redoFocusClipID: redoFocusClipID,
+            operationName: operationName
         ))
         redoEntries.removeAll()
     }
@@ -408,6 +545,7 @@ actor TimelineEditor {
             )
         }
         var focusedClipID: TimelineClip.ID?
+        var focusedProjectTime: ProjectTime?
 
         project.captionTimelineIssues = CaptionTimelineProjection.reconciledIssues(in: project)
 
@@ -435,6 +573,7 @@ actor TimelineEditor {
                   ) else {
                 throw TimelineEditorError.invalidClip(clipID)
             }
+            let boundaryID = TimelineClip.SplitBoundaryID()
             let left = TimelineClip(
                 takeID: clip.takeID,
                 availableRange: TakeRange(
@@ -445,7 +584,9 @@ actor TimelineEditor {
                     start: clip.selection.start,
                     end: sourceTime
                 ),
-                isMuted: clip.isMuted
+                isMuted: clip.isMuted,
+                leadingSplitBoundaryID: clip.leadingSplitBoundaryID,
+                trailingSplitBoundaryID: boundaryID
             )
             let right = TimelineClip(
                 takeID: clip.takeID,
@@ -457,13 +598,37 @@ actor TimelineEditor {
                     start: sourceTime,
                     end: clip.selection.end
                 ),
-                isMuted: clip.isMuted
+                isMuted: clip.isMuted,
+                leadingSplitBoundaryID: boundaryID,
+                trailingSplitBoundaryID: clip.trailingSplitBoundaryID
             )
             project.primaryStoryline.clips.replaceSubrange(
                 clipIndex...clipIndex,
                 with: [left, right]
             )
             focusedClipID = right.id
+        case let .join(leadingClipID):
+            let leadingIndex = try clipIndex(for: leadingClipID, in: project)
+            let trailingIndex = leadingIndex + 1
+            guard project.primaryStoryline.clips.indices.contains(trailingIndex) else {
+                throw TimelineEditorError.invalidClip(leadingClipID)
+            }
+            let leading = project.primaryStoryline.clips[leadingIndex]
+            let trailing = project.primaryStoryline.clips[trailingIndex]
+            guard let joined = TimelineJoinRules.joinedClip(
+                leading: leading,
+                trailing: trailing
+            ) else {
+                throw TimelineEditorError.invalidClip(leadingClipID)
+            }
+            let snapshot = try makeSnapshot(project: project)
+            let boundaryProjectTime = snapshot.clips[leadingIndex].projectTimeRange.end
+            project.primaryStoryline.clips.replaceSubrange(
+                leadingIndex...trailingIndex,
+                with: [joined]
+            )
+            focusedClipID = joined.id
+            focusedProjectTime = boundaryProjectTime
         case let .move(clipID, destinationIndex):
             let sourceIndex = try clipIndex(for: clipID, in: project)
             guard project.primaryStoryline.clips.indices.contains(destinationIndex),
@@ -557,7 +722,10 @@ actor TimelineEditor {
         let committedSnapshot = try makeSnapshot(project: committed)
         let focus = focusedClipID.flatMap { clipID in
             committedSnapshot.clips.first(where: { $0.id == clipID }).map {
-                TimelineEditFocus(clipID: clipID, projectTime: $0.projectTimeRange.start)
+                TimelineEditFocus(
+                    clipID: clipID,
+                    projectTime: focusedProjectTime ?? $0.projectTimeRange.start
+                )
             }
         }
         return TimelineEditOutcome(
@@ -728,7 +896,9 @@ private extension TimelineClip {
             takeID: takeID,
             availableRange: availableRange,
             selection: selection,
-            isMuted: isMuted
+            isMuted: isMuted,
+            leadingSplitBoundaryID: leadingSplitBoundaryID,
+            trailingSplitBoundaryID: trailingSplitBoundaryID
         )
     }
 
@@ -738,7 +908,9 @@ private extension TimelineClip {
             takeID: takeID,
             availableRange: availableRange,
             selection: selection,
-            isMuted: isMuted
+            isMuted: isMuted,
+            leadingSplitBoundaryID: leadingSplitBoundaryID,
+            trailingSplitBoundaryID: trailingSplitBoundaryID
         )
     }
 }

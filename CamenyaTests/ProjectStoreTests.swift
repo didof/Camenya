@@ -2,6 +2,120 @@ import XCTest
 @testable import Camenya
 
 final class ProjectStoreTests: XCTestCase {
+    func testSchemaSevenProjectDoesNotInventLineageForComplementaryClipsFromDifferentSplits() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let projectID = UUID()
+        let take = ProjectTake(
+            id: UUID(),
+            createdAt: Date(timeIntervalSince1970: 1),
+            duration: 12
+        )
+        let firstGenerationRightID = TimelineClip.ID()
+        let secondGenerationLeftID = TimelineClip.ID()
+        let firstGenerationLeft = TimelineClip(
+            takeID: take.id,
+            availableRange: TakeRange(startSeconds: 0, endSeconds: 6),
+            selection: TakeRange(startSeconds: 0, endSeconds: 6)
+        )
+        let secondGenerationRight = TimelineClip(
+            takeID: take.id,
+            availableRange: TakeRange(startSeconds: 6, endSeconds: 12),
+            selection: TakeRange(startSeconds: 6, endSeconds: 12)
+        )
+        let legacy = ProjectManifest(
+            schemaVersion: 7,
+            id: projectID,
+            createdAt: Date(timeIntervalSince1970: 0),
+            modifiedAt: Date(timeIntervalSince1970: 1),
+            name: "Two Legacy Splits",
+            takes: [take],
+            primaryStoryline: PrimaryStoryline(clips: []),
+            removedClips: [
+                RemovedTimelineClip(
+                    clip: firstGenerationLeft,
+                    placement: TimelinePlacementContext(
+                        previousClipID: nil,
+                        nextClipID: firstGenerationRightID,
+                        originalIndex: 0
+                    )
+                ),
+                RemovedTimelineClip(
+                    clip: secondGenerationRight,
+                    placement: TimelinePlacementContext(
+                        previousClipID: secondGenerationLeftID,
+                        nextClipID: nil,
+                        originalIndex: 1
+                    )
+                )
+            ]
+        )
+        try writeLegacyProject(legacy, to: store)
+
+        let migrated = try store.load(id: projectID)
+        let migratedClips = migrated.removedClips.map(\.clip)
+
+        XCTAssertTrue(migratedClips.allSatisfy { $0.leadingSplitBoundaryID == nil })
+        XCTAssertTrue(migratedClips.allSatisfy { $0.trailingSplitBoundaryID == nil })
+        XCTAssertEqual(migrated.primaryStoryline.revision, .zero)
+    }
+
+    func testSchemaSevenProjectDoesNotGuessSplitLineageWhenLegacyRangesOverlap() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let projectID = UUID()
+        let take = ProjectTake(
+            id: UUID(),
+            createdAt: Date(timeIntervalSince1970: 1),
+            duration: 12
+        )
+        let fullReplacement = TimelineClip(
+            takeID: take.id,
+            availableRange: TakeRange(startSeconds: 0, endSeconds: 12),
+            selection: TakeRange(startSeconds: 0, endSeconds: 12)
+        )
+        let oldFirst = TimelineClip(
+            takeID: take.id,
+            availableRange: TakeRange(startSeconds: 0, endSeconds: 6),
+            selection: TakeRange(startSeconds: 0, endSeconds: 6)
+        )
+        let oldLast = TimelineClip(
+            takeID: take.id,
+            availableRange: TakeRange(startSeconds: 6, endSeconds: 12),
+            selection: TakeRange(startSeconds: 6, endSeconds: 12)
+        )
+        let legacy = ProjectManifest(
+            schemaVersion: 7,
+            id: projectID,
+            createdAt: Date(timeIntervalSince1970: 0),
+            modifiedAt: Date(timeIntervalSince1970: 1),
+            name: "Ambiguous Legacy Split",
+            takes: [take],
+            primaryStoryline: PrimaryStoryline(clips: [fullReplacement]),
+            removedClips: [oldFirst, oldLast].enumerated().map { index, clip in
+                RemovedTimelineClip(
+                    clip: clip,
+                    placement: TimelinePlacementContext(
+                        previousClipID: nil,
+                        nextClipID: nil,
+                        originalIndex: index
+                    )
+                )
+            }
+        )
+        try writeLegacyProject(legacy, to: store)
+
+        let migrated = try store.load(id: projectID)
+        let allClips = migrated.primaryStoryline.clips + migrated.removedClips.map(\.clip)
+
+        XCTAssertTrue(allClips.allSatisfy { $0.leadingSplitBoundaryID == nil })
+        XCTAssertTrue(allClips.allSatisfy { $0.trailingSplitBoundaryID == nil })
+    }
+
     func testApprovedTakeSelectionPersistsAndDrivesEffectiveDuration() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -27,6 +141,17 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertEqual(updated.takes.first?.effectiveDuration, 6)
         XCTAssertEqual(updated.approximateDuration, 6)
         XCTAssertEqual(try store.load(id: project.id).takes.first?.trimDecision, updated.takes.first?.trimDecision)
+    }
+
+    private func writeLegacyProject(
+        _ project: ProjectManifest,
+        to store: ProjectStore
+    ) throws {
+        let directory = store.projectDirectory(id: project.id)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(project).write(to: directory.appendingPathComponent("project.json"))
     }
 
     func testSchemaOneProjectMigratesWithoutChangingItsOriginalRange() throws {

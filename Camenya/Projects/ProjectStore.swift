@@ -487,7 +487,9 @@ struct ProjectStore: Sendable {
             takeID: clip.takeID,
             availableRange: clip.availableRange,
             selection: selection,
-            isMuted: clip.isMuted
+            isMuted: clip.isMuted,
+            leadingSplitBoundaryID: clip.leadingSplitBoundaryID,
+            trailingSplitBoundaryID: clip.trailingSplitBoundaryID
         )
         project.primaryStoryline.revision = try project.primaryStoryline.revision.incremented()
         if var captions = project.takes[index].captions {
@@ -618,7 +620,9 @@ struct ProjectStore: Sendable {
             takeID: clip.takeID,
             availableRange: clip.availableRange,
             selection: TakeRange(startSeconds: 0, endSeconds: project.takes[index].duration),
-            isMuted: clip.isMuted
+            isMuted: clip.isMuted,
+            leadingSplitBoundaryID: clip.leadingSplitBoundaryID,
+            trailingSplitBoundaryID: clip.trailingSplitBoundaryID
         )
         project.primaryStoryline.revision = try project.primaryStoryline.revision.incremented()
         if var captions = project.takes[index].captions {

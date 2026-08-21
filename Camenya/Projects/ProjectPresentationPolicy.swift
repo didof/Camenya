@@ -41,6 +41,14 @@ enum ProjectPresentationPolicy {
         isPreparationFailed ? .retryPreparation : .togglePlayback
     }
 
+    static func canAddFullTakeToStoryline(
+        takeID: UUID,
+        in project: ProjectManifest
+    ) -> Bool {
+        project.takes.contains(where: { $0.id == takeID })
+            && !project.primaryStoryline.clips.contains(where: { $0.takeID == takeID })
+    }
+
     static func shouldHideViewerControls(
         isPlaying: Bool,
         revealStartedAt: TimeInterval?,

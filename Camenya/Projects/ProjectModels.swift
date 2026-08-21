@@ -166,7 +166,7 @@ struct ProjectTake: Codable, Equatable, Hashable, Identifiable, Sendable {
 }
 
 struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
-    static let currentSchemaVersion = 7
+    static let currentSchemaVersion = 8
 
     var schemaVersion: Int
     var manifestRevision: UInt64

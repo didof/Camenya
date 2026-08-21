@@ -2,6 +2,13 @@ import XCTest
 @testable import Camenya
 
 final class ProjectPresentationPolicyTests: XCTestCase {
+    func testProjectMediaEditFailureRetriesTheExactFailedEdit() {
+        let edit = TimelineEdit.addFullTakeToStoryline(takeID: UUID())
+        let failure = ProjectMediaEditFailure(edit: edit)
+
+        XCTAssertEqual(failure.retryEdit, edit)
+    }
+
     func testLibraryCoverFollowsLeadingStorylineClipRatherThanTakeOrder() throws {
         let firstTake = ProjectTake(
             id: UUID(),
@@ -111,6 +118,21 @@ final class ProjectPresentationPolicyTests: XCTestCase {
 
         XCTAssertTrue(project.unusedTakes.isEmpty)
         XCTAssertEqual(project.usedTakes.map(\.id), [take.id])
+        XCTAssertTrue(ProjectPresentationPolicy.canAddFullTakeToStoryline(
+            takeID: take.id,
+            in: project
+        ))
+
+        var withActiveClip = project
+        withActiveClip.primaryStoryline.clips = [clip]
+        XCTAssertFalse(ProjectPresentationPolicy.canAddFullTakeToStoryline(
+            takeID: take.id,
+            in: withActiveClip
+        ))
+        XCTAssertFalse(ProjectPresentationPolicy.canAddFullTakeToStoryline(
+            takeID: UUID(),
+            in: project
+        ))
     }
 
     func testWorkspacePlaybackAndChromePoliciesExposeRecoveryAndTemporaryControls() {
