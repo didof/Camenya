@@ -14,6 +14,10 @@ struct CameraScreen: View {
     @State private var configuringCaptions = false
     @State private var reviewingCaptions = false
     @State private var confirmingCurrentTakeDiscard = false
+    @State private var focusPoint: CGPoint?
+    @State private var focusPulse = 0
+    @State private var exposureDragStart: Float?
+    @State private var isAdjustingExposure = false
     @State private var takeListActionCoordinator = TakeListActionCoordinator()
     let onBack: (() -> Void)?
 
@@ -26,8 +30,11 @@ struct CameraScreen: View {
     var body: some View {
         ZStack {
             CamenyaStyle.ink.ignoresSafeArea()
-            CameraPreview(controller: model.cameraController).ignoresSafeArea()
+            CameraPreview(controller: model.cameraController)
+            .ignoresSafeArea()
+            .overlay { previewInteractionLayer }
             previewScrim
+            focusAndExposureIndicator
             cameraChrome
                 .allowsHitTesting(
                     !model.isExportingProject
@@ -190,6 +197,71 @@ struct CameraScreen: View {
         reviewingTimeline = true
     }
 
+    private var previewInteractionLayer: some View {
+        GeometryReader { geometry in
+            exposureAccessibilityActions(
+                Color.clear
+                .contentShape(Rectangle())
+                .simultaneousGesture(
+                    SpatialTapGesture().onEnded { value in
+                        guard geometry.size.width > 0, geometry.size.height > 0 else { return }
+                        focus(at: CGPoint(
+                            x: value.location.x / geometry.size.width,
+                            y: value.location.y / geometry.size.height
+                        ))
+                    }
+                )
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 12).onChanged { value in
+                        guard focusPoint != nil, model.captureReady else { return }
+                        if exposureDragStart == nil {
+                            exposureDragStart = model.captureCapabilities.exposureBias
+                            isAdjustingExposure = true
+                        }
+                        guard let exposureDragStart else { return }
+                        model.setExposureBias(model.exposureBias(
+                            from: exposureDragStart,
+                            verticalTranslation: Double(value.translation.height)
+                        ))
+                    }.onEnded { _ in
+                        exposureDragStart = nil
+                        isAdjustingExposure = false
+                    }
+                )
+                .accessibilityElement()
+                .accessibilityLabel("Camera preview")
+                .accessibilityHint("Activate to focus and expose at the center.")
+                .accessibilityAddTraits(.isImage)
+                .accessibilityAction { focus(at: CGPoint(x: 0.5, y: 0.5)) }
+            )
+        }
+    }
+
+    private func focus(at previewPoint: CGPoint) {
+        guard model.captureReady else { return }
+        let normalizedPoint = CGPoint(
+            x: min(max(previewPoint.x, 0), 1),
+            y: min(max(previewPoint.y, 0), 1)
+        )
+        focusPoint = normalizedPoint
+        focusPulse += 1
+        model.focusAndExpose(atPreviewPoint: normalizedPoint)
+    }
+
+    @ViewBuilder
+    private func exposureAccessibilityActions<Content: View>(_ content: Content) -> some View {
+        if focusPoint == nil {
+            content
+        } else {
+            content
+                .accessibilityHint("Swipe up or down to adjust exposure.")
+                .accessibilityAdjustableAction { direction in
+                    model.adjustExposureBias(by: direction == .increment ? 0.25 : -0.25)
+                }
+                .accessibilityAction(named: "Reset Exposure") { model.setExposureBias(0) }
+        }
+    }
+
     private var previewScrim: some View {
         LinearGradient(
             stops: [
@@ -203,6 +275,57 @@ struct CameraScreen: View {
         )
         .ignoresSafeArea()
         .allowsHitTesting(false)
+    }
+
+    @ViewBuilder
+    private var focusAndExposureIndicator: some View {
+        if let focusPoint {
+            GeometryReader { geometry in
+                ZStack {
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .stroke(CamenyaStyle.warning, lineWidth: 1.5)
+                        .frame(width: 68, height: 68)
+                        .phaseAnimator([false, true, false], trigger: focusPulse) { content, visible in
+                            content
+                                .opacity(visible ? 1 : 0)
+                                .scaleEffect(reduceMotion || visible ? 1 : 1.12)
+                        } animation: { visible in
+                            reduceMotion
+                                ? .linear(duration: visible ? 0 : 0.55)
+                                : (visible ? .easeOut(duration: 0.16) : .easeIn(duration: 0.55))
+                        }
+
+                    if isAdjustingExposure {
+                        VStack(spacing: 4) {
+                            Image(systemName: "sun.max.fill")
+                            Text(model.captureCapabilities.exposureBias, format: .number.precision(.fractionLength(1)))
+                                .font(.caption2.monospacedDigit())
+                        }
+                        .font(.caption)
+                        .foregroundStyle(CamenyaStyle.warning)
+                        .offset(x: 54)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("Exposure bias")
+                        .accessibilityValue(Text(
+                            model.captureCapabilities.exposureBias,
+                            format: .number.precision(.fractionLength(1))
+                        ))
+                        .accessibilityAdjustableAction { direction in
+                            model.adjustExposureBias(by: direction == .increment ? 0.25 : -0.25)
+                        }
+                        .accessibilityAction(named: "Reset Exposure") {
+                            model.setExposureBias(0)
+                        }
+                    }
+                }
+                .position(
+                    x: focusPoint.x * geometry.size.width,
+                    y: focusPoint.y * geometry.size.height
+                )
+            }
+            .allowsHitTesting(false)
+            .ignoresSafeArea()
+        }
     }
 
     private var cameraChrome: some View {
@@ -232,7 +355,7 @@ struct CameraScreen: View {
                 Button(action: onBack) {
                     Image(systemName: "chevron.left")
                         .font(.headline)
-                        .frame(width: 38, height: 38)
+                        .frame(width: 44, height: 44)
                         .background(CamenyaStyle.chrome, in: Circle())
                         .overlay(Circle().stroke(CamenyaStyle.hairline, lineWidth: 1))
                 }
@@ -241,20 +364,33 @@ struct CameraScreen: View {
                 .opacity(model.canLeaveProject ? 1 : 0.4)
                 .accessibilityLabel("Back to Projects")
             }
-            HStack(spacing: 8) {
-                Image(systemName: statusSymbol)
-                    .foregroundStyle(statusTint)
-                    .symbolEffect(.pulse, options: .repeating, isActive: model.phase == .recording && !reduceMotion)
-                Text(statusText.uppercased())
-                    .kerning(1.1)
+            if (model.phase == .idle || model.phase == .paused), model.captureReady {
+                captureOptionsMenu
+            } else {
+                HStack(spacing: 8) {
+                    Image(systemName: statusSymbol)
+                        .foregroundStyle(statusTint)
+                        .symbolEffect(.pulse, options: .repeating, isActive: model.phase == .recording && !reduceMotion)
+                    Text(statusText.uppercased())
+                        .kerning(1.1)
+                }
+                .font(.caption.weight(.bold))
+                .padding(.horizontal, 13)
+                .frame(height: 38)
+                .background(CamenyaStyle.chrome, in: Capsule())
+                .overlay(Capsule().stroke(CamenyaStyle.hairline, lineWidth: 1))
             }
-            .font(.caption.weight(.bold))
-            .padding(.horizontal, 13)
-            .frame(height: 38)
-            .background(CamenyaStyle.chrome, in: Capsule())
-            .overlay(Capsule().stroke(CamenyaStyle.hairline, lineWidth: 1))
 
             Spacer()
+
+            if model.captureCapabilities.isLowLightBoostActive {
+                Image(systemName: "moon.fill")
+                    .font(.caption)
+                    .frame(width: 32, height: 32)
+                    .background(CamenyaStyle.chrome, in: Circle())
+                    .overlay(Circle().stroke(CamenyaStyle.hairline, lineWidth: 1))
+                    .accessibilityLabel("Low Light active")
+            }
 
             if showsTimer {
                 Text(model.formattedElapsed)
@@ -270,30 +406,63 @@ struct CameraScreen: View {
         .accessibilityElement(children: .contain)
     }
 
+    private var captureOptionsMenu: some View {
+        Menu {
+            if model.captureCapabilities.supportsSubjectFollowing {
+                Toggle(
+                    "Follow Subject",
+                    isOn: Binding(
+                        get: { model.captureQualityPreferences.followSubjectEnabled },
+                        set: model.setFollowSubjectEnabled
+                    )
+                )
+            }
+            if model.captureCapabilities.supportsLowLightBoost {
+                Toggle(
+                    "Low Light: Auto",
+                    isOn: Binding(
+                        get: { model.captureQualityPreferences.lowLightAutoEnabled },
+                        set: model.setLowLightAutoEnabled
+                    )
+                )
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Text(model.project.name)
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.caption2.weight(.bold))
+            }
+            .font(.subheadline.weight(.semibold))
+            .padding(.horizontal, 12)
+            .frame(height: 38)
+            .background(CamenyaStyle.chrome, in: Capsule())
+            .overlay(Capsule().stroke(CamenyaStyle.hairline, lineWidth: 1))
+        }
+        .accessibilityLabel("Capture options for \(model.project.name)")
+    }
+
     private var timelineShelf: some View {
         Button { managingTakes = true } label: {
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(model.project.name)
-                        .font(.headline)
-                        .lineLimit(1)
-                    Text("\(model.project.takes.count) \(model.project.takes.count == 1 ? "Take" : "Takes") · \(RecordingDurationFormatter.clock(model.project.approximateDuration))")
-                        .font(.caption)
-                        .foregroundStyle(CamenyaStyle.muted)
-                }
-                Spacer(minLength: 8)
-                Text("View Takes")
+            HStack(spacing: 9) {
+                Image(systemName: "film.stack")
+                Text("\(model.project.takes.count) \(model.project.takes.count == 1 ? "Take" : "Takes")")
                     .font(.subheadline.weight(.semibold))
+                Spacer(minLength: 8)
+                Text(RecordingDurationFormatter.clock(model.project.approximateDuration))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(CamenyaStyle.muted)
                 Image(systemName: "chevron.up")
-                    .font(.caption.weight(.bold))
+                    .font(.caption2.weight(.bold))
                     .accessibilityHidden(true)
             }
-            .padding(14)
+            .padding(.horizontal, 14)
+            .frame(height: 44)
             .contentShape(Rectangle())
         }
         .buttonStyle(CameraPressStyle())
-        .background(CamenyaStyle.panel, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(CamenyaStyle.hairline, lineWidth: 1))
+        .background(CamenyaStyle.chrome, in: Capsule())
+        .overlay(Capsule().stroke(CamenyaStyle.hairline, lineWidth: 1))
         .accessibilityLabel("View \(model.project.takes.count) \(model.project.takes.count == 1 ? "Take" : "Takes")")
         .accessibilityValue(RecordingDurationFormatter.clock(model.project.approximateDuration))
         .accessibilityHint("Opens the Take list for review, reordering, and deletion")
@@ -301,35 +470,30 @@ struct CameraScreen: View {
     }
 
     private var pausePanel: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
                 Label(model.isInterrupted ? "Recording interrupted" : "Take paused", systemImage: model.isInterrupted ? "exclamationmark.triangle.fill" : "pause.fill")
                     .font(.headline)
                     .foregroundStyle(model.isInterrupted ? CamenyaStyle.warning : CamenyaStyle.paper)
                 Spacer()
-                Button { editingNote = true } label: {
-                    Label(projectNote.text.isEmpty ? "Add Project Note" : "Edit", systemImage: "square.and.pencil")
-                        .font(.subheadline.weight(.semibold))
-                        .padding(.horizontal, 12)
-                        .frame(height: 36)
+            }
+
+            Button { editingNote = true } label: {
+                HStack(spacing: 9) {
+                    Image(systemName: projectNote.text.isEmpty ? "text.badge.plus" : "text.alignleft")
+                    Text(projectNote.text.isEmpty ? "Add Project Note" : projectNote.text)
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Image(systemName: "square.and.pencil")
+                        .foregroundStyle(CamenyaStyle.muted)
                 }
-                .buttonStyle(.plain)
-                .background(CamenyaStyle.paper.opacity(0.12), in: Capsule())
-                .accessibilityHint("Opens the persistent Project Note editor")
+                .font(.subheadline)
+                .padding(.horizontal, 12)
+                .frame(height: 42)
+                .background(CamenyaStyle.paper.opacity(0.1), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
-
-            Rectangle()
-                .fill(CamenyaStyle.hairline)
-                .frame(height: 1)
-
-            ScrollView {
-                Text(projectNote.text.isEmpty ? "Add your next line so it is ready before you resume." : projectNote.text)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .font(.title3.weight(projectNote.text.isEmpty ? .regular : .medium))
-                    .foregroundStyle(projectNote.text.isEmpty ? CamenyaStyle.muted : CamenyaStyle.paper)
-                    .lineSpacing(4)
-            }
-            .frame(maxHeight: 190)
+            .buttonStyle(CameraPressStyle())
+            .accessibilityHint("Opens the persistent Project Note editor")
 
             if model.isInterrupted {
                 Label("Completed segments are safe.", systemImage: "checkmark.shield.fill")
@@ -351,36 +515,30 @@ struct CameraScreen: View {
             switch model.phase {
             case .idle:
                 HStack(alignment: .center) {
-                    utilityButton("Flip", systemImage: "camera.rotate") { model.flip() }
+                    roundCameraButton(
+                        "Project Note",
+                        systemImage: projectNote.text.isEmpty ? "text.badge.plus" : "text.alignleft",
+                        kind: .utility
+                    ) {
+                        editingNote = true
+                    }
                     Spacer(minLength: 8)
                     recordButton
                     Spacer(minLength: 8)
-                    utilityButton("Project Note", systemImage: projectNote.text.isEmpty ? "text.badge.plus" : "text.alignleft") {
-                        editingNote = true
-                    }
+                    roundCameraButton("Flip", systemImage: "camera.rotate", kind: .utility) { model.flip() }
                 }
             case .recording:
-                HStack(spacing: 16) {
-                    destructiveUtilityButton("Stop", systemImage: "stop.fill", action: model.stop)
-                    primaryActionButton("Pause", systemImage: "pause.fill", action: model.pause)
+                HStack(spacing: 34) {
+                    roundCameraButton("Stop", systemImage: "stop.fill", kind: .destructive, action: model.stop)
+                    roundCameraButton("Pause", systemImage: "pause.fill", kind: .primary, action: model.pause)
                 }
             case .paused where model.isInterrupted:
                 interruptedControls
             case .paused:
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 10) {
-                        utilityButton("Flip", systemImage: "camera.rotate") { model.flip() }
-                        destructiveUtilityButton("Stop", systemImage: "stop.fill", action: model.stop)
-                        primaryActionButton("Resume", systemImage: "play.fill", action: model.resume)
-                    }
-                    VStack(spacing: 10) {
-                        HStack(spacing: 10) {
-                            utilityButton("Flip", systemImage: "camera.rotate") { model.flip() }
-                            destructiveUtilityButton("Stop", systemImage: "stop.fill", action: model.stop)
-                        }
-                        primaryActionButton("Resume", systemImage: "play.fill", action: model.resume)
-                            .frame(maxWidth: .infinity)
-                    }
+                HStack(spacing: 24) {
+                    roundCameraButton("Stop", systemImage: "stop.fill", kind: .destructive, action: model.stop)
+                    roundCameraButton("Resume", systemImage: "play.fill", kind: .primary, action: model.resume)
+                    roundCameraButton("Flip", systemImage: "camera.rotate", kind: .utility) { model.flip() }
                 }
             case .storingTake where model.canRetrySave:
                 primaryActionButton("Retry Add", systemImage: "arrow.clockwise", action: model.retrySave)
@@ -452,10 +610,8 @@ struct CameraScreen: View {
                             .frame(width: 58, height: 58)
                     }
                 }
-                Text("Record")
-                    .font(.caption.weight(.semibold))
             }
-            .frame(minWidth: 82, minHeight: 86)
+            .frame(width: 82, height: 82)
         }
         .buttonStyle(CameraPressStyle())
         .disabled(!model.captureReady || model.isRestoringCaptureSession)
@@ -671,32 +827,19 @@ struct CameraScreen: View {
         }
     }
 
-    private func utilityButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            VStack(spacing: 6) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 21, weight: .semibold))
-                    .frame(width: 46, height: 42)
-                    .background(CamenyaStyle.paper.opacity(0.12), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-                Text(title).font(.caption.weight(.semibold))
-            }
-            .frame(minWidth: 64, minHeight: 68)
-        }
-        .buttonStyle(CameraPressStyle())
-        .accessibilityLabel(title)
-    }
-
-    private func destructiveUtilityButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
-        Button(role: .destructive, action: action) {
-            VStack(spacing: 6) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 18, weight: .bold))
-                    .frame(width: 46, height: 42)
-                    .background(CamenyaStyle.recording.opacity(0.16), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-                Text(title).font(.caption.weight(.semibold))
-            }
-            .foregroundStyle(CamenyaStyle.recording)
-            .frame(minWidth: 64, minHeight: 68)
+    private func roundCameraButton(
+        _ title: String,
+        systemImage: String,
+        kind: RoundCameraButtonKind,
+        action: @escaping () -> Void
+    ) -> some View {
+        let style = kind.style
+        return Button(role: style.role, action: action) {
+            Image(systemName: systemImage)
+                .font(style.font)
+                .foregroundStyle(style.foregroundStyle)
+                .frame(width: style.diameter, height: style.diameter)
+                .background(style.backgroundStyle, in: Circle())
         }
         .buttonStyle(CameraPressStyle())
         .accessibilityLabel(title)
@@ -738,6 +881,49 @@ struct CameraScreen: View {
 
     private func format(_ duration: TimeInterval) -> String {
         RecordingDurationFormatter.clock(duration)
+    }
+}
+
+private enum RoundCameraButtonKind {
+    case utility
+    case primary
+    case destructive
+
+    struct Style {
+        let role: ButtonRole?
+        let font: Font
+        let foregroundStyle: Color
+        let backgroundStyle: Color
+        let diameter: CGFloat
+    }
+
+    var style: Style {
+        switch self {
+        case .utility:
+            Style(
+                role: nil,
+                font: .system(size: 20, weight: .semibold),
+                foregroundStyle: CamenyaStyle.paper,
+                backgroundStyle: CamenyaStyle.paper.opacity(0.12),
+                diameter: 52
+            )
+        case .primary:
+            Style(
+                role: nil,
+                font: .system(size: 22, weight: .bold),
+                foregroundStyle: CamenyaStyle.ink,
+                backgroundStyle: CamenyaStyle.paper,
+                diameter: 68
+            )
+        case .destructive:
+            Style(
+                role: .destructive,
+                font: .system(size: 18, weight: .bold),
+                foregroundStyle: CamenyaStyle.recording,
+                backgroundStyle: CamenyaStyle.recording.opacity(0.16),
+                diameter: 52
+            )
+        }
     }
 }
 
