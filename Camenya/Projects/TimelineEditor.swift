@@ -26,7 +26,6 @@ enum TimelineEdit: Equatable, Sendable {
     case deleteRemovedClipPermanently(clipID: TimelineClip.ID)
     case addFullTakeToStoryline(takeID: UUID)
     case setMuted(clipID: TimelineClip.ID, isMuted: Bool)
-    case approveCaptionTimelineIssue(issueID: CaptionTimelineIssue.ID)
     case nudgeTrim(
         clipID: TimelineClip.ID,
         edge: TimelineTrimEdge,
@@ -47,7 +46,6 @@ extension TimelineEdit {
         case .deleteRemovedClipPermanently: "Delete Removed Clip"
         case .addFullTakeToStoryline: "Add Take"
         case let .setMuted(_, isMuted): isMuted ? "Mute Source Audio" : "Include Source Audio"
-        case .approveCaptionTimelineIssue: "Approve Caption"
         case .nudgeTrim: "Adjust Trim"
         }
     }
@@ -311,22 +309,18 @@ struct TimelineEditFocus: Equatable, Sendable {
 struct TimelineSessionState: Equatable, Sendable {
     let clips: [TimelineClip]
     let removedClips: [RemovedTimelineClip]
-    let captionTimelineIssues: [CaptionTimelineIssue]
 
     init(
         clips: [TimelineClip],
-        removedClips: [RemovedTimelineClip],
-        captionTimelineIssues: [CaptionTimelineIssue] = []
+        removedClips: [RemovedTimelineClip]
     ) {
         self.clips = clips
         self.removedClips = removedClips
-        self.captionTimelineIssues = captionTimelineIssues
     }
 
     init(project: ProjectManifest) {
         clips = project.primaryStoryline.clips
         removedClips = project.removedClips
-        captionTimelineIssues = project.captionTimelineIssues
     }
 }
 
@@ -410,7 +404,7 @@ enum TimelineEditorError: Error, Equatable {
     case corruptPrimaryStoryline
     case revisionExhausted
     case editingUnavailable
-    case captionTimelineIssueNotFound(UUID)
+    case pictureLocked
 }
 
 actor TimelineEditor {
@@ -452,6 +446,7 @@ actor TimelineEditor {
                 snapshot: snapshot
             )
         }
+        guard project.pictureLock == nil else { throw TimelineEditorError.pictureLocked }
         guard project.primaryStoryline.revision == expectedRevision else {
             throw TimelineEditorError.staleRevision(
                 expected: expectedRevision,
@@ -498,7 +493,6 @@ actor TimelineEditor {
         project.format = project.format ?? format
         project.takes.append(take)
         project.primaryStoryline.clips.append(clip)
-        project.captionTimelineIssues = CaptionTimelineProjection.reconciledIssues(in: project)
         project.primaryStoryline.revision = try project.primaryStoryline.revision.incremented()
         project.modifiedAt = completedAt
         do {
@@ -538,6 +532,7 @@ actor TimelineEditor {
         modifiedAt: Date = Date()
     ) throws -> TimelineEditOutcome {
         var project = try projectStore.load(id: projectID)
+        guard project.pictureLock == nil else { throw TimelineEditorError.pictureLocked }
         guard project.primaryStoryline.revision == expectedRevision else {
             throw TimelineEditorError.staleRevision(
                 expected: expectedRevision,
@@ -546,8 +541,6 @@ actor TimelineEditor {
         }
         var focusedClipID: TimelineClip.ID?
         var focusedProjectTime: ProjectTime?
-
-        project.captionTimelineIssues = CaptionTimelineProjection.reconciledIssues(in: project)
 
         switch edit {
         case let .trim(clipID, selection):
@@ -689,13 +682,6 @@ actor TimelineEditor {
                 throw TimelineEditorError.invalidClip(clipID)
             }
             project.primaryStoryline.clips[clipIndex] = clip.replacingMutedState(with: isMuted)
-        case let .approveCaptionTimelineIssue(issueID):
-            guard let issueIndex = project.captionTimelineIssues.firstIndex(where: {
-                $0.id == issueID && $0.reviewState == .needsReview
-            }) else {
-                throw TimelineEditorError.captionTimelineIssueNotFound(issueID)
-            }
-            project.captionTimelineIssues[issueIndex].reviewState = .approved
         case let .nudgeTrim(clipID, edge, direction):
             let clipIndex = try clipIndex(for: clipID, in: project)
             let clip = project.primaryStoryline.clips[clipIndex]
@@ -710,7 +696,6 @@ actor TimelineEditor {
             project.primaryStoryline.clips[clipIndex] = clip.replacingSelection(with: selection)
         }
 
-        project.captionTimelineIssues = CaptionTimelineProjection.reconciledIssues(in: project)
         project.primaryStoryline.revision = try project.primaryStoryline.revision.incremented()
         project.modifiedAt = modifiedAt
         do {
@@ -742,6 +727,7 @@ actor TimelineEditor {
         modifiedAt: Date = Date()
     ) throws -> TimelineEditOutcome {
         var project = try projectStore.load(id: projectID)
+        guard project.pictureLock == nil else { throw TimelineEditorError.pictureLocked }
         guard project.primaryStoryline.revision == expectedRevision else {
             throw TimelineEditorError.staleRevision(
                 expected: expectedRevision,
@@ -754,8 +740,6 @@ actor TimelineEditor {
 
         project.primaryStoryline.clips = state.clips
         project.removedClips = state.removedClips
-        project.captionTimelineIssues = state.captionTimelineIssues
-        project.captionTimelineIssues = CaptionTimelineProjection.reconciledIssues(in: project)
         project.primaryStoryline.revision = try project.primaryStoryline.revision.incremented()
         project.modifiedAt = modifiedAt
         do {
@@ -783,7 +767,8 @@ actor TimelineEditor {
         projectStore: ProjectStore
     ) throws -> ExportSnapshot {
         var cursor: TimeInterval = 0
-        let clips = try project.primaryStoryline.clips.map { clip in
+        let sourceClips = project.pictureLock?.clips ?? project.primaryStoryline.clips
+        let clips = try sourceClips.map { clip in
             guard let take = project.takes.first(where: { $0.id == clip.takeID }) else {
                 throw TimelineEditorError.missingTake(clip.takeID)
             }
@@ -831,15 +816,37 @@ actor TimelineEditor {
                 )
             )
         }
-        let reconciledIssues = CaptionTimelineProjection.reconciledIssues(in: project)
-        let captionTimeline = CaptionTimelineProjection.makeTimeline(
-            project: project,
-            clips: clips,
-            issues: reconciledIssues
-        )
+        let captionTimeline: ProjectCaptionExportTimeline?
+        if let pictureLock = project.pictureLock,
+           let track = project.projectCaptionTrack,
+           track.pictureLockID == pictureLock.id,
+           track.reviewState == .approved,
+           track.isGenerationComplete,
+           let configuration = project.captionConfiguration {
+            captionTimeline = ProjectCaptionExportTimeline(
+                placement: configuration.placement,
+                style: configuration.style,
+                customization: configuration.customization,
+                duration: cursor,
+                cues: track.cues.compactMap { cue in
+                    guard cue.isEnabled,
+                          !cue.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        return nil
+                    }
+                    let trustedTiming = cue.hasTrustworthyWordTiming
+                    return ProjectCaptionExportCue(
+                        range: cue.range,
+                        text: cue.text,
+                        timedSpans: trustedTiming ? cue.timedSpans : []
+                    )
+                }
+            )
+        } else {
+            captionTimeline = nil
+        }
         return ExportSnapshot(
             projectID: project.id,
-            revision: project.primaryStoryline.revision,
+            revision: project.pictureLock?.storylineRevision ?? project.primaryStoryline.revision,
             format: project.format,
             captionConfiguration: project.captionConfiguration,
             captionTimeline: captionTimeline,
@@ -883,8 +890,6 @@ actor TimelineEditor {
             guard let take = takesByID[clip.takeID] else { return false }
             return clip.availableRange.isValid(inside: take.duration, minimumDuration: 0.001)
                 && selectionIsValid(clip.selection, for: clip)
-        } && state.captionTimelineIssues.allSatisfy { issue in
-            takesByID[issue.takeID]?.captions?.cues.contains(where: { $0.id == issue.cueID }) == true
         }
     }
 }

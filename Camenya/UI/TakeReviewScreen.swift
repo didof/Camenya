@@ -224,7 +224,7 @@ struct PlayerLayerView: UIViewRepresentable {
     func updateUIView(_ uiView: PlayerView, context: Context) {
         uiView.playerLayer.player = player
         uiView.onVideoRectChanged = onVideoRectChanged
-        uiView.reportVideoRectIfNeeded()
+        uiView.requestVideoRectReport()
     }
 }
 
@@ -244,5 +244,10 @@ final class PlayerView: UIView {
         guard rect != reportedVideoRect else { return }
         reportedVideoRect = rect
         onVideoRectChanged?(rect)
+    }
+
+    func requestVideoRectReport() {
+        reportedVideoRect = .null
+        setNeedsLayout()
     }
 }

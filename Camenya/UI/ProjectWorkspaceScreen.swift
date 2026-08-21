@@ -4,6 +4,7 @@ struct ProjectWorkspaceScreen: View {
     @StateObject private var recorder: AppModel
     @ObservedObject private var library: ProjectLibraryModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     @State private var destination: ProjectDestination
     @State private var hasWorkspaceContext: Bool
     @State private var renaming = false
@@ -13,6 +14,17 @@ struct ProjectWorkspaceScreen: View {
     @State private var isEditingStoryline = false
     @State private var playbackContext = TimelinePlaybackContext.beginning
     @State private var confirmingDeletion = false
+    @State private var showingCaptionSetup = false
+    @State private var showingCaptionEditor = false
+    @State private var confirmingUnlock = false
+    @State private var choosingExportVariant = false
+    @State private var openCaptionEditorAfterSetup = false
+    @State private var failedWorkspaceCaptionAction: WorkspaceCaptionAction?
+
+    private enum WorkspaceCaptionAction {
+        case unlock
+        case resumeGeneration
+    }
 
     init(
         project: ProjectManifest,
@@ -46,15 +58,36 @@ struct ProjectWorkspaceScreen: View {
                 .transition(.opacity)
             }
 
-            if recorder.isExportingProject {
-                exportOverlay
+            if destination == .workspace,
+               workspaceCaptionErrorMessage != nil || recorder.projectExportErrorMessage != nil {
+                VStack {
+                    if workspaceCaptionErrorMessage != nil {
+                        workspaceCaptionError
+                    }
+                    if let message = recorder.projectExportErrorMessage {
+                        workspaceExportError(message)
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.top, 6)
             }
         }
         .navigationBarBackButtonHidden(true)
         .toolbar(destination == .capture ? .hidden : .visible, for: .navigationBar)
         .toolbar { workspaceToolbar }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if recorder.isExportingProject, destination == .workspace {
+                exportProgressBar
+            }
+        }
         .onAppear {
             if destination == .capture { recorder.enterCapture() }
+            else { recorder.resumeProjectCaptionGeneration() }
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            guard destination == .workspace else { return }
+            recorder.handleWorkspaceScenePhase(newPhase)
         }
         .sheet(isPresented: $editingNote) {
             ProjectNoteEditor(text: Binding(
@@ -70,6 +103,42 @@ struct ProjectWorkspaceScreen: View {
             NavigationStack {
                 ProjectMediaScreen(
                     model: recorder
+                )
+            }
+        }
+        .sheet(item: Binding(
+            get: { recorder.shareableProjectExport },
+            set: { if $0 == nil { recorder.projectExportSharingFinished(completed: false) } }
+        )) { item in
+            SystemShareSheet(url: item.url) { completed in
+                recorder.projectExportSharingFinished(completed: completed)
+            }
+        }
+        .sheet(isPresented: $showingCaptionSetup, onDismiss: {
+            if openCaptionEditorAfterSetup {
+                openCaptionEditorAfterSetup = false
+                showingCaptionEditor = true
+            }
+        }) {
+            ProjectCaptionSetupSheet(model: recorder) {
+                openCaptionEditorAfterSetup = true
+            }
+                .presentationDetents([.medium])
+                .presentationDragIndicator(.visible)
+        }
+        .fullScreenCover(isPresented: $showingCaptionEditor) {
+            if let snapshot = recorder.timelinePlaybackSnapshot {
+                ProjectCaptionEditorScreen(
+                    model: recorder,
+                    snapshot: snapshot,
+                    initialProjectTime: playbackContext.projectTime,
+                    onDone: { projectTime in
+                        playbackContext = TimelinePlaybackContext(
+                            selectedClipID: recorder.timelinePlaybackSnapshot?.position(at: projectTime)?.clipID,
+                            projectTime: projectTime
+                        )
+                        showingCaptionEditor = false
+                    }
                 )
             }
         }
@@ -89,13 +158,31 @@ struct ProjectWorkspaceScreen: View {
         } message: {
             Text("This deletes the Project and every recording and file it owns. This can't be undone.")
         }
+        .confirmationDialog(
+            "Edit Video?",
+            isPresented: $confirmingUnlock,
+            titleVisibility: .visible
+        ) {
+            Button("Unlock & Edit", role: .destructive) {
+                attemptUnlock()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Generated captions, timing, and manual caption corrections will be removed. Takes and every pre-lock Storyline edit stay unchanged.")
+        }
+        .confirmationDialog(
+            "Export Project",
+            isPresented: $choosingExportVariant,
+            titleVisibility: .visible
+        ) {
+            Button("With Captions") { recorder.exportProject(includeCaptions: true) }
+            Button("Without Captions") { recorder.exportProject(includeCaptions: false) }
+            Button("Cancel", role: .cancel) {}
+        }
         .alert("Camenya", isPresented: Binding(
             get: { recorder.errorMessage != nil },
             set: { if !$0 { recorder.dismissError() } }
         )) {
-            if recorder.canRetryProjectExportSave {
-                Button("Retry Photos Save") { recorder.retryProjectExportSave() }
-            }
             if recorder.canOpenSettingsForCurrentError {
                 Button("Open Settings") { recorder.openSettings() }
             }
@@ -137,24 +224,67 @@ struct ProjectWorkspaceScreen: View {
                         Text(recorder.project.name)
                             .font(.headline)
                             .lineLimit(1)
+                        if recorder.isPictureLocked {
+                            Image(systemName: "lock.fill")
+                                .font(.caption2)
+                        }
                         Image(systemName: "chevron.down")
                             .font(.caption2.weight(.bold))
                     }
                 }
                 .accessibilityLabel("Project menu for \(recorder.project.name)")
+                .accessibilityValue(recorder.isPictureLocked ? "Video Locked" : "")
             }
 
             ToolbarItemGroup(placement: .topBarTrailing) {
-                if recorder.timelinePlaybackSnapshot?.clips.isEmpty == false {
-                    Button("Edit") { isEditingStoryline = true }
+                if recorder.timelinePlaybackSnapshot?.clips.isEmpty == false,
+                   recorder.isPictureLocked || recorder.isReadyForPictureLock {
+                    Button {
+                        if recorder.project.projectCaptionTrack != nil {
+                            showingCaptionEditor = true
+                        } else {
+                            showingCaptionSetup = true
+                        }
+                    } label: {
+                        ZStack {
+                            Image(systemName: "captions.bubble")
+                            if recorder.isTranscribingCaptions, recorder.isPictureLocked {
+                                ProgressView()
+                                    .controlSize(.mini)
+                                    .offset(x: 9, y: -9)
+                            }
+                        }
+                    }
+                    .accessibilityLabel(recorder.isPictureLocked ? "Open Captions" : "Create Captions")
+                    .disabled(recorder.isExportingProject)
+
+                    Button {
+                        if recorder.isPictureLocked { confirmingUnlock = true }
+                        else { isEditingStoryline = true }
+                    } label: {
+                        Image(systemName: "pencil")
+                    }
+                    .accessibilityLabel(recorder.isPictureLocked ? "Edit Video" : "Edit Storyline")
+                    .disabled(recorder.isExportingProject)
                 }
                 Button {
-                    recorder.exportProject()
+                    if recorder.hasCompletedProjectCaptions {
+                        choosingExportVariant = true
+                    } else {
+                        recorder.exportProject(includeCaptions: false)
+                    }
                 } label: {
                     Image(systemName: "square.and.arrow.up")
                 }
-                .disabled(recorder.timelinePlaybackSnapshot?.clips.isEmpty != false)
-                .accessibilityLabel("Project Export")
+                .disabled(
+                    recorder.timelinePlaybackSnapshot?.clips.isEmpty != false
+                        || recorder.isExportingProject
+                        || recorder.isTranscribingCaptions
+                )
+                .accessibilityLabel("Share Project")
+                .accessibilityHint(recorder.isTranscribingCaptions
+                    ? "Wait for caption generation to finish"
+                    : "Choose a finished video to share")
             }
         }
     }
@@ -192,43 +322,112 @@ struct ProjectWorkspaceScreen: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
 
-                    Button(action: beginCapture) {
-                        Label("New Take", systemImage: "plus")
-                            .font(.headline)
-                            .frame(maxWidth: .infinity, minHeight: 54)
+                    if !recorder.isPictureLocked {
+                        Button(action: beginCapture) {
+                            Label("New Take", systemImage: "plus")
+                                .font(.headline)
+                                .frame(maxWidth: .infinity, minHeight: 54)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .buttonBorderShape(.capsule)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 10)
+                        .disabled(!recorder.canLeaveProject)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .buttonBorderShape(.capsule)
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 10)
-                    .disabled(!recorder.canLeaveProject)
                 }
             }
         }
         .background(Color(uiColor: .systemGroupedBackground))
     }
 
-    private var exportOverlay: some View {
-        Color.black.opacity(0.22)
-            .ignoresSafeArea()
-            .overlay {
-                VStack(spacing: 12) {
-                    ProgressView(value: recorder.projectExportProgress)
-                        .progressViewStyle(.linear)
-                    Text(recorder.projectExportStatus ?? "Preparing Project Export…")
-                        .font(.callout.weight(.semibold))
-                }
-                .padding(22)
-                .frame(maxWidth: 280)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+    private var exportProgressBar: some View {
+        HStack(spacing: 12) {
+            ProgressView(value: recorder.projectExportProgress)
+                .frame(width: 72)
+            Text(recorder.projectExportStatus ?? "Preparing Project Export…")
+                .font(.footnote.weight(.semibold))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button("Cancel") { recorder.cancelProjectExport() }
+                .font(.footnote.weight(.semibold))
+        }
+        .padding(.horizontal, 16)
+        .frame(minHeight: 50)
+        .background(.bar)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(recorder.projectExportStatus ?? "Preparing Project Export")
+    }
+
+    private func workspaceExportError(_ message: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.circle.fill")
+                .foregroundStyle(.orange)
+            Text(message)
+                .font(.footnote)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if recorder.hasFailedProjectExportRetry {
+                Button("Retry") { recorder.retryFailedProjectExport() }
+                    .font(.footnote.weight(.semibold))
+                    .disabled(recorder.isTranscribingCaptions)
+                    .accessibilityHint(recorder.isTranscribingCaptions
+                        ? "Wait for caption generation to finish"
+                        : "Retry the same export operation")
             }
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel(recorder.projectExportStatus ?? "Preparing Project Export")
+            Button {
+                recorder.dismissProjectExportError()
+            } label: {
+                Image(systemName: "xmark").frame(width: 44, height: 44)
+            }
+            .accessibilityLabel("Dismiss export error")
+        }
+        .padding(12)
+        .background(.bar, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .accessibilityElement(children: .contain)
     }
 
     private func beginCapture() {
         destination = .capture
         recorder.enterCapture()
+    }
+
+    private var workspaceCaptionErrorMessage: String? {
+        guard failedWorkspaceCaptionAction != nil
+                || (recorder.projectCaptionTrack?.isGenerationComplete == false
+                    && !recorder.isTranscribingCaptions) else { return nil }
+        return recorder.captionGenerationErrorMessage
+    }
+
+    private var workspaceCaptionError: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange)
+            Text(workspaceCaptionErrorMessage ?? "Caption operation failed.")
+                .font(.footnote)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button("Retry") {
+                switch failedWorkspaceCaptionAction ?? .resumeGeneration {
+                case .unlock: attemptUnlock()
+                case .resumeGeneration: recorder.resumeProjectCaptionGeneration()
+                }
+            }
+            .font(.footnote.weight(.semibold))
+            Button {
+                failedWorkspaceCaptionAction = nil
+                recorder.dismissCaptionGenerationError()
+            } label: {
+                Image(systemName: "xmark").frame(width: 44, height: 44)
+            }
+            .accessibilityLabel("Dismiss caption error")
+        }
+        .padding(.leading, 12)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func attemptUnlock() {
+        if recorder.unlockPictureLock() {
+            failedWorkspaceCaptionAction = nil
+            isEditingStoryline = true
+        } else {
+            failedWorkspaceCaptionAction = .unlock
+        }
     }
 
     private func captureBack() {
@@ -312,11 +511,13 @@ private struct ProjectWorkspacePlaybackView: View {
                         selectionSummary
                     }
 
-                    if model.preparationItemCount > 0 {
+                    if model.preparationItemCount > 0, !model.isPictureLocked {
                         Button(action: onPrepare) {
                             HStack(spacing: 10) {
-                                Image(systemName: "wand.and.stars")
-                                Text("Prepare Project")
+                                Image(systemName: model.needsStorylineCheck
+                                    ? "play.rectangle"
+                                    : "wand.and.stars")
+                                Text(model.needsStorylineCheck ? "Check Video" : "Prepare Project")
                                 Spacer()
                                 Text("\(model.preparationItemCount)")
                                     .foregroundStyle(.secondary)

@@ -39,15 +39,4 @@ final class TakeListActionCoordinatorTests: XCTestCase {
         )
     }
 
-    func testPerTakeCaptionActionRetainsTheRequestedTake() {
-        let takeID = UUID()
-        var coordinator = TakeListActionCoordinator()
-
-        coordinator.request(.manageCaptions(takeID: takeID))
-
-        XCTAssertEqual(
-            coordinator.consumeNextAction(sheetIsPresented: false),
-            .manageCaptions(takeID: takeID)
-        )
-    }
 }

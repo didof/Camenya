@@ -133,6 +133,7 @@ final class TimelinePlaybackSession: ObservableObject {
         case zoomOut
         case magnify(Double)
         case retryPreparation
+        case playRange(TakeRange)
     }
 
     @Published private(set) var state: State
@@ -146,6 +147,7 @@ final class TimelinePlaybackSession: ObservableObject {
     private var installedItemIndices: [ObjectIdentifier: Int] = [:]
     private var preparationGeneration = 0
     private var activeTrimPreviewClipID: TimelineClip.ID?
+    private var playbackStopProjectTime: TimeInterval?
     init(
         snapshot: ExportSnapshot,
         initialSelectedClipID: TimelineClip.ID? = nil,
@@ -327,6 +329,8 @@ final class TimelinePlaybackSession: ObservableObject {
         case .retryPreparation:
             let location = playbackLocation(at: state.playhead)
             prepareQueue(startingAt: location.index, localTime: location.localTime)
+        case let .playRange(range):
+            play(range: range)
         }
     }
 
@@ -349,7 +353,20 @@ final class TimelinePlaybackSession: ObservableObject {
 
     private func pause() {
         player.pause()
+        playbackStopProjectTime = nil
         if state.phase == .playing { state.phase = .paused }
+    }
+
+    private func play(range: TakeRange) {
+        guard range.duration > 0,
+              range.start.seconds >= 0,
+              range.end.seconds <= state.duration.seconds else { return }
+        playbackStopProjectTime = range.end.seconds
+        let start = ProjectTime(seconds: range.start.seconds)
+        state.playhead = start
+        let location = playbackLocation(at: start)
+        state.selectedClipID = state.clips[safe: location.index]?.id
+        prepareQueue(startingAt: location.index, localTime: location.localTime, playWhenReady: true)
     }
 
     private func seek(to requestedTime: ProjectTime) {
@@ -521,6 +538,12 @@ final class TimelinePlaybackSession: ObservableObject {
         let seconds = min(state.duration.seconds, clip.projectTimeRange.start.seconds + max(0, time.seconds))
         state.playhead = ProjectTime(seconds: seconds)
         state.selectedClipID = clip.id
+        if let stop = playbackStopProjectTime, seconds >= stop {
+            player.pause()
+            playbackStopProjectTime = nil
+            state.playhead = ProjectTime(seconds: stop)
+            state.phase = .paused
+        }
     }
 
     private static func makeFilmstripClips(snapshot: ExportSnapshot) -> [FilmstripClip] {
@@ -580,10 +603,18 @@ struct TimelineReviewScreen: View {
     @State private var sessionHistory = TimelineSessionHistory()
     @State private var trimSession: TimelineTrimSession?
     @State private var trimEntryContext: TimelinePlaybackContext?
+    @State private var isCheckingStoryline = false
+    @State private var storylineCheckFailed = false
+    @State private var failedSpokenLanguageUpdate: SpokenLanguageUpdate?
     let title: String
     let format: ProjectFormat
     let presentation: TimelineReviewPresentation
     let onDone: (TimelinePlaybackContext) -> Void
+
+    private struct SpokenLanguageUpdate {
+        let takeID: UUID
+        let localeIdentifier: String?
+    }
 
     init(
         snapshot: ExportSnapshot,
@@ -635,7 +666,6 @@ struct TimelineReviewScreen: View {
                         trimSurface(trimSession)
                     } else {
                         playbackStatus
-                        if !pendingCaptionIssues.isEmpty { captionIssuesLink }
                         TimelineFilmstrip(
                             playback: playback,
                             isCommitting: isCommittingEdit || model.isEditingTimeline,
@@ -645,6 +675,26 @@ struct TimelineReviewScreen: View {
                             }
                         )
                         contextualToolRow
+                        if model.needsStorylineCheck {
+                            HStack(spacing: 10) {
+                                Button("Skip") { finishEditing() }
+                                    .buttonStyle(.bordered)
+                                    .frame(minHeight: 48)
+                                    .accessibilityHint("Leaves the complete video check unfinished.")
+                                Button(action: confirmStorylineCheck) {
+                                    Label("Continue", systemImage: "checkmark.circle")
+                                        .font(.headline)
+                                        .frame(maxWidth: .infinity, minHeight: 48)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .buttonBorderShape(.capsule)
+                                .accessibilityLabel("Mark Video Checked and Continue")
+                                .accessibilityHint(
+                                    "Confirms that you reviewed the complete Storyline before captions."
+                                )
+                            }
+                            .disabled(isCheckingStoryline || isCommittingEdit || model.isEditingTimeline)
+                        }
                     }
                 }
                 .padding(.horizontal, 16)
@@ -670,10 +720,21 @@ struct TimelineReviewScreen: View {
                 }
                 .font(.footnote.weight(.semibold))
                 .disabled(isCommittingEdit)
+            } else if storylineCheckFailed {
+                Button("Retry", action: confirmStorylineCheck)
+                    .font(.footnote.weight(.semibold))
+                    .disabled(isCheckingStoryline)
+            } else if let failedSpokenLanguageUpdate {
+                Button("Retry") {
+                    commitSpokenLanguage(failedSpokenLanguageUpdate)
+                }
+                .font(.footnote.weight(.semibold))
             }
             Button {
                 editErrorMessage = nil
                 failedEditRequest = nil
+                storylineCheckFailed = false
+                failedSpokenLanguageUpdate = nil
             } label: {
                     Image(systemName: "xmark")
                         .frame(width: 44, height: 44)
@@ -828,6 +889,32 @@ struct TimelineReviewScreen: View {
                                 isMuted: !selectedClip.isMuted
                             ))
                         }
+                        if let sourceClip = selectedProjectClip {
+                            Menu("Spoken Language", systemImage: "character.bubble") {
+                                Button("Project Default") {
+                                    commitSpokenLanguage(SpokenLanguageUpdate(
+                                        takeID: sourceClip.takeID,
+                                        localeIdentifier: nil
+                                    ))
+                                }
+                                Divider()
+                                Button("English (US)") {
+                                    commitSpokenLanguage(SpokenLanguageUpdate(takeID: sourceClip.takeID, localeIdentifier: "en-US"))
+                                }
+                                Button("Italian") {
+                                    commitSpokenLanguage(SpokenLanguageUpdate(takeID: sourceClip.takeID, localeIdentifier: "it-IT"))
+                                }
+                                Button("German") {
+                                    commitSpokenLanguage(SpokenLanguageUpdate(takeID: sourceClip.takeID, localeIdentifier: "de-DE"))
+                                }
+                                Button("French") {
+                                    commitSpokenLanguage(SpokenLanguageUpdate(takeID: sourceClip.takeID, localeIdentifier: "fr-FR"))
+                                }
+                                Button("Spanish") {
+                                    commitSpokenLanguage(SpokenLanguageUpdate(takeID: sourceClip.takeID, localeIdentifier: "es-ES"))
+                                }
+                            }
+                        }
                         if selectedClip.selection != selectedClip.availableRange {
                             Button("Reset Trim", systemImage: "arrow.counterclockwise") {
                                 commit(.resetTrim(clipID: selectedClip.id))
@@ -975,6 +1062,35 @@ struct TimelineReviewScreen: View {
         if presentation == .standalone { dismiss() }
     }
 
+    private func confirmStorylineCheck() {
+        playback.send(.pause)
+        isCheckingStoryline = true
+        if model.markStorylineChecked() {
+            editErrorMessage = nil
+            storylineCheckFailed = false
+            isCheckingStoryline = false
+            UIAccessibility.post(notification: .announcement, argument: "Video checked")
+            finishEditing()
+        } else {
+            isCheckingStoryline = false
+            storylineCheckFailed = true
+            editErrorMessage = "The video check couldn't be saved."
+        }
+    }
+
+    private func commitSpokenLanguage(_ update: SpokenLanguageUpdate) {
+        if model.setSpokenLanguage(
+            for: update.takeID,
+            localeIdentifier: update.localeIdentifier
+        ) {
+            editErrorMessage = nil
+            failedSpokenLanguageUpdate = nil
+        } else {
+            editErrorMessage = "The spoken language couldn't be saved."
+            failedSpokenLanguageUpdate = update
+        }
+    }
+
     private var currentPlaybackContext: TimelinePlaybackContext {
         TimelinePlaybackContext(
             selectedClipID: playback.state.selectedClipID,
@@ -1026,30 +1142,6 @@ struct TimelineReviewScreen: View {
         )
     }
 
-    private var pendingCaptionIssues: [CaptionTimelineIssue] {
-        model.project.captionTimelineIssues.filter { $0.reviewState == .needsReview }
-    }
-
-    private var captionIssuesLink: some View {
-        NavigationLink {
-            CaptionTimelineIssuesScreen(
-                model: model,
-                isCommitting: isCommittingEdit || model.isEditingTimeline,
-                onApprove: { commit(.approveCaptionTimelineIssue(issueID: $0)) }
-            )
-        } label: {
-            Label(
-                "\(pendingCaptionIssues.count) Caption \(pendingCaptionIssues.count == 1 ? "Issue" : "Issues")",
-                systemImage: "captions.bubble.fill"
-            )
-            .font(.callout.weight(.semibold))
-            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-        }
-        .buttonStyle(.bordered)
-        .disabled(isCommittingEdit || model.isEditingTimeline)
-        .accessibilityHint("Review captions omitted from preview and export after an earlier Storyline edit.")
-    }
-
     private var viewerAccessibilityValue: String {
         guard let activeCaption else { return phaseLabel }
         return "\(phaseLabel). Caption: \(activeCaption.cue.text)"
@@ -1060,33 +1152,18 @@ struct TimelineReviewScreen: View {
         _ active: ActiveProjectCaptionPresentation,
         canvas: CGSize
     ) -> some View {
-        let metrics = CaptionPresentationLayout.metrics(for: canvas)
-        let maximumWidth = canvas.width * (1 - CaptionPresentationLayout.horizontalInsetFraction * 2)
-        projectCaptionText(active)
-            .font(.system(size: metrics.fontSize, weight: .bold))
-            .multilineTextAlignment(.center)
-            .frame(maxWidth: max(1, maximumWidth - metrics.padding * 2))
-            .padding(metrics.padding)
-            .background(
-                .black.opacity(0.76),
-                in: RoundedRectangle(cornerRadius: metrics.cornerRadius)
-            )
-            .fixedSize(horizontal: false, vertical: true)
-            .position(
-                x: canvas.width / 2,
-                y: canvas.height * CaptionPresentationLayout.centerYFraction(
-                    for: playback.currentSnapshot.captionTimeline?.placement ?? .lower
-                )
-            )
+        CaptionLayerPreview(
+            cue: active.cue,
+            configuration: ProjectCaptionConfiguration(
+                localeIdentifier: "und",
+                placement: playback.currentSnapshot.captionTimeline?.placement ?? .lower,
+                style: playback.currentSnapshot.captionTimeline?.style ?? .clean,
+                customization: playback.currentSnapshot.captionTimeline?.customization
+                    ?? CaptionStyleCustomization()
+            ),
+            activeTime: playback.state.playhead.seconds
+        )
             .accessibilityHidden(true)
-    }
-
-    private func projectCaptionText(_ active: ActiveProjectCaptionPresentation) -> Text {
-        ProjectCaptionOverlayResolver.textRuns(for: active).reduce(Text("")) { result, run in
-            result + Text(run.text)
-                .foregroundColor(run.isHighlighted ? .yellow : .white)
-                .fontWeight(run.isHighlighted ? .heavy : .bold)
-        }
     }
 
     private var failureState: some View {
@@ -1180,7 +1257,7 @@ struct TimelineReviewScreen: View {
                 case .move, .remove, .restore, .addFullTakeToStoryline, .join:
                     animatesStructure = true
                 case .trim, .resetTrim, .split, .deleteRemovedClipPermanently, .setMuted,
-                     .nudgeTrim, .approveCaptionTimelineIssue:
+                     .nudgeTrim:
                     animatesStructure = false
                 }
                 if animatesStructure, !reduceMotion {
@@ -1278,12 +1355,6 @@ struct TimelineReviewScreen: View {
                                 ? "Source audio muted for Clip \($0) of \(outcome.snapshot.clips.count)."
                                 : "Source audio on for Clip \($0) of \(outcome.snapshot.clips.count)."
                         } ?? (isMuted ? "Source audio muted." : "Source audio on.")
-                    )
-                } else if case .approveCaptionTimelineIssue = edit {
-                    UINotificationFeedbackGenerator().notificationOccurred(.success)
-                    UIAccessibility.post(
-                        notification: .announcement,
-                        argument: "Caption approved for the current Storyline. Preview and export now use the same caption timing."
                     )
                 }
                 editErrorMessage = nil
@@ -1425,92 +1496,11 @@ struct TimelineReviewScreen: View {
              let .setMuted(clipID, _),
              let .nudgeTrim(clipID, _, _):
             clipID
-        case .addFullTakeToStoryline, .approveCaptionTimelineIssue:
+        case .addFullTakeToStoryline:
             nil
         }
     }
 
-}
-
-private struct CaptionTimelineIssuesScreen: View {
-    @ObservedObject var model: AppModel
-    let isCommitting: Bool
-    let onApprove: (CaptionTimelineIssue.ID) -> Void
-
-    private var issues: [CaptionTimelineIssue] {
-        model.project.captionTimelineIssues.filter { $0.reviewState == .needsReview }
-    }
-
-    var body: some View {
-        Group {
-            if issues.isEmpty {
-                ContentUnavailableView {
-                    Label("Captions Ready", systemImage: "checkmark.circle")
-                } description: {
-                    Text("No earlier Storyline edit needs caption review.")
-                }
-            } else {
-                List(issues) { issue in
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text(cueText(for: issue))
-                            .font(.headline)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Label(reasonText(for: issue), systemImage: "exclamationmark.triangle")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Text(reviewDetail(for: issue))
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Button("Approve Caption for Storyline") {
-                            onApprove(issue.id)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                        .disabled(isCommitting)
-                        .accessibilityHint("Uses only caption source time that remains in this Storyline.")
-                    }
-                    .padding(.vertical, 4)
-                }
-            }
-        }
-        .navigationTitle("Caption Issues")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-
-    private func cueText(for issue: CaptionTimelineIssue) -> String {
-        model.project.takes.first(where: { $0.id == issue.takeID })?
-            .captions?.cues.first(where: { $0.id == issue.cueID })?.text
-            ?? "Caption unavailable"
-    }
-
-    private func reasonText(for issue: CaptionTimelineIssue) -> String {
-        if issue.fragments.isEmpty {
-            return "The current Storyline contains this caption safely again."
-        }
-        return switch issue.reason {
-        case .boundaryCut:
-            "A trim cuts through this caption."
-        case .discontinuousProjection:
-            "This caption crosses Clips that are no longer adjacent."
-        }
-    }
-
-    private func reviewDetail(for issue: CaptionTimelineIssue) -> String {
-        guard !issue.fragments.isEmpty else {
-            return "It remains out of preview and export until you approve its return."
-        }
-        let duration = issue.fragments.reduce(0) { $0 + $1.sourceRange.duration }
-        let fragmentText = issue.fragments.count == 1
-            ? String(format: "%.1f seconds of source time remains.", duration)
-            : String(
-                format: "%d separated parts remain, totaling %.1f seconds.",
-                issue.fragments.count,
-                duration
-            )
-        return "\(fragmentText) Camenya leaves it out until you approve it."
-    }
 }
 
 private struct TimelineTrimWorkspace: View {

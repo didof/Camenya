@@ -6,6 +6,104 @@ import XCTest
 @testable import Camenya
 
 final class ProjectExporterTests: XCTestCase {
+    func testOnlyValidatedCurrentRevisionStagedExportRecoversAcrossRelaunch() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let staged = store.pendingExportWorkingURL(projectID: project.id)
+        try FileManager.default.createDirectory(
+            at: staged.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try await makeMovie(
+            at: staged,
+            red: 100,
+            green: 120,
+            blue: 140,
+            videoDuration: 0.5,
+            audioDuration: 0.5
+        )
+        _ = try await ProjectExportValidator().validate(staged, requiresAudio: true)
+        let completed = try store.markValidatedStagedExportCompleted(
+            projectID: project.id,
+            stagedURL: staged,
+            includeCaptions: true
+        )
+
+        let relaunched = ProjectStore(projectsRoot: root)
+        let recovery = try XCTUnwrap(relaunched.recoverableStagedExport(projectID: project.id))
+
+        XCTAssertEqual(recovery.url, completed)
+        XCTAssertFalse(recovery.isCommitted)
+        XCTAssertTrue(relaunched.pendingExportNeedsHandoff(projectID: project.id))
+
+        try relaunched.recordStagedExportDescriptor(
+            projectID: project.id,
+            stagedURL: recovery.url,
+            includeCaptions: recovery.includeCaptions
+        )
+        let pending = try relaunched.commitPendingExport(
+            projectID: project.id,
+            stagedURL: recovery.url
+        )
+        let relaunchedAfterCommit = ProjectStore(projectsRoot: root)
+        let committedRecovery = try XCTUnwrap(
+            relaunchedAfterCommit.recoverableStagedExport(projectID: project.id)
+        )
+
+        XCTAssertEqual(committedRecovery.url, pending)
+        XCTAssertTrue(committedRecovery.isCommitted)
+        XCTAssertTrue(relaunchedAfterCommit.pendingExportNeedsHandoff(projectID: project.id))
+
+        _ = try relaunchedAfterCommit.updateNote(projectID: project.id, text: "A newer edit")
+
+        XCTAssertNil(relaunchedAfterCommit.recoverableStagedExport(projectID: project.id))
+        XCTAssertFalse(relaunchedAfterCommit.pendingExportNeedsHandoff(projectID: project.id))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: pending.path))
+    }
+
+    func testFailedStagedRevalidationIsQuarantinedAcrossRelaunch() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let working = store.pendingExportWorkingURL(projectID: project.id)
+        try FileManager.default.createDirectory(
+            at: working.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try await makeMovie(
+            at: working,
+            red: 80,
+            green: 100,
+            blue: 120,
+            videoDuration: 0.5,
+            audioDuration: 0.5
+        )
+        _ = try await ProjectExportValidator().validate(working, requiresAudio: true)
+        let completed = try store.markValidatedStagedExportCompleted(
+            projectID: project.id,
+            stagedURL: working,
+            includeCaptions: false
+        )
+        try Data("corrupt after validation".utf8).write(to: completed, options: .atomic)
+
+        let quarantined = try XCTUnwrap(store.quarantineInvalidStagedExport(
+            projectID: project.id,
+            stagedURL: completed
+        ))
+        let relaunched = ProjectStore(projectsRoot: root)
+
+        XCTAssertNil(relaunched.recoverableStagedExport(projectID: project.id))
+        XCTAssertFalse(relaunched.pendingExportNeedsHandoff(projectID: project.id))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: completed.path))
+        XCTAssertTrue(quarantined.lastPathComponent.hasPrefix("invalid-"))
+        XCTAssertEqual(try Data(contentsOf: quarantined), Data("corrupt after validation".utf8))
+    }
+
     func testEmptyStorylineCannotCreateExportPlan() throws {
         let snapshot = fixtureSnapshot(
             projectID: UUID(),
@@ -394,13 +492,20 @@ final class ProjectExporterTests: XCTestCase {
             duration: 1,
             createdAt: Date()
         )
-        updated = try store.setCaptionConfiguration(
+        updated = try store.setTrimDecision(
+            projectID: project.id,
+            takeID: takeID,
+            decision: .keepOriginal
+        )
+        updated = try store.markStorylineChecked(projectID: project.id)
+        updated = try store.createPictureLock(
             projectID: project.id,
             configuration: ProjectCaptionConfiguration(localeIdentifier: "it-IT", placement: .lower)
         )
-        updated = try store.recordCaptionDraft(
+        let region = try XCTUnwrap(updated.projectCaptionTrack?.regions.first)
+        updated = try store.recordProjectCaptionRegion(
             projectID: project.id,
-            takeID: takeID,
+            regionID: region.id,
             draft: TakeCaptionTrack(
                 localeIdentifier: "it-IT",
                 sourceRange: TakeRange(startSeconds: 0, endSeconds: 1),
@@ -416,7 +521,7 @@ final class ProjectExporterTests: XCTestCase {
                 )]
             )
         )
-        updated = try store.approveCaptions(projectID: project.id, takeID: takeID)
+        updated = try store.approveProjectCaptionTrack(projectID: project.id)
 
         let output = try await ProjectExporter().export(
             plan: try await persistedExportPlan(projectID: updated.id, store: store),
@@ -429,7 +534,14 @@ final class ProjectExporterTests: XCTestCase {
         let captionFrame = try await generator.image(at: CMTime(seconds: 0.25, preferredTimescale: 600)).image
         let plainFrame = try await generator.image(at: CMTime(seconds: 0.75, preferredTimescale: 600)).image
 
-        XCTAssertGreaterThan(Int(averageColor(plainFrame).red) - Int(averageColor(captionFrame).red), 8)
+        XCTAssertGreaterThan(
+            materiallyChangedPixelCount(
+                from: plainFrame,
+                to: captionFrame,
+                verticalRange: 0.62...0.94
+            ),
+            50
+        )
         XCTAssertTrue(FileManager.default.fileExists(atPath: store.takeMovieURL(projectID: project.id, takeID: takeID).path))
 #endif
     }
@@ -645,6 +757,52 @@ final class ProjectExporterTests: XCTestCase {
         context.interpolationQuality = .medium
         context.draw(image, in: CGRect(x: 0, y: 0, width: 1, height: 1))
         return (pixel[0], pixel[1], pixel[2])
+    }
+
+    private func materiallyChangedPixelCount(
+        from reference: CGImage,
+        to candidate: CGImage,
+        verticalRange: ClosedRange<CGFloat>
+    ) -> Int {
+        let width = 180
+        let height = 320
+        let bytesPerRow = width * 4
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+
+        func pixels(for image: CGImage) -> [UInt8] {
+            var pixels = [UInt8](repeating: 0, count: bytesPerRow * height)
+            let context = CGContext(
+                data: &pixels,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: bytesPerRow,
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            )!
+            context.interpolationQuality = .high
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return pixels
+        }
+
+        let referencePixels = pixels(for: reference)
+        let candidatePixels = pixels(for: candidate)
+        let firstRow = max(0, min(height - 1, Int(CGFloat(height) * verticalRange.lowerBound)))
+        let finalRow = max(firstRow, min(height - 1, Int(CGFloat(height) * verticalRange.upperBound)))
+        var changedPixels = 0
+
+        for row in firstRow...finalRow {
+            for column in 0..<width {
+                let offset = row * bytesPerRow + column * 4
+                let difference = abs(Int(referencePixels[offset]) - Int(candidatePixels[offset]))
+                    + abs(Int(referencePixels[offset + 1]) - Int(candidatePixels[offset + 1]))
+                    + abs(Int(referencePixels[offset + 2]) - Int(candidatePixels[offset + 2]))
+                if difference >= 36 {
+                    changedPixels += 1
+                }
+            }
+        }
+        return changedPixels
     }
 
     private func persistedExportPlan(

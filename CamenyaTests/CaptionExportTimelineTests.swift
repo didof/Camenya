@@ -4,6 +4,66 @@ import XCTest
 @testable import Camenya
 
 final class CaptionExportTimelineTests: XCTestCase {
+    func testLineComposerBalancesTwoLinesAndRejectsAnUnfittableBlock() throws {
+        let font = CaptionPresentationTheme.font(style: .clean, size: 58)
+        let balanced = try XCTUnwrap(CaptionLineComposer.resolvedText(
+            "One balanced caption for portrait video",
+            font: font,
+            maximumWidth: 620
+        ))
+        let lines = balanced.split(separator: "\n").map(String.init)
+
+        XCTAssertEqual(lines.count, 2)
+        let widths = lines.map { ($0 as NSString).size(withAttributes: [.font: font]).width }
+        XCTAssertGreaterThanOrEqual(min(widths[0], widths[1]) / max(widths[0], widths[1]), 0.65)
+        XCTAssertNil(CaptionLineComposer.resolvedText(
+            "Supercalifragilisticexpialidocious",
+            font: font,
+            maximumWidth: 40
+        ))
+    }
+
+    func testPresentationComposerSplitsOverflowOnlyAtTrustworthyTimedWords() {
+        let words = (0..<18).map { index in
+            CaptionTimedSpan(
+                range: TakeRange(startSeconds: Double(index), endSeconds: Double(index + 1)),
+                text: "captionword\(index)",
+                granularity: .word,
+                confidence: 0.9
+            )
+        }
+        let text = words.map(\.text).joined(separator: " ")
+        let cue = CaptionCue(
+            range: TakeRange(startSeconds: 0, endSeconds: 18),
+            recognizedText: text,
+            text: text,
+            confidence: 0.9,
+            alternatives: [],
+            timedSpans: words
+        )
+        let configuration = ProjectCaptionConfiguration(
+            localeIdentifier: "en-US",
+            placement: .lower,
+            style: .clean
+        )
+
+        let composed = CaptionPresentationComposer.compose(
+            [cue],
+            configuration: configuration,
+            format: .portrait
+        )
+
+        XCTAssertGreaterThan(composed.count, 1)
+        XCTAssertTrue(composed.allSatisfy {
+            CaptionLineComposer.fits(
+                $0.text,
+                configuration: configuration,
+                canvas: CGSize(width: 1080, height: 1920)
+            )
+        })
+        XCTAssertEqual(composed.flatMap(\.timedSpans), words)
+    }
+
     func testCaptionPresentationMetricsScaleWithTheDisplayedVideoCanvas() {
         let exportPortrait = CaptionPresentationLayout.metrics(
             for: CGSize(width: 1080, height: 1920)
@@ -129,6 +189,23 @@ final class CaptionExportTimelineTests: XCTestCase {
         XCTAssertEqual(landscape.midX / 1920, 0.5, accuracy: 0.001)
     }
 
+    func testCaptionFramesStayInsideTheVersionedContentSafeRegion() {
+        let canvas = CGSize(width: 1080, height: 1920)
+        let safeRegion = CaptionPresentationLayout.contentSafeRegion(in: canvas)
+        let frame = CaptionPresentationLayout.previewFrame(
+            placement: .lower,
+            width: safeRegion.width,
+            height: canvas.height * CaptionPresentationLayout.maximumHeightFraction,
+            canvas: canvas
+        )
+
+        XCTAssertEqual(CaptionPresentationLayout.contentSafeRegionRuleVersion, 1)
+        XCTAssertGreaterThanOrEqual(frame.minX, safeRegion.minX)
+        XCTAssertLessThanOrEqual(frame.maxX, safeRegion.maxX)
+        XCTAssertGreaterThanOrEqual(frame.minY, safeRegion.minY)
+        XCTAssertLessThanOrEqual(frame.maxY, safeRegion.maxY)
+    }
+
     func testProjectOverlayResolvesTheSameCueAndTimedSpanUsedByExport() throws {
         let cue = ProjectCaptionExportCue(
             range: TakeRange(startSeconds: 2, endSeconds: 5),
@@ -179,6 +256,29 @@ final class CaptionExportTimelineTests: XCTestCase {
         let runs = ProjectCaptionOverlayResolver.textRuns(for: active)
 
         XCTAssertEqual(runs.map(\.text).joined(), "Hello, brave new world!")
+        XCTAssertEqual(runs.filter(\.isHighlighted).map(\.text), ["brave"])
+    }
+
+    func testHighlightRangesSurviveCasePunctuationAndWhitespaceCorrections() throws {
+        let spans = ["hello", "brave", "world"].enumerated().map { index, word in
+            CaptionTimedSpan(
+                range: TakeRange(startSeconds: Double(index), endSeconds: Double(index + 1)),
+                text: word,
+                granularity: .word,
+                confidence: 0.9
+            )
+        }
+        let cue = ProjectCaptionExportCue(
+            range: TakeRange(startSeconds: 0, endSeconds: 3),
+            text: "HELLO,   brave world!",
+            timedSpans: spans
+        )
+        let presentation = ActiveProjectCaptionPresentation(cue: cue, timedSpan: spans[1])
+
+        let runs = ProjectCaptionOverlayResolver.textRuns(for: presentation)
+
+        XCTAssertEqual(cue.text, "HELLO, brave world!")
+        XCTAssertEqual(runs.map(\.text).joined(), cue.text)
         XCTAssertEqual(runs.filter(\.isHighlighted).map(\.text), ["brave"])
     }
 

@@ -1,0 +1,7 @@
+# Use Narrow Native UI Bridges for Caption Interactions
+
+Camenya keeps capture, media processing, caption state, and persistence outside SwiftUI views. The post-lock experience nevertheless needs three native iOS interactions for which the targeted SwiftUI surface does not provide the required semantics: reporting completion from the system share sheet, reading the text insertion point used by Split at Cursor, and previewing the exact Core Animation caption layer that AVFoundation burns into Project Export.
+
+Camenya accepts small UIKit interoperability adapters for only those presentation boundaries. `UIActivityViewController` remains the system-owned export handoff; `UITextView` supplies cursor selection and keyboard commands while its text stays bound to the caption editor state; and a layer-hosting preview displays the same deterministic Core Animation output used by the accepted AVFoundation burn-in path. These adapters own no Project, Caption Track, export, or capture behavior and must forward results to the existing Swift/domain owners.
+
+This decision does not make UIKit an alternate application architecture. New UIKit use still requires a concrete missing SwiftUI capability, a narrow wrapper, accessible behavior, and Simulator tests for the underlying deterministic state. Visual parity and system-sheet behavior remain part of the explicitly authorized physical-iPhone verification pass.
