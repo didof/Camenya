@@ -16,14 +16,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var phase: RecorderPhase = .configuring
     @Published private(set) var selectedCamera: CameraPosition = .front
     @Published private(set) var elapsed: TimeInterval = 0
-    @Published var errorMessage: String? {
-        didSet {
-            if !isPublishingCameraAlert { presentedCameraAlertID = nil }
-        }
-    }
+    @Published var errorMessage: String?
     @Published private(set) var recoverableTakes: [TakeManifest] = []
     @Published private(set) var isInterrupted = false
-    @Published private(set) var captureReady = false
+    @Published private(set) var cameraOperationalState: CameraOperationalState = .configuring
     @Published private(set) var isExportingProject = false
     @Published private(set) var isEditingTimeline = false
     @Published private(set) var projectExportStatus: String?
@@ -42,6 +38,10 @@ final class AppModel: ObservableObject {
     let cameraController = CameraController()
     let projectNote: ProjectNoteStore
 
+    var captureReady: Bool { cameraOperationalState.isReady }
+    var isRestoringCaptureSession: Bool { cameraOperationalState.isRestoring }
+    var cameraRecoveryMessage: String? { cameraOperationalState.recoveryMessage }
+
     private let logger = Logger(subsystem: "org.camenya.app", category: "AppModel")
     private let projectStore: ProjectStore
     private let store: TakeManifestStore
@@ -55,9 +55,7 @@ final class AppModel: ObservableObject {
     private let captionTranscriber = CaptionTranscriber(recognizer: CaptionRecognizerFactory.make())
     private let onProjectChanged: @MainActor (ProjectManifest) -> Void
     private var machine = RecorderStateMachine()
-    private var cameraRecoveryAlertState = CameraRecoveryAlertState()
-    private var presentedCameraAlertID: UInt?
-    private var isPublishingCameraAlert = false
+    private var cameraLifecyclePolicy = CameraLifecyclePolicy()
     private var logicalTimer = LogicalRecordingTimer()
     private var currentTake: TakeManifest?
     private var finalMovieURL: URL?
@@ -67,6 +65,8 @@ final class AppModel: ObservableObject {
     private var timer: Timer?
     private var pendingInterruption = false
     private var configurationStarted = false
+    private var cameraConfigurationCompleted = false
+    private var currentScenePhase: ScenePhase = .active
     private var projectExportTask: Task<Void, Never>?
     private var projectExportProgressTimer: Timer?
     private var thumbnailTasks: [UUID: Task<Void, Never>] = [:]
@@ -105,7 +105,7 @@ final class AppModel: ObservableObject {
         cameraController.onRecordingStarted = { [weak self] in self?.recordingDidStart() }
         cameraController.onRecordingFinished = { [weak self] url, error in self?.recordingDidFinish(url: url, error: error) }
         cameraController.onInterrupted = { [weak self] reason in self?.handleCaptureInterruption(reason: reason) }
-        cameraController.onInterruptionEnded = { [weak self] in self?.restartCaptureSession() }
+        cameraController.onInterruptionEnded = { [weak self] in self?.captureInterruptionDidEnd() }
         cameraController.onRuntimeError = { [weak self] error in self?.handleRuntimeError(error) }
         projectNote.setOnChange { [weak self] text in
             guard let self else { return }
@@ -136,7 +136,15 @@ final class AppModel: ObservableObject {
                 switch result {
                 case .success:
                     do {
-                        self.captureReady = true
+                        self.cameraConfigurationCompleted = true
+                        if self.currentScenePhase == .active {
+                            let attempt = self.cameraLifecyclePolicy.applicationBecameActive()
+                            _ = self.cameraLifecyclePolicy.restorationCompleted(attempt, isUsable: true)
+                            self.cameraOperationalState = .ready
+                        } else {
+                            self.cameraOperationalState = .suspended
+                            self.cameraController.stopSession()
+                        }
                         try self.machine.apply(.sessionConfigured)
                         self.publishPhase()
                     } catch {
@@ -145,9 +153,10 @@ final class AppModel: ObservableObject {
                     }
                 case let .failure(error):
                     self.logger.error("Camera configuration failed: \(error.localizedDescription, privacy: .public)")
+                    self.configurationStarted = false
                     self.machine = RecorderStateMachine(initialPhase: .idle)
                     self.publishPhase()
-                    self.errorMessage = "Camera unavailable."
+                    self.presentPersistentCameraFailure("Camera is unavailable.")
                 }
             }
         }
@@ -162,6 +171,7 @@ final class AppModel: ObservableObject {
             errorMessage = "Wait for Project Export to finish before recording."
             return
         }
+        guard !isRestoringCaptureSession, cameraRecoveryMessage == nil else { return }
         guard captureReady else {
             errorMessage = "Camera and microphone access are required before recording."
             return
@@ -302,11 +312,24 @@ final class AppModel: ObservableObject {
 
     func continueInterruptedTake() {
         guard machine.phase == .paused else { return }
+        guard captureReady, !isRestoringCaptureSession else {
+            retryCameraRecovery()
+            return
+        }
         isInterrupted = false
         pendingInterruption = false
         currentTake?.status = .paused
         persistCurrentTake()
-        restartCaptureSession()
+        resume()
+    }
+
+    func retryCameraRecovery() {
+        if cameraConfigurationCompleted {
+            restartCaptureSession()
+        } else {
+            cameraOperationalState = .restoring
+            configure()
+        }
     }
 
     func discardCurrentTake() {
@@ -321,11 +344,19 @@ final class AppModel: ObservableObject {
     }
 
     func handleScenePhase(_ scenePhase: ScenePhase) {
+        currentScenePhase = scenePhase
         switch scenePhase {
+        case .inactive:
+            cameraLifecyclePolicy.applicationBecameInactive()
+            if cameraConfigurationCompleted { cameraOperationalState = .suspended }
         case .active:
             restartCaptureSession()
         case .background:
-            interruptActiveTake(reason: "Application entered the background")
+            cameraLifecyclePolicy.applicationEnteredBackground()
+            if cameraConfigurationCompleted { cameraOperationalState = .suspended }
+            if cameraLifecyclePolicy.takeDispositionForBackground(activity: lifecycleTakeActivity) == .interruptTake {
+                interruptActiveTake(reason: "Application entered the background")
+            }
             if isExportingProject { cancelProjectExport() }
             if isAnalyzingTrim { cancelTrimAnalysis() }
             if isTranscribingCaptions { cancelCaptionTranscription() }
@@ -348,7 +379,6 @@ final class AppModel: ObservableObject {
 
     func dismissError() {
         errorMessage = nil
-        presentedCameraAlertID = nil
     }
 
     func openSettings() {
@@ -1193,35 +1223,74 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private var lifecycleTakeActivity: CameraLifecyclePolicy.TakeActivity {
+        switch machine.phase {
+        case .recording, .startingSegment, .resuming, .stoppingForPause:
+            .activeSegment
+        case .paused:
+            .paused
+        default:
+            .inactive
+        }
+    }
+
     private func handleCaptureInterruption(reason: String) {
-        interruptActiveTake(reason: "Capture session interruption \(reason)")
-        presentCaptureSessionFailure("Camera unavailable. Your recorded segments are safe.")
+        handleCaptureFailure(
+            reason: "Capture session interruption \(reason)",
+            message: "Camera is unavailable. Your recordings are safe."
+        )
     }
 
     private func handleRuntimeError(_ error: Error) {
-        interruptActiveTake(reason: error.localizedDescription)
-        presentCaptureSessionFailure("The camera stopped unexpectedly. Your recorded segments are safe.")
+        handleCaptureFailure(
+            reason: error.localizedDescription,
+            message: "The camera stopped unexpectedly. Your recordings are safe."
+        )
     }
 
-    private func presentCaptureSessionFailure(_ message: String) {
-        let alert = cameraRecoveryAlertState.presentCaptureSessionFailure(message)
-        presentedCameraAlertID = alert.id
-        isPublishingCameraAlert = true
-        errorMessage = alert.message
-        isPublishingCameraAlert = false
+    private func handleCaptureFailure(reason: String, message: String) {
+        let takeDisposition = cameraLifecyclePolicy.takeDispositionForSessionFailure(
+            activity: lifecycleTakeActivity
+        )
+        if takeDisposition == .interruptTake {
+            interruptActiveTake(reason: reason)
+        }
+        if cameraLifecyclePolicy.sessionFailureDisposition == .suppressExpectedLifecycle {
+            logger.info("Suppressing expected capture failure during application lifecycle transition")
+            return
+        }
+        presentPersistentCameraFailure(message)
+    }
+
+    private func presentPersistentCameraFailure(_ message: String) {
+        cameraOperationalState = .unavailable(message)
+    }
+
+    private func captureInterruptionDidEnd() {
+        guard cameraLifecyclePolicy.shouldRestartAfterInterruptionEnded else {
+            logger.info("Skipping capture restart while application is not active")
+            return
+        }
+        restartCaptureSession()
     }
 
     private func restartCaptureSession() {
-        let recoveryAttempt = cameraRecoveryAlertState.beginRecoveryAttempt()
+        guard currentScenePhase == .active, cameraConfigurationCompleted else { return }
+        let lifecycleAttempt = cameraLifecyclePolicy.applicationBecameActive()
+        cameraOperationalState = .restoring
         cameraController.startSession { [weak self] isUsable in
-            guard let self, isUsable else { return }
-            guard self.cameraRecoveryAlertState.recoveredAlert(
-                recoveryAttempt,
-                ifPresentedAlertID: self.presentedCameraAlertID
-            ) != nil else { return }
-            self.presentedCameraAlertID = nil
-            self.errorMessage = nil
-            self.logger.info("Capture session is running after lifecycle recovery")
+            guard let self,
+                  let result = self.cameraLifecyclePolicy.restorationCompleted(
+                      lifecycleAttempt,
+                      isUsable: isUsable
+                  ) else { return }
+            switch result {
+            case .restored:
+                self.cameraOperationalState = .ready
+                self.logger.info("Capture session is running after lifecycle recovery")
+            case .unavailable:
+                self.presentPersistentCameraFailure("Camera is unavailable. Your recordings are safe.")
+            }
         }
     }
 
