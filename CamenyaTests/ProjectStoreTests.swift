@@ -732,6 +732,18 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertEqual(try store.load(id: project.id).note, "Next line")
     }
 
+    func testRenameNormalizesWhitespaceAtThePersistenceBoundary() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject(createdAt: .distantPast)
+
+        let renamed = try store.renameProject(id: project.id, name: "  Talking Head  \n")
+
+        XCTAssertEqual(renamed.name, "Talking Head")
+        XCTAssertEqual(try store.load(id: project.id).name, "Talking Head")
+    }
+
     func testThumbnailAndPendingExportStayInsideTheirOwningProject() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }

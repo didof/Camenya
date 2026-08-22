@@ -20,46 +20,59 @@ struct CameraScreen: View {
     @State private var isAdjustingExposure = false
     @State private var takeListActionCoordinator = TakeListActionCoordinator()
     let onBack: (() -> Void)?
+    let onCaptureEnded: ((ProjectTake?) -> Void)?
 
-    init(model: AppModel, onBack: (() -> Void)? = nil) {
+    init(
+        model: AppModel,
+        onBack: (() -> Void)? = nil,
+        onCaptureEnded: ((ProjectTake?) -> Void)? = nil
+    ) {
         self.model = model
         projectNote = model.projectNote
         self.onBack = onBack
+        self.onCaptureEnded = onCaptureEnded
     }
 
     var body: some View {
         ZStack {
             CamenyaStyle.ink.ignoresSafeArea()
-            CameraPreview(controller: model.cameraController)
-            .ignoresSafeArea()
-            .overlay { previewInteractionLayer }
-            previewScrim
-            focusAndExposureIndicator
-            cameraChrome
-                .allowsHitTesting(
-                    !model.isExportingProject
-                        && !model.isEditingTimeline
-                        && !model.isAnalyzingTrim
-                        && !model.isTranscribingCaptions
-                )
+            Group {
+                CameraPreview(controller: model.cameraController)
+                    .ignoresSafeArea()
+                    .overlay { previewInteractionLayer }
+                previewScrim
+                focusAndExposureIndicator
+                cameraChrome
+                    .allowsHitTesting(
+                        !model.isExportingProject
+                            && !model.isEditingTimeline
+                            && !model.isAnalyzingTrim
+                            && !model.isTranscribingCaptions
+                    )
 
-            if model.phase == .finalizing || (model.phase == .storingTake && !model.canRetrySave) {
-                transitionOverlay
+                if model.phase == .finalizing || (model.phase == .storingTake && !model.canRetrySave) {
+                    transitionOverlay
+                }
+                if model.phase == .configuring {
+                    preparingOverlay
+                }
+                if model.isExportingProject {
+                    projectExportOverlay
+                }
+                if model.isAnalyzingTrim {
+                    trimAnalysisOverlay
+                }
+                if model.isTranscribingCaptions {
+                    captionTranscriptionOverlay
+                }
+                if model.phase == .idle, let take = model.recoverableTakes.first {
+                    recoveryOverlay(take)
+                }
             }
-            if model.phase == .configuring {
-                preparingOverlay
-            }
-            if model.isExportingProject {
-                projectExportOverlay
-            }
-            if model.isAnalyzingTrim {
-                trimAnalysisOverlay
-            }
-            if model.isTranscribingCaptions {
-                captionTranscriptionOverlay
-            }
-            if model.phase == .idle, let take = model.recoverableTakes.first {
-                recoveryOverlay(take)
+            .allowsHitTesting(!model.isCapturePermissionDenied)
+            .accessibilityHidden(model.isCapturePermissionDenied)
+            if model.isCapturePermissionDenied {
+                permissionUnavailableOverlay
             }
         }
         .foregroundStyle(CamenyaStyle.paper)
@@ -67,7 +80,12 @@ struct CameraScreen: View {
         .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: model.phase)
         .onChange(of: scenePhase) { _, newPhase in model.handleScenePhase(newPhase) }
         .sheet(isPresented: $editingNote) {
-            ProjectNoteEditor(text: $projectNote.text)
+            ProjectNoteEditor(
+                text: $projectNote.text,
+                saveErrorMessage: model.projectNoteSaveErrorMessage,
+                canRetry: model.canRetryProjectNoteSave,
+                onRetry: model.retryProjectNoteSave
+            )
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
         }
@@ -125,8 +143,12 @@ struct CameraScreen: View {
         }
         .onChange(of: model.completedTakeForReview) { _, take in
             guard let take else { return }
-            reviewingTake = take
             model.consumeCompletedTakeForReview()
+            if let onCaptureEnded {
+                onCaptureEnded(take)
+            } else {
+                reviewingTake = take
+            }
         }
         .alert("Camenya", isPresented: Binding(
             get: { model.errorMessage != nil },
@@ -150,7 +172,10 @@ struct CameraScreen: View {
             isPresented: $confirmingCurrentTakeDiscard,
             titleVisibility: .visible
         ) {
-            Button("Delete Current Take", role: .destructive, action: model.discardCurrentTake)
+            Button("Delete Current Take", role: .destructive) {
+                model.discardCurrentTake()
+                onCaptureEnded?(nil)
+            }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("All recorded Segments in this Take will be deleted.")
@@ -665,6 +690,35 @@ struct CameraScreen: View {
         .accessibilityElement(children: .combine)
     }
 
+    private var permissionUnavailableOverlay: some View {
+        ZStack {
+            CamenyaStyle.ink.ignoresSafeArea()
+            VStack(spacing: 18) {
+                Image(systemName: "camera.fill")
+                    .font(.largeTitle)
+                    .foregroundStyle(CamenyaStyle.muted)
+                VStack(spacing: 7) {
+                    Text("Camera Access Needed")
+                        .font(.title3.weight(.semibold))
+                    Text("Allow camera and microphone access to record a Take.")
+                        .font(.callout)
+                        .foregroundStyle(CamenyaStyle.muted)
+                        .multilineTextAlignment(.center)
+                }
+                Button("Open Settings", action: model.openSettings)
+                    .buttonStyle(.borderedProminent)
+                if let onBack {
+                    Button("Back", action: onBack)
+                        .buttonStyle(.bordered)
+                }
+            }
+            .padding(28)
+            .frame(maxWidth: 340)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isModal)
+    }
+
     private var transitionOverlay: some View {
         VStack(spacing: 14) {
             ProgressView().controlSize(.large).tint(CamenyaStyle.paper)
@@ -927,29 +981,62 @@ private enum RoundCameraButtonKind {
     }
 }
 
-private struct ProjectNoteEditor: View {
+struct ProjectNoteEditor: View {
     @Binding var text: String
+    let saveErrorMessage: String?
+    let canRetry: Bool
+    let onRetry: () -> Void
     @Environment(\.dismiss) private var dismiss
     @FocusState private var isFocused: Bool
 
+    init(
+        text: Binding<String>,
+        saveErrorMessage: String? = nil,
+        canRetry: Bool = false,
+        onRetry: @escaping () -> Void = {}
+    ) {
+        _text = text
+        self.saveErrorMessage = saveErrorMessage
+        self.canRetry = canRetry
+        self.onRetry = onRetry
+    }
+
     var body: some View {
         NavigationStack {
-            ZStack(alignment: .topLeading) {
-                if text.isEmpty {
-                    Text("Write the next line, reminder, or cue…")
-                        .font(.title3)
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 18)
-                        .allowsHitTesting(false)
+            VStack(spacing: 0) {
+                if let saveErrorMessage {
+                    HStack(spacing: 12) {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .foregroundStyle(.orange)
+                        Text(saveErrorMessage)
+                            .font(.footnote)
+                        Spacer()
+                        if canRetry {
+                            Button("Retry", action: onRetry)
+                                .font(.footnote.weight(.semibold))
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(.orange.opacity(0.12))
                 }
-                TextEditor(text: $text)
-                    .font(.title3)
-                    .lineSpacing(4)
-                    .padding(12)
-                    .scrollContentBackground(.hidden)
-                    .focused($isFocused)
-                    .accessibilityLabel("Project Note")
+                ZStack(alignment: .topLeading) {
+                    if text.isEmpty {
+                        Text("Write the next line, reminder, or cue…")
+                            .font(.title3)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 18)
+                            .allowsHitTesting(false)
+                    }
+                    TextEditor(text: $text)
+                        .font(.title3)
+                        .lineSpacing(4)
+                        .padding(12)
+                        .scrollContentBackground(.hidden)
+                        .focused($isFocused)
+                        .accessibilityLabel("Project Note")
+                }
             }
             .background(Color(uiColor: .secondarySystemBackground))
             .navigationTitle("Project Note")

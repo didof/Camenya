@@ -8,7 +8,6 @@ import UIKit
 final class AppModel: ObservableObject {
     @Published private(set) var project: ProjectManifest {
         didSet {
-            exportSnapshot = nil
             refreshExportSnapshot()
         }
     }
@@ -36,6 +35,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var captionTranscriptionProgress: Double = 0
     @Published private(set) var captionTranscriptionStatus: String?
     @Published private(set) var captionReviewTakeIDs: [UUID] = []
+    @Published private(set) var canRetryProjectNoteSave = false
+    @Published private(set) var projectNoteSaveErrorMessage: String?
+    @Published private(set) var isCapturePermissionDenied = false
 
     let cameraController = CameraController()
     let projectNote: ProjectNoteStore
@@ -122,14 +124,7 @@ final class AppModel: ObservableObject {
             self?.captureCapabilitiesDidChange(capabilities)
         }
         projectNote.setOnChange { [weak self] text in
-            guard let self else { return }
-            do {
-                let updated = try projectStore.updateNote(projectID: projectID, text: text)
-                self.project = updated
-                onProjectChanged(updated)
-            } catch {
-                self.errorMessage = "The Project Note couldn't be saved. Copy it before leaving this Project."
-            }
+            self?.persistProjectNote(text, projectID: projectID)
         }
         refreshExportSnapshot()
     }
@@ -140,11 +135,14 @@ final class AppModel: ObservableObject {
         recoverableTakes = projectStore.unfinishedTakes(projectID: project.id)
         Task {
             guard await CameraPermissions.requestRequiredAccess() else {
+                self.configurationStarted = false
+                self.isCapturePermissionDenied = true
                 machine = RecorderStateMachine(initialPhase: .idle)
                 publishPhase()
-                errorMessage = "Camera and microphone access are required before recording."
+                cameraOperationalState = .unavailable("Camera and microphone access are required.")
                 return
             }
+            self.isCapturePermissionDenied = false
             cameraController.configure(qualityPreferences: captureQualityPreferences) { [weak self] result in
                 guard let self else { return }
                 switch result {
@@ -174,6 +172,36 @@ final class AppModel: ObservableObject {
                 }
             }
         }
+    }
+
+    func enterCapture() {
+        recoverableTakes = projectStore.unfinishedTakes(projectID: project.id)
+        if cameraConfigurationCompleted {
+            restartCaptureSession()
+        } else {
+            configure()
+        }
+    }
+
+    func leaveCapture(completion: @escaping @MainActor @Sendable () -> Void) {
+        guard canLeaveProject else { return }
+        cameraController.stopSession(completion: completion)
+    }
+
+    func renameProject(to proposedName: String) {
+        let name = proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        do {
+            project = try projectStore.renameProject(id: project.id, name: name)
+            onProjectChanged(project)
+        } catch {
+            errorMessage = "The Project couldn't be renamed."
+        }
+    }
+
+    func retryProjectNoteSave() {
+        guard canRetryProjectNoteSave else { return }
+        persistProjectNote(projectNote.text, projectID: project.id)
     }
 
     func record() {
@@ -402,6 +430,10 @@ final class AppModel: ObservableObject {
             cameraLifecyclePolicy.applicationBecameInactive()
             if cameraConfigurationCompleted { cameraOperationalState = .suspended }
         case .active:
+            if isCapturePermissionDenied {
+                configure()
+                return
+            }
             restartCaptureSession()
         case .background:
             cameraLifecyclePolicy.applicationEnteredBackground()
@@ -932,11 +964,30 @@ final class AppModel: ObservableObject {
     }
 
     var canLeaveProject: Bool {
-        phase == .idle
+        (phase == .idle || !configurationStarted)
             && !isExportingProject
             && !isEditingTimeline
             && !isAnalyzingTrim
             && !isTranscribingCaptions
+    }
+
+    var preparationItemCount: Int {
+        trimReviewTakeIDs.count
+            + captionReviewTakeIDs.count
+            + project.captionTimelineIssues.filter { $0.reviewState == .needsReview }.count
+    }
+
+    func preparationIssueCount(for clip: TimelinePlaybackSession.FilmstripClip) -> Int {
+        guard let snapshotClip = exportSnapshot?.clips.first(where: { $0.id == clip.id }) else {
+            return 0
+        }
+        let takeID = snapshotClip.takeID
+        return (trimReviewTakeIDs.contains(takeID) ? 1 : 0)
+            + (captionReviewTakeIDs.contains(takeID) ? 1 : 0)
+            + project.captionTimelineIssues.filter {
+                $0.reviewState == .needsReview
+                    && $0.fragments.contains(where: { $0.clipID == clip.id })
+            }.count
     }
 
     private func finishCaptionTranscription() {
@@ -1321,6 +1372,19 @@ final class AppModel: ObservableObject {
     private func persistCaptureQualityPreferences() {
         capturePreferenceStore.save(captureQualityPreferences)
         cameraController.setQualityPreferences(captureQualityPreferences)
+    }
+
+    private func persistProjectNote(_ text: String, projectID: UUID) {
+        do {
+            let updated = try projectStore.updateNote(projectID: projectID, text: text)
+            project = updated
+            canRetryProjectNoteSave = false
+            projectNoteSaveErrorMessage = nil
+            onProjectChanged(updated)
+        } catch {
+            canRetryProjectNoteSave = true
+            projectNoteSaveErrorMessage = "The Project Note couldn't be saved. Your text is still here."
+        }
     }
 
     private func captureCapabilitiesDidChange(_ capabilities: CaptureCapabilities) {

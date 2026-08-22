@@ -166,7 +166,7 @@ struct ProjectTake: Codable, Equatable, Hashable, Identifiable, Sendable {
 }
 
 struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
-    static let currentSchemaVersion = 6
+    static let currentSchemaVersion = 7
 
     var schemaVersion: Int
     var manifestRevision: UInt64
@@ -174,6 +174,7 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
     let createdAt: Date
     var modifiedAt: Date
     var name: String
+    var isAutomaticallyNamed: Bool
     var format: ProjectFormat?
     var note: String
     var takes: [ProjectTake]
@@ -190,6 +191,7 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
         createdAt: Date,
         modifiedAt: Date,
         name: String,
+        isAutomaticallyNamed: Bool = false,
         format: ProjectFormat? = nil,
         note: String = "",
         takes: [ProjectTake] = [],
@@ -205,6 +207,7 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
         self.createdAt = createdAt
         self.modifiedAt = modifiedAt
         self.name = name
+        self.isAutomaticallyNamed = isAutomaticallyNamed
         self.format = format
         self.note = note
         self.takes = takes
@@ -220,8 +223,16 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
     }
 
     var unusedTakes: [ProjectTake] {
-        let activeTakeIDs = Set(primaryStoryline.clips.map(\.takeID))
-        return takes.filter { !activeTakeIDs.contains($0.id) }
+        takes.filter { !referencedTakeIDs.contains($0.id) }
+    }
+
+    var usedTakes: [ProjectTake] {
+        takes.filter { referencedTakeIDs.contains($0.id) }
+    }
+
+    private var referencedTakeIDs: Set<UUID> {
+        Set(primaryStoryline.clips.map(\.takeID))
+            .union(removedClips.map { $0.clip.takeID })
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -231,6 +242,7 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
         case createdAt
         case modifiedAt
         case name
+        case isAutomaticallyNamed
         case format
         case note
         case takes
@@ -249,6 +261,10 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         modifiedAt = try container.decode(Date.self, forKey: .modifiedAt)
         name = try container.decode(String.self, forKey: .name)
+        isAutomaticallyNamed = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .isAutomaticallyNamed
+        ) ?? false
         format = try container.decodeIfPresent(ProjectFormat.self, forKey: .format)
         note = try container.decodeIfPresent(String.self, forKey: .note) ?? ""
         takes = try container.decodeIfPresent([ProjectTake].self, forKey: .takes) ?? []
