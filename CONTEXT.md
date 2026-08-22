@@ -6,13 +6,21 @@
 A local-first iPhone narrative recorder that helps one person construct a story from multiple recordings and camera perspectives without uploading unfinished media.
 
 **Project**:
-One local-only recording workspace that owns its Takes, Primary Storyline, caption configuration, and supporting media. A Project remains available until explicitly deleted and may produce one finished movie through Project Export.
+One local-only recording workspace that owns its Takes, Primary Storyline, optional Picture Lock and Caption Track, caption configuration, and supporting media. A Project remains available until explicitly deleted and may produce one finished movie through Project Export.
 
 **Project Library**:
 The collection of all Projects currently owned by the app, ordered by most recent modification.
 
+**Project Workspace**:
+The user-facing home for one Project once it owns recorded material. It keeps the current story primary and provides clear entry points to capture, edit, recover, and export.
+_Avoid_: Project Home, Camera Workspace
+
 **Project Format**:
 The portrait or landscape presentation shared by every Take, Storyline Item, and exported movie in one Project.
+
+**Content Safe Region**:
+The Project Format-relative region in which Camenya may place burned-in captions and future visual overlays while reserving conservative edge space for common short-form social-app chrome. It is one platform-neutral composition constraint, not a TikTok or Instagram profile.
+_Avoid_: TikTok Safe Area, Instagram Safe Area
 
 **Project Name**:
 The editable label used to distinguish a Project. A new Project receives a date-and-time-based name automatically.
@@ -20,6 +28,18 @@ The editable label used to distinguish a Project. A new Project receives a date-
 **Project Note**:
 One persistent, local-only block of text owned by a Project and available while recording its Takes. It is never part of captured or exported media.
 _Avoid_: Note
+
+**Project Preparation**:
+The user-initiated workflow that finds and resolves only the analysis, review, and approval work still required by a Project.
+_Avoid_: Batch Processing, Process All
+
+**Preparation Queue**:
+The current Storyline-ordered view of unresolved pre-lock Project Preparation work, derived from the Project's Take, Clip, trim, and playback-validation state.
+_Avoid_: Task List, Processing Log
+
+**Picture Lock**:
+The explicit immutable snapshot of the completed Primary Storyline against which Camenya generates one Project-Time Caption Track and the final export. Returning to structural Storyline editing requires confirmed removal of the Picture Lock and its derived captions.
+_Avoid_: Final Video, Encoded Master
 
 ## Recorded sources
 
@@ -82,6 +102,10 @@ The current Project Time used for seeking, preview, and time-based editing actio
 **Split**:
 An edit that replaces one Timeline Clip with two adjacent Timeline Clips at the Playhead while preserving the immediate output and the recoverable outer ranges of both results.
 
+**Join**:
+An edit that replaces two adjacent Timeline Clips descended from one Split with one Timeline Clip when doing so preserves the immediate output exactly.
+_Avoid_: Merge, Unsplit
+
 **Removed Clip**:
 A recoverable Timeline Clip excluded from the Primary Storyline while retaining its Take reference, ranges, mute state, and prior placement context.
 
@@ -104,27 +128,18 @@ The optional workflow in which the user compares a Trim Suggestion with a Timeli
 A Storyline Item that presents text for an explicit duration without referencing a Take.
 
 **Text Overlay**:
-A timed text element attached to one Timeline Clip and positioned within the Project's safe presentation region.
+A timed text element attached to one Timeline Clip and positioned within the Project's Content Safe Region.
 
 ## Captions
 
 **Caption Configuration**:
-The Project-owned transcription locale plus shared visual style and normalized placement inherited by its captions.
+The Project-owned default spoken language, text density, shared visual style, and normalized placement used by its post-lock captions.
 
 **Caption Track**:
-The Take-owned, source-relative collection of timed Caption Cues. Text corrections are shared by every Timeline Clip that references the Take.
+The Picture-Lock-owned collection of Caption Cues timed directly in Project Time against the complete locked Storyline.
 
 **Caption Cue**:
-One editable, optionally enabled text interval within a Caption Track. It preserves recognized text, alternatives, confidence, and only the timing granularity supplied by recognition or review.
-
-**Caption Projection**:
-The portion of a Take's Caption Track that maps through a Timeline Clip's Clip Selection into Project Time.
-
-**Caption Timeline Issue**:
-A review requirement created when a structural Storyline edit makes a Caption Cue semantically unsafe to project. The affected caption stays out of export until explicitly reapproved.
-
-**Stale Caption Track**:
-A Caption Track whose Take source or Project locale no longer matches current Project metadata. It remains recoverable for review but cannot enter approved preview or Project Export.
+One editable, optionally enabled Project Time interval within the locked Caption Track. It preserves recognized text, alternatives, confidence, and only the timing granularity supplied by recognition or review.
 
 ## Export and deletion
 
