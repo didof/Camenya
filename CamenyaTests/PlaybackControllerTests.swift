@@ -4,6 +4,80 @@ import XCTest
 
 @MainActor
 final class PlaybackControllerTests: XCTestCase {
+    func testFailedTrimRequestRetainsItsFinishTrimCompletionOnRetry() {
+        let request = TimelineEditRequest(
+            edit: .trim(
+                clipID: TimelineClip.ID(),
+                selection: TakeRange(startSeconds: 1, endSeconds: 4)
+            ),
+            completion: .finishTrim
+        )
+
+        XCTAssertEqual(request.retryRequest, request)
+        XCTAssertEqual(request.retryRequest.completion, .finishTrim)
+    }
+
+    func testTrimFrameSamplingCoversAvailableRangeWithoutCrossingItsEdges() {
+        XCTAssertEqual(
+            TimelineTrimFrameSampling.sourceTimes(
+                in: TakeRange(startSeconds: 4, endSeconds: 12),
+                count: 4
+            ).map(\.seconds),
+            [5, 7, 9, 11]
+        )
+    }
+
+    func testTrimFrameLoaderPreservesFailedTemporalSlots() async {
+        let loader = TimelineTrimFrameLoader { _, time in
+            time.seconds == 7 ? nil : Data([UInt8(time.seconds)])
+        }
+
+        let frames = await loader.frameData(
+            movieURL: URL(fileURLWithPath: "/tmp/not-read-by-provider.mov"),
+            availableRange: TakeRange(startSeconds: 4, endSeconds: 12),
+            count: 4
+        )
+
+        XCTAssertEqual(frames.count, 4)
+        XCTAssertEqual(frames[0], Data([5]))
+        XCTAssertNil(frames[1])
+        XCTAssertEqual(frames[2], Data([9]))
+        XCTAssertEqual(frames[3], Data([11]))
+    }
+
+    func testTrimSessionKeepsCandidateTransientUntilDone() {
+        let clipID = TimelineClip.ID()
+        var session = TimelineTrimSession(
+            clipID: clipID,
+            availableRange: TakeRange(startSeconds: 0, endSeconds: 10),
+            selection: TakeRange(startSeconds: 1, endSeconds: 9)
+        )
+
+        session.update(edge: .start, to: 2)
+        session.update(edge: .end, to: 8)
+
+        XCTAssertEqual(session.originalSelection, TakeRange(startSeconds: 1, endSeconds: 9))
+        XCTAssertEqual(session.candidateSelection, TakeRange(startSeconds: 2, endSeconds: 8))
+        XCTAssertEqual(
+            session.commitEdit,
+            .trim(clipID: clipID, selection: TakeRange(startSeconds: 2, endSeconds: 8))
+        )
+        XCTAssertEqual(session.cancelledSelection, session.originalSelection)
+    }
+
+    func testTrimSessionClampsCandidateToAvailableRangeAndMinimumDuration() {
+        var session = TimelineTrimSession(
+            clipID: TimelineClip.ID(),
+            availableRange: TakeRange(startSeconds: 4, endSeconds: 12),
+            selection: TakeRange(startSeconds: 5, endSeconds: 11)
+        )
+
+        session.update(edge: .start, to: 20)
+        XCTAssertEqual(session.candidateSelection, TakeRange(startSeconds: 10, endSeconds: 11))
+        session.update(edge: .end, to: -2)
+        XCTAssertEqual(session.candidateSelection, TakeRange(startSeconds: 10, endSeconds: 11))
+    }
+
     func testReorderDragUsesNeighborCentersWithVariableClipWidths() {
         let widths: [CGFloat] = [96, 192, 48]
 
@@ -45,6 +119,44 @@ final class PlaybackControllerTests: XCTestCase {
             translation: 10,
             widths: [48, 0]
         ))
+    }
+
+    func testReorderAutoScrollActivatesOnlyInsideViewportEdges() {
+        XCTAssertEqual(
+            TimelineReorderAutoScroll.projectTimeDelta(
+                locationX: 20,
+                viewportWidth: 390
+            ),
+            -0.15,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            TimelineReorderAutoScroll.projectTimeDelta(
+                locationX: 370,
+                viewportWidth: 390
+            ),
+            0.15,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            TimelineReorderAutoScroll.projectTimeDelta(
+                locationX: 195,
+                viewportWidth: 390
+            ),
+            0,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            TimelineReorderAutoScroll.projectTimeDelta(
+                locationX: 370,
+                viewportWidth: 390,
+                elapsed: 0.5
+            ),
+            1.5,
+            accuracy: 0.001
+        )
+        XCTAssertTrue(TimelineReorderAutoScroll.usesContinuousDriver(reduceMotion: false))
+        XCTAssertFalse(TimelineReorderAutoScroll.usesContinuousDriver(reduceMotion: true))
     }
 
     func testPlaybackSessionStartsFromImmutableSnapshotAtFirstClip() {
@@ -148,6 +260,30 @@ final class PlaybackControllerTests: XCTestCase {
         XCTAssertFalse(session.state.isPlaying)
     }
 
+    func testTrimPlayEvaluatesOnlyCandidateAndStopsWithoutAdvancingStoryline() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let movieURL = root.appendingPathComponent("trim-play.mov")
+        try await makeMovie(at: movieURL)
+        let snapshot = makeSnapshot(mediaURL: movieURL)
+        let session = TimelinePlaybackSession(snapshot: snapshot)
+        await waitForPhase(.paused, in: session)
+
+        session.playTrimPreview(
+            clipID: snapshot.clips[0].id,
+            selection: TakeRange(startSeconds: 0.2, endSeconds: 0.5)
+        )
+
+        await waitUntil("The candidate preview should stop at its end") {
+            session.state.phase == .completed
+        }
+        XCTAssertEqual(session.state.selectedClipID, snapshot.clips[0].id)
+        XCTAssertFalse(session.state.isPlaying)
+        XCTAssertEqual(session.currentSnapshot, snapshot)
+    }
+
     func testPlaybackSessionCanOpenAtRequestedClip() {
         let snapshot = makeSnapshot(durations: [2, 3, 4])
 
@@ -158,6 +294,19 @@ final class PlaybackControllerTests: XCTestCase {
 
         XCTAssertEqual(session.state.selectedClipID, snapshot.clips[1].id)
         XCTAssertEqual(session.state.playhead, snapshot.clips[1].projectTimeRange.start)
+    }
+
+    func testPlaybackSessionRestoresRequestedProjectTimeContext() {
+        let snapshot = makeSnapshot(durations: [2, 3, 4])
+
+        let session = TimelinePlaybackSession(
+            snapshot: snapshot,
+            initialSelectedClipID: snapshot.clips[1].id,
+            initialProjectTime: ProjectTime(seconds: 3.5)
+        )
+
+        XCTAssertEqual(session.state.selectedClipID, snapshot.clips[1].id)
+        XCTAssertEqual(session.state.playhead, ProjectTime(seconds: 3.5))
     }
 
     func testReplacingSnapshotAfterDraftPreviewRestoresCommittedTrim() async throws {
