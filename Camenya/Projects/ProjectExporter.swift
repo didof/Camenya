@@ -169,7 +169,10 @@ final class ProjectExporter {
             cursor = CMTimeAdd(cursor, duration)
         }
 
-        guard let exporter = AVAssetExportSession(asset: composition, presetName: AVAssetExportPreset1920x1080) else {
+        guard let exporter = AVAssetExportSession(
+            asset: composition,
+            presetName: AVAssetExportPresetHEVCHighestQuality
+        ) else {
             throw ProjectExportError.exportUnavailable
         }
         exporter.videoComposition = normalizedVideoComposition(

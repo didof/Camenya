@@ -4,6 +4,48 @@ import XCTest
 @testable import Camenya
 
 final class TakeTrimAnalyzerTests: XCTestCase {
+    @MainActor
+    func testTrimWaveformRequestRunsOutsideRecorderIdleAndCachesTheResult() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let source = root.appendingPathComponent("source.mov")
+        try Data("movie fixture supplied to fake analyzer".utf8).write(to: source)
+        let takeID = UUID()
+        let withTake = try store.addTake(
+            projectID: project.id,
+            takeID: takeID,
+            movieAt: source,
+            orientation: .portrait,
+            duration: 4,
+            createdAt: Date()
+        )
+        let model = AppModel(
+            project: withTake,
+            projectStore: store,
+            trimAnalysisProvider: { _ in
+                TakeTrimAnalysisOutput(
+                    result: .noSuggestion(.negligibleSaving),
+                    envelope: [0.1, 0.8, 0.3]
+                )
+            }
+        )
+
+        XCTAssertEqual(model.phase, .configuring)
+        await model.prepareTrimWaveform(takeID: takeID)
+
+        let take = try XCTUnwrap(model.project.takes.first { $0.id == takeID })
+        XCTAssertEqual(model.trimEnvelope(for: take), [0.1, 0.8, 0.3])
+        XCTAssertEqual(
+            try store.trimEnvelope(projectID: project.id, takeID: takeID),
+            [0.1, 0.8, 0.3]
+        )
+        XCTAssertNil(model.trimWaveformError(for: takeID))
+        XCTAssertFalse(model.isPreparingTrimWaveform(for: takeID))
+    }
+
     func testAnalyzerDecodesLocalPCMAndFindsSpokenEdges() async throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).mov")
         defer { try? FileManager.default.removeItem(at: url) }

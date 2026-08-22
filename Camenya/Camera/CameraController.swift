@@ -25,6 +25,22 @@ enum CameraControllerError: Error, LocalizedError {
     }
 }
 
+enum CaptureRecordingOutputPolicy {
+    static func settings(
+        availableVideoCodecTypes: [AVVideoCodecType]
+    ) -> [String: Any]? {
+        let codec: AVVideoCodecType
+        if availableVideoCodecTypes.contains(.hevc) {
+            codec = .hevc
+        } else if availableVideoCodecTypes.contains(.h264) {
+            codec = .h264
+        } else {
+            return nil
+        }
+        return [AVVideoCodecKey: codec]
+    }
+}
+
 struct CameraPermissions {
     static func requestRequiredAccess() async -> Bool {
         let camera = await request(.video)
@@ -222,15 +238,10 @@ final class CameraController: NSObject, @unchecked Sendable {
             if connection.isVideoRotationAngleSupported(rotationAngle) { connection.videoRotationAngle = rotationAngle }
             connection.automaticallyAdjustsVideoMirroring = false
             if connection.isVideoMirroringSupported { connection.isVideoMirrored = false }
-            if self.movieOutput.availableVideoCodecTypes.contains(.h264) {
-                self.movieOutput.setOutputSettings([
-                    AVVideoCodecKey: AVVideoCodecType.h264,
-                    AVVideoColorPropertiesKey: [
-                        AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
-                        AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
-                        AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2
-                    ]
-                ], for: connection)
+            if let settings = CaptureRecordingOutputPolicy.settings(
+                availableVideoCodecTypes: self.movieOutput.availableVideoCodecTypes
+            ) {
+                self.movieOutput.setOutputSettings(settings, for: connection)
             }
             self.logger.info("Starting segment at \(url.lastPathComponent, privacy: .public)")
             self.movieOutput.startRecording(to: url, recordingDelegate: self)

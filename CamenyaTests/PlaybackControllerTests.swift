@@ -78,85 +78,128 @@ final class PlaybackControllerTests: XCTestCase {
         XCTAssertEqual(session.candidateSelection, TakeRange(startSeconds: 10, endSeconds: 11))
     }
 
-    func testReorderDragUsesNeighborCentersWithVariableClipWidths() {
-        let widths: [CGFloat] = [96, 192, 48]
+    func testTrimSessionSupportsFineAndCoarseNudgesAsSeparateCommands() {
+        var session = TimelineTrimSession(
+            clipID: TimelineClip.ID(),
+            availableRange: TakeRange(startSeconds: 0, endSeconds: 10),
+            selection: TakeRange(startSeconds: 1, endSeconds: 9)
+        )
 
-        XCTAssertEqual(
-            TimelineReorderRules.destinationIndex(moving: 1, translation: -143, widths: widths),
-            1
-        )
-        XCTAssertEqual(
-            TimelineReorderRules.destinationIndex(moving: 1, translation: -144, widths: widths),
-            0
-        )
-        XCTAssertEqual(
-            TimelineReorderRules.destinationIndex(moving: 1, translation: 119, widths: widths),
-            1
-        )
-        XCTAssertEqual(
-            TimelineReorderRules.destinationIndex(moving: 1, translation: 120, widths: widths),
-            2
-        )
-        XCTAssertEqual(
-            TimelineReorderRules.destinationIndex(moving: 2, translation: -264, widths: widths),
-            0
-        )
+        session.nudge(edge: .start, direction: .later, seconds: 0.01)
+        XCTAssertEqual(session.candidateSelection.start.seconds, 1.01, accuracy: 0.0001)
+
+        session.nudge(edge: .end, direction: .earlier, seconds: 0.1)
+        XCTAssertEqual(session.candidateSelection.end.seconds, 8.9, accuracy: 0.0001)
     }
 
-    func testReorderDragRejectsInvalidGeometry() {
-        XCTAssertNil(TimelineReorderRules.destinationIndex(
-            moving: 2,
-            translation: 10,
-            widths: [48, 48]
+    func testStepMoveOffersOnlyValidAdjacentDestinations() {
+        XCTAssertNil(TimelineStepMoveRules.destinationIndex(
+            currentIndex: 0,
+            offset: -1,
+            clipCount: 3
         ))
-        XCTAssertNil(TimelineReorderRules.destinationIndex(
-            moving: 0,
-            translation: .infinity,
-            widths: [48, 48]
-        ))
-        XCTAssertNil(TimelineReorderRules.destinationIndex(
-            moving: 0,
-            translation: 10,
-            widths: [48, 0]
+        XCTAssertEqual(TimelineStepMoveRules.destinationIndex(
+            currentIndex: 1,
+            offset: -1,
+            clipCount: 3
+        ), 0)
+        XCTAssertEqual(TimelineStepMoveRules.destinationIndex(
+            currentIndex: 1,
+            offset: 1,
+            clipCount: 3
+        ), 2)
+        XCTAssertNil(TimelineStepMoveRules.destinationIndex(
+            currentIndex: 2,
+            offset: 1,
+            clipCount: 3
         ))
     }
 
-    func testReorderAutoScrollActivatesOnlyInsideViewportEdges() {
+    func testFilmstripViewportKeepsPlayheadCenteredForLongStorylines() {
+        let layout = TimelineFilmstripViewportLayout(viewportWidth: 390)
+
+        XCTAssertEqual(layout.playheadX, 195, accuracy: 0.001)
+        XCTAssertEqual(layout.contentLeadingEdge(projectOffset: 620), -425, accuracy: 0.001)
+    }
+
+    func testFilmstripBeginningAlignsWithPlayheadRegardlessOfContentWidth() {
+        let layout = TimelineFilmstripViewportLayout(viewportWidth: 390)
+        let contentWidth: CGFloat = 600
+
         XCTAssertEqual(
-            TimelineReorderAutoScroll.projectTimeDelta(
-                locationX: 20,
-                viewportWidth: 390
-            ),
-            -0.15,
+            layout.contentCenterX(contentWidth: contentWidth, projectOffset: 0),
+            layout.playheadX + contentWidth / 2,
             accuracy: 0.001
         )
         XCTAssertEqual(
-            TimelineReorderAutoScroll.projectTimeDelta(
-                locationX: 370,
-                viewportWidth: 390
+            layout.contentCenterX(
+                contentWidth: contentWidth,
+                projectOffset: contentWidth
             ),
-            0.15,
+            layout.playheadX - contentWidth / 2,
             accuracy: 0.001
         )
+
+        let playbackOffset: CGFloat = 250
+        let contentCenter = layout.contentCenterX(
+            contentWidth: contentWidth,
+            projectOffset: playbackOffset
+        )
+        let contentOrigin = contentCenter - contentWidth / 2
         XCTAssertEqual(
-            TimelineReorderAutoScroll.projectTimeDelta(
-                locationX: 195,
-                viewportWidth: 390
-            ),
-            0,
-            accuracy: 0.001
+            contentOrigin + playbackOffset,
+            layout.playheadX,
+            accuracy: 0.001,
+            "The current playback time must remain directly under the fixed Playhead."
         )
+    }
+
+    func testFilmstripTapPlacesPlayheadAtTheTouchedPointInsideTheClip() {
+        let range = ProjectTimeRange(
+            start: ProjectTime(seconds: 10),
+            end: ProjectTime(seconds: 15)
+        )
+
         XCTAssertEqual(
-            TimelineReorderAutoScroll.projectTimeDelta(
-                locationX: 370,
-                viewportWidth: 390,
-                elapsed: 0.5
+            TimelineFilmstripTapRules.projectTime(
+                inside: range,
+                locationX: 100,
+                width: 250
             ),
-            1.5,
-            accuracy: 0.001
+            ProjectTime(seconds: 12)
         )
-        XCTAssertTrue(TimelineReorderAutoScroll.usesContinuousDriver(reduceMotion: false))
-        XCTAssertFalse(TimelineReorderAutoScroll.usesContinuousDriver(reduceMotion: true))
+        XCTAssertNil(TimelineFilmstripTapRules.projectTime(
+            inside: range,
+            locationX: 100,
+            width: 0
+        ))
+    }
+
+    func testSplitRequiresOneSecondOfSelectedMediaOnBothSidesOfPlayhead() {
+        let selection = TakeRange(startSeconds: 3, endSeconds: 8)
+        let projectRange = ProjectTimeRange(
+            start: ProjectTime(seconds: 10),
+            end: ProjectTime(seconds: 15)
+        )
+
+        XCTAssertNil(TimelineSplitRules.sourceTime(
+            selection: selection,
+            projectTimeRange: projectRange,
+            at: ProjectTime(seconds: 10.9)
+        ))
+        XCTAssertEqual(
+            TimelineSplitRules.sourceTime(
+                selection: selection,
+                projectTimeRange: projectRange,
+                at: ProjectTime(seconds: 12)
+            ),
+            MediaTime(seconds: 5)
+        )
+        XCTAssertNil(TimelineSplitRules.sourceTime(
+            selection: selection,
+            projectTimeRange: projectRange,
+            at: ProjectTime(seconds: 14.1)
+        ))
     }
 
     func testPlaybackSessionStartsFromImmutableSnapshotAtFirstClip() {
@@ -182,18 +225,6 @@ final class PlaybackControllerTests: XCTestCase {
         XCTAssertEqual(session.state.playhead.seconds, 2, accuracy: 0.001)
         XCTAssertEqual(session.state.selectedClipID, snapshot.clips[1].id)
         XCTAssertEqual(session.state.selectedClipOrdinal, 2)
-        XCTAssertFalse(session.state.isPlaying)
-    }
-
-    func testSelectingClipForReorderPreservesPlayheadPosition() {
-        let snapshot = makeSnapshot(durations: [2, 3])
-        let session = TimelinePlaybackSession(snapshot: snapshot)
-        session.send(.seek(ProjectTime(seconds: 1)))
-
-        session.send(.selectClipForEditing(snapshot.clips[1].id))
-
-        XCTAssertEqual(session.state.playhead, ProjectTime(seconds: 1))
-        XCTAssertEqual(session.state.selectedClipID, snapshot.clips[1].id)
         XCTAssertFalse(session.state.isPlaying)
     }
 
@@ -426,13 +457,14 @@ final class PlaybackControllerTests: XCTestCase {
     }
 
     func testPlaybackSessionCarriesImmutableFilmstripPresentationMetadata() {
+        let mediaURL = URL(fileURLWithPath: "/tmp/clip.mov")
         let thumbnailURL = URL(fileURLWithPath: "/tmp/clip-thumbnail.jpg")
         let sourceCreatedAt = Date(timeIntervalSince1970: 1_700_000_000)
         let range = TakeRange(startSeconds: 0, endSeconds: 3)
         let clip = ExportSnapshot.Clip(
             id: TimelineClip.ID(),
             takeID: UUID(),
-            mediaURL: URL(fileURLWithPath: "/tmp/clip.mov"),
+            mediaURL: mediaURL,
             thumbnailURL: thumbnailURL,
             sourceCreatedAt: sourceCreatedAt,
             sourceRange: range,
@@ -456,6 +488,7 @@ final class PlaybackControllerTests: XCTestCase {
             TimelinePlaybackSession.FilmstripClip(
                 id: clip.id,
                 projectTimeRange: clip.projectTimeRange,
+                mediaURL: mediaURL,
                 thumbnailURL: thumbnailURL,
                 sourceCreatedAt: sourceCreatedAt,
                 availableRange: range,
@@ -464,6 +497,27 @@ final class PlaybackControllerTests: XCTestCase {
                 isMuted: true
             )
         ])
+    }
+
+    func testFilmstripFrameSamplingKeepsPortraitTilesReadableWithoutUnboundedDecoding() {
+        let short = TimelineFilmstripFrameSampling.metrics(
+            width: 180,
+            height: 80,
+            frameAspectRatio: 9.0 / 16.0
+        )
+        XCTAssertEqual(short.tileCount, 4)
+        XCTAssertEqual(short.sampleCount, 4)
+        XCTAssertEqual((0..<short.tileCount).map(short.sampleIndex(forTile:)), [0, 1, 2, 3])
+
+        let long = TimelineFilmstripFrameSampling.metrics(
+            width: 3_600,
+            height: 80,
+            frameAspectRatio: 9.0 / 16.0
+        )
+        XCTAssertEqual(long.tileCount, 80)
+        XCTAssertEqual(long.sampleCount, 64)
+        XCTAssertEqual(long.sampleIndex(forTile: 0), 0)
+        XCTAssertEqual(long.sampleIndex(forTile: 79), 63)
     }
 
     func testEmptyPlaybackSessionIgnoresPlaybackAndSeekIntents() {

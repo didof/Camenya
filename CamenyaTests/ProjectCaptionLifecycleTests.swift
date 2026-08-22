@@ -2,6 +2,26 @@ import XCTest
 @testable import Camenya
 
 final class ProjectCaptionLifecycleTests: XCTestCase {
+    @MainActor
+    func testReopenedWorkspaceCanCreateCaptionsBeforeEnteringCapture() throws {
+        let fixture = try makeProjectWithTwoTakes()
+        let readyProject = try fixture.store.load(id: fixture.project.id)
+        let model = AppModel(project: readyProject, projectStore: fixture.store)
+
+        XCTAssertEqual(model.phase, .configuring)
+        XCTAssertTrue(model.isReadyForPictureLock)
+
+        let created = model.createProjectCaptions(configuration: ProjectCaptionConfiguration(
+            localeIdentifier: "en-US",
+            placement: .lower
+        ))
+
+        XCTAssertTrue(created)
+        XCTAssertNotNil(model.project.pictureLock)
+        XCTAssertTrue(model.isTranscribingCaptions)
+        XCTAssertTrue(model.cancelProjectCaptionGeneration())
+    }
+
     func testCaptionedExportRequiresCompletedReviewAndCaptionTimeline() async throws {
         let fixture = try makeProjectWithTwoTakes()
         let locked = try fixture.store.createPictureLock(
@@ -19,7 +39,7 @@ final class ProjectCaptionLifecycleTests: XCTestCase {
         ))
     }
 
-    func testPictureLockRequiresEveryActiveTakeToFinishPreparation() throws {
+    func testPictureLockDoesNotRequireOptionalEdgeCleanup() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
@@ -34,12 +54,12 @@ final class ProjectCaptionLifecycleTests: XCTestCase {
             createdAt: Date()
         )
 
-        XCTAssertThrowsError(try store.createPictureLock(
+        _ = try store.markStorylineChecked(projectID: project.id)
+
+        XCTAssertNoThrow(try store.createPictureLock(
             projectID: project.id,
             configuration: ProjectCaptionConfiguration(localeIdentifier: "en-US", placement: .lower)
-        )) { error in
-            XCTAssertEqual(error as? ProjectStoreError, .projectNotReadyForPictureLock)
-        }
+        ))
     }
 
     func testPictureLockRequiresTheCurrentStorylineToBeChecked() throws {
@@ -57,12 +77,6 @@ final class ProjectCaptionLifecycleTests: XCTestCase {
             duration: 4,
             createdAt: Date()
         )
-        _ = try store.setTrimDecision(
-            projectID: project.id,
-            takeID: takeID,
-            decision: .keepOriginal
-        )
-
         XCTAssertThrowsError(try store.createPictureLock(
             projectID: project.id,
             configuration: ProjectCaptionConfiguration(localeIdentifier: "en-US", placement: .lower)
@@ -456,6 +470,52 @@ final class ProjectCaptionLifecycleTests: XCTestCase {
             TakeRange(startSeconds: 5.5, endSeconds: 6.5)
         ])
         XCTAssertEqual(snapshot.clips.map(\.id), locked.pictureLock?.clips.map(\.id))
+    }
+
+    @MainActor
+    func testUnlockImmediatelyRemovesCaptionsFromThePublishedPreviewSnapshot() async throws {
+        let fixture = try makeProjectWithTwoTakes()
+        let locked = try fixture.store.createPictureLock(
+            projectID: fixture.project.id,
+            configuration: ProjectCaptionConfiguration(localeIdentifier: "it-IT", placement: .lower)
+        )
+        for region in try XCTUnwrap(locked.projectCaptionTrack).regions {
+            _ = try fixture.store.recordProjectCaptionRegion(
+                projectID: fixture.project.id,
+                regionID: region.id,
+                draft: TakeCaptionTrack(
+                    localeIdentifier: region.localeIdentifier,
+                    sourceRange: region.sourceRange,
+                    recognizer: .speechRecognizerIOS18,
+                    reviewState: .needsReview,
+                    cues: [CaptionCue(
+                        range: TakeRange(
+                            startSeconds: region.sourceRange.start.seconds,
+                            endSeconds: min(
+                                region.sourceRange.end.seconds,
+                                region.sourceRange.start.seconds + 1
+                            )
+                        ),
+                        recognizedText: "Visible caption",
+                        text: "Visible caption",
+                        confidence: 1,
+                        alternatives: [],
+                        timedSpans: []
+                    )]
+                )
+            )
+        }
+        let approved = try fixture.store.approveProjectCaptionTrack(projectID: fixture.project.id)
+        let model = AppModel(project: approved, projectStore: fixture.store)
+        for _ in 0..<100 where model.timelinePlaybackSnapshot?.captionTimeline == nil {
+            await Task.yield()
+        }
+        XCTAssertNotNil(model.timelinePlaybackSnapshot?.captionTimeline)
+
+        XCTAssertTrue(model.unlockPictureLock())
+
+        XCTAssertNil(model.timelinePlaybackSnapshot?.captionTimeline)
+        XCTAssertNil(model.project.projectCaptionTrack)
     }
 
     private func makeProjectWithTwoTakes() throws -> (

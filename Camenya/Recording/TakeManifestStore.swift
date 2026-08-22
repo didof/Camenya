@@ -53,7 +53,7 @@ struct TakeManifestStore: Sendable {
         let directories = (try? FileManager.default.contentsOfDirectory(at: recordingsRoot, includingPropertiesForKeys: nil)) ?? []
         return directories.compactMap { UUID(uuidString: $0.lastPathComponent) }
             .compactMap { try? load(id: $0) }
-            .filter { $0.status != .completed }
+            .filter { $0.status != .completed && !$0.segments.isEmpty }
             .sorted { $0.createdAt < $1.createdAt }
     }
 

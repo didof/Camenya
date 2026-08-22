@@ -58,12 +58,12 @@ Redesign the complete Camenya experience around a calm, native iPhone hierarchy 
 
 - The Workspace opens in View mode with the current Primary Storyline as its dominant content.
 - The portrait viewer is the dominant View-mode surface and exposes Play or Pause as a direct overlay instead of adding a separate permanent transport panel.
-- The complete Storyline overview sits immediately below the viewer.
+- A horizontally navigable Storyline filmstrip with a fixed Playhead sits immediately below the viewer.
 - Edit is a standard textual toolbar action rather than one of several competing bottom buttons.
-- Prepare Project appears as one compact status row only while derived preparation work exists; the row disappears when the Project is ready.
+- Review Before Captions appears as one compact status row only while the current Storyline revision still needs confirmation; the row disappears after confirmation.
 - New Take is the only large bottom action in View mode.
 - Project Export uses the familiar system share symbol in the navigation toolbar rather than competing with New Take as another large call to action.
-- View mode keeps playback essential, the Storyline compact, and explanatory text exceptional.
+- View mode keeps playback essential, the Storyline readable at a stable temporal scale, and explanatory text exceptional.
 - An explicit Edit action enters a dedicated editing mode.
 - Edit mode preserves viewer and Storyline context while revealing only controls relevant to the selected Clip and current operation.
 - Done returns to View mode.
@@ -74,10 +74,10 @@ Redesign the complete Camenya experience around a calm, native iPhone hierarchy 
 - Entering Edit transforms the current Workspace in place instead of navigating to a disconnected editor.
 - The Edit toolbar replaces Edit with Done and preserves the Project identity and current media context.
 - The portrait viewer remains visible but contracts enough to give the Storyline a practical precision-editing region.
-- The complete overview expands into the detailed horizontally navigable filmstrip, with the fixed Playhead and current Project Time clearly related.
+- The View-mode filmstrip remains in place and gains editing affordances, with the fixed Playhead and current Project Time clearly related.
 - The selected Clip is visually primary while adjacent Clip context remains visible.
 - The persistent contextual tool row contains only Trim, Split, and More.
-- New Take, Prepare Project, and Project Export leave the editing surface until Done returns to View mode.
+- New Take, Review Before Captions, and Project Export leave the editing surface until Done returns to View mode.
 - Viewer Play and Pause remain available so a cut can be evaluated across neighboring Clips without leaving Edit.
 
 ### Edit-mode timeline scale
@@ -98,7 +98,8 @@ Redesign the complete Camenya experience around a calm, native iPhone hierarchy 
 
 ### Project menu and secondary media
 
-- A restrained chevron adjacent to the Project title opens a native menu containing Rename, Project Note, Project Media, and Delete Project.
+- The Workspace omits the auto-generated Project title so it cannot collide with leading and trailing toolbar actions on a narrow iPhone.
+- A standard trailing More menu contains Rename, Project Note, Project Media, and Delete Project.
 - Project Media uses one compact native list with Removed Clips, Unused Takes, and Used Takes sections rather than a second visual dashboard.
 - A media row prioritizes its thumbnail and duration; permanent action buttons do not repeat on every row.
 - Contextual actions preview media, restore a Removed Clip, add an Unused Take to the Storyline, or permanently delete only an unreferenced Take after confirmation.
@@ -107,9 +108,11 @@ Redesign the complete Camenya experience around a calm, native iPhone hierarchy 
 
 ### Project Note persistence
 
-- Project Note opens in a native sheet from the Project-title menu and retains the compact Capture access already defined.
+- Project Note opens in a native sheet from the Workspace More menu and retains the compact Capture access already defined.
 - Text saves locally as it changes; Done closes the sheet without adding a redundant Save action.
 - A persistence failure never clears the current in-memory text and provides one concise Retry path.
+- The active Project session remembers the cursor and vertical reading position when the sheet closes, so reopening a long script between Segments returns to the same place.
+- Opening an existing note does not force the keyboard; explicit interaction enters text editing while passive opening remains a useful reading surface.
 
 ### View-mode playback
 
@@ -123,17 +126,19 @@ Redesign the complete Camenya experience around a calm, native iPhone hierarchy 
 
 ### Storyline visibility
 
-- View mode fits the complete Primary Storyline into one overview so the user can understand the order and relative duration of all active Timeline Clips at a glance.
+- View mode keeps Timeline Clips at a readable time-proportional scale and lets the user scrub the Storyline horizontally beneath a fixed Playhead.
 - Selecting a Clip identifies it without immediately exposing every editing control.
-- Edit mode expands the same Storyline into a horizontally navigable, time-proportional filmstrip centered around the selected Clip.
+- Edit mode preserves the same horizontally navigable, time-proportional filmstrip centered around the selected Clip and adds structural editing gestures.
 - The Edit mode Playhead remains fixed while the Storyline moves beneath it.
 - Only the selected Clip and its useful neighboring context need to remain fully legible at editing scale; the Workspace still communicates its position in the complete Storyline.
-- Returning to View mode restores the complete Storyline overview.
+- Returning to View mode preserves the current Storyline position while removing structural editing gestures.
 
 ### View-mode Storyline appearance
 
-- Each active Clip is represented primarily by sampled source imagery rather than a permanent text label.
-- Clip widths communicate relative selected duration across the complete Storyline; boundaries remain visually explicit.
+- Each active Clip is represented by evenly sampled source imagery repeated in fixed-aspect tiles rather than one stretched thumbnail or a permanent text label.
+- Clip widths communicate selected duration at a stable temporal scale; the filmstrip scrolls instead of compressing short Clips below a useful width, and boundaries remain visually explicit.
+- The fixed Playhead is visible in View and Edit modes and the Storyline moves beneath it during scrubbing and playback.
+- At Project Time zero the first frame begins under the centered Playhead with half a viewport of leading breathing room; at the final Project Time the last frame ends under it with matching trailing room.
 - The selected Clip receives the only persistent selection outline.
 - A concise label adjacent to the overview identifies the current selection, for example `Clip 3 of 8 · 12 s`, instead of repeating name, index, and duration inside every Clip.
 - Missing preparation may add one restrained state indicator to the affected Clip; captions, trim, warning, source, and duration icons do not accumulate into a badge stack.
@@ -148,11 +153,11 @@ Redesign the complete Camenya experience around a calm, native iPhone hierarchy 
 ### Reordering Timeline Clips
 
 - Reordering is available in Edit mode, not in View mode.
-- A tap selects a Clip; a deliberate press-and-hold lifts it for drag-and-drop reordering.
-- The Storyline shows an unambiguous insertion gap, scrolls when the lifted Clip approaches an edge, and preserves the lifted state until placement or cancellation.
-- Releasing at a valid destination commits exactly one atomic Storyline edit and produces restrained haptic feedback.
+- A tap selects a Clip and moves the fixed Playhead to the exact touched frame.
+- Visible Move Left and Move Right controls move the selected Clip by exactly one adjacent position, independent of Clip duration.
+- The corresponding control is disabled only when the selected Clip is already at that Storyline boundary or while an edit is committing.
+- Reordering does not use press-and-hold, drag-and-drop, insertion gaps, or edge auto-scroll.
 - Session Undo reverses the complete reorder operation.
-- Move Earlier and Move Later remain available as named contextual and accessibility alternatives without occupying the permanent editing surface.
 
 ### Splitting a Timeline Clip
 
@@ -160,7 +165,9 @@ Redesign the complete Camenya experience around a calm, native iPhone hierarchy 
 - Split must be discoverable from the selected Clip's normal editing context rather than treated as an expert or hidden recovery command.
 - The interface must make the exact cut position, the two resulting Clip boundaries, the newly selected result, and the availability of Undo visually unmistakable.
 - In Edit mode, Split is a visible contextual action alongside Trim and More while one Clip is selected.
-- The fixed Playhead defines the exact split frame; the command requires at least one second of selected media on each side.
+- A high-contrast blue Playhead remains fixed at the Storyline viewport center while the media moves beneath it.
+- Tapping a Clip seeks the Playhead to that exact point; dragging the Storyline provides continuous scrubbing.
+- The Playhead defines the exact split frame; the command requires at least one second of selected media on each side.
 - An unavailable Split remains visible and provides a concise reason instead of disappearing.
 - A valid Split commits immediately without confirmation, pauses playback at the cut, selects the right resulting Clip, shows the new shared boundary, and produces restrained haptic and accessibility feedback.
 - Session Undo restores the original Clip as one complete operation.
@@ -187,10 +194,13 @@ Redesign the complete Camenya experience around a calm, native iPhone hierarchy 
 - The contextual chrome reduces to Cancel and Done while Trim is active.
 - Moving either handle updates the viewer at the relevant boundary without changing the persisted Clip Selection yet.
 - Done commits the complete before-and-after Selection change as one undoable edit; Cancel restores the exact Selection that existed on entry.
+- Storyline edits are available immediately when an existing Project opens in the Project Workspace; they do not require entering or configuring Capture first.
 - Trim presents a restrained audio waveform beneath the selected Clip's filmstrip so talking-head speech onset, pauses, and trailing noise are visually discoverable.
 - Camenya derives waveform samples locally from the finalized Take audio using AVFoundation and may cache only the reduced visualization data; the immutable source media remains unchanged.
 - The waveform is informative only: it does not create a separate audio selection, silently snap a trim, or imply silence removal.
 - Waveform generation is progressive and never blocks Trim. Until reduced samples are available, the complete visual trimming interaction remains usable.
+- Entering Trim requests the selected Clip's waveform independently of recorder state; a failed request is shown inline with Retry rather than as an unexplained empty track.
+- Fine adjustment uses explicit Start and End rows with spatial earlier/later controls. A single compact precision picker offers 0.01-second and 0.1-second steps, and each boundary displays hundredths while fine adjustment is available.
 - While a trim handle moves, the viewer follows the relevant boundary frame and audio remains silent; releasing a handle does not trigger automatic playback.
 - Play within Trim previews only the current candidate Clip Selection from its proposed beginning to end, then stops.
 - After Done exits Trim, Play again evaluates the complete active Storyline so neighboring edits can be judged in context.
@@ -205,30 +215,30 @@ Redesign the complete Camenya experience around a calm, native iPhone hierarchy 
 - Permanent Take deletion is available only from source-Take management, never from the normal Storyline editing surface.
 - Permanent deletion requires explicit confirmation and remains unavailable while any active or Removed Clip references the Take.
 
-### Project Preparation
+### Review before captions
 
-- Every selected Timeline Clip keeps a contextual entry point to its own trim and other pre-lock video work.
-- A global Prepare Project action derives one Preparation Queue from current Project state instead of storing a second mutable work list.
-- The queue contains only missing, unresolved, or explicitly requested pre-lock work and follows active Storyline order.
-- Adding a new Take adds only work owned by that Take, its new Clip, or the changed complete-Storyline check.
-- Captions do not participate in pre-lock Clip preparation and never constrain Trim, Split, Join, reorder, or recoverable removal.
-- Queue items can be approved, corrected, or skipped and remain reachable individually from their associated Clip or Take.
-- Ready to Lock presents Add Captions as an explicit optional final action while the standard Share action remains able to export the current video without captions.
+- Every selected Timeline Clip keeps a contextual entry point to Trim and other pre-lock video work.
+- The active Timeline Clip ranges and their Storyline order are the source of truth for the final video. Optional legacy Take edge-cleanup decisions never gate captions.
+- The captions toolbar action remains visible for every non-empty Storyline and always routes to the next understandable step.
+- Before the current Storyline revision is confirmed, that action enters Review Before Captions on the complete video.
+- Continue confirms the current Storyline revision, returns to the Workspace, and opens Create Captions automatically.
+- Once the current revision is confirmed, the same captions action opens Create Captions directly.
+- Create Captions is the explicit optional final action; the standard Share action remains able to export the current video without captions.
 - Exporting a clean video does not force Picture Lock or prompt repeatedly for captions; starting captions and exporting clean media are independent user choices.
 
 #### Guided sequence
 
-1. Prepare Project first enters Fix Clips and presents only missing or unresolved per-Clip trim work in active Storyline order.
-2. It then enters Check Video, which previews the complete current Storyline and surfaces only unresolved picture- or audio-editing issues.
-3. A Project with no remaining required work reaches Ready to Lock.
-4. Every review step presents one focused subject at a time with Continue and Skip.
-5. Adding a later Take reintroduces only work owned by that Take, its new Clip, or the changed complete-Storyline check.
+1. The captions action enters Review Before Captions when the current Storyline revision has not yet been confirmed.
+2. Review Before Captions previews the complete current Storyline at the current meaningful playback position.
+3. Continue confirms that exact revision and opens Create Captions automatically.
+4. Create Captions asks only for the default spoken language and clearly states that continuing locks the current edit.
+5. Any later structural Storyline change invalidates the confirmation and makes Review Before Captions the next step again.
 
 ### Caption generation setup and language
 
 - Caption setup no longer combines transcription status, language, visual placement, safety explanations, and destructive regeneration in one form.
-- Caption generation is an optional final-stage action available only after the current Primary Storyline is ready to become a Picture Lock.
-- The first post-lock caption-generation request presents one compact Create Captions sheet containing only the proposed spoken-language value, Cancel, and the primary Create Captions action.
+- Caption generation is an optional final-stage action reached through one always-visible captions control for every non-empty Primary Storyline.
+- The first caption-generation request presents one compact Create Captions sheet containing only the proposed spoken-language value, a concise Picture Lock explanation, Cancel, and the primary Create Captions action.
 - The chosen language becomes the Project's default caption language rather than inheriting invisibly from the iPhone forever.
 - Caption placement and visual style move to the visual caption editor, where their effect can be evaluated on the video.
 - Change Project Language and Regenerate Captions remain separate, explicitly confirmed actions because they can replace existing Project-Time text, timing, and manual corrections.
@@ -300,6 +310,8 @@ Redesign the complete Camenya experience around a calm, native iPhone hierarchy 
 - Minimal uses a semibold system face, no container, a protective shadow, and no word highlighting by default.
 - A secondary Customize disclosure offers only system, rounded, or serif system designs; Small, Standard, or Large size; a curated text-color palette; None, Colored Text, or Pill highlighting; a curated accent color; None, Shadow, or Rounded Box background; and three container-opacity levels.
 - Camenya provides Reset Style and prevents or automatically corrects combinations that fail the product's contrast requirement.
+- A named custom configuration can be saved as a reusable style and applied to another Project. The saved style contains presentation only: font design, size, colors, highlighting, background, and opacity; it never changes language, density, timing, or placement.
+- Saving again with the same name updates that saved style predictably, and saved styles can be deleted without changing Projects that already use their values.
 - Arbitrary fonts, unconstrained color pickers, freeform effect stacks, and precision sliders do not turn this focused editor into a general graphics application.
 - Word highlighting is available only while trustworthy word timing exists and never guesses the active token.
 
@@ -335,6 +347,7 @@ Redesign the complete Camenya experience around a calm, native iPhone hierarchy 
 ### Picture Lock and caption lifecycle
 
 - Create Captions first creates an explicit immutable Picture Lock from the current Primary Storyline and its source-audio decisions.
+- Picture Lock is not a separate user action: it is established by Create Captions after the current Storyline revision has been reviewed.
 - Recognition produces one Caption Track timed directly in Project Time against the complete locked narrative; no Caption Cue belongs to or projects through an individual Take.
 - Trim, Split, Join, reorder, recoverable removal, and New Take remain unrestricted before Picture Lock because no captions exist to reconcile during picture editing.
 - While the Picture Lock exists, structural Storyline controls are unavailable as ordinary immediate edits.
@@ -378,15 +391,18 @@ Redesign the complete Camenya experience around a calm, native iPhone hierarchy 
 - Completion opens the standard iOS share sheet, including its system Save Video action, without adding a separate success or celebration screen.
 - Only a finalized Project Export is passed to sharing or Photos; an in-app Take is never offered directly.
 - Export failure preserves every Take, Picture Lock, Caption Track, and generated output that remains valid and offers a concise Retry action.
+- Capture selects a 1080p-or-better 30 fps SDR format whenever the active device offers one, instead of trading resolution away for a lower-resolution capability match.
+- The finalized 1080-by-1920 portrait output uses the highest-quality HEVC export path available; caption burn-in remains one encode from immutable source Takes rather than an extra recompression generation.
 
 ### Locked Workspace presentation and unlock
 
 - Picture Lock does not replace the Workspace with a dashboard: the same viewer and Storyline remain the dominant surfaces.
-- One restrained lock symbol adjacent to the Project name communicates the locked state and exposes an accessible Video Locked value; no explanatory banner remains on screen.
+- The trailing Project menu changes from an ellipsis circle to one restrained lock circle while Picture Lock exists and exposes an accessible Video Locked value; no title or explanatory banner is needed.
 - A familiar captions symbol opens the post-lock caption editor and Share exports the current locked result.
 - New Take leaves the locked surface because adding source media necessarily changes picture; the standard edit symbol remains available as the route to unlock.
 - Choosing Edit Video explains that generated Caption Cues, timing, and manual caption corrections will be removed, while all Takes and every pre-lock Storyline edit remain intact.
 - Confirming unlock removes the Picture Lock and its derived Caption Track, restores New Take and structural editing, and enters Edit at the current meaningful Playhead context.
+- The published Workspace preview becomes captionless in the same state transition; it never waits for a later asynchronous snapshot refresh or displays obsolete Caption Cues over the unlocked Storyline.
 - Caption presentation preferences, Project default language, Take-language overrides, and text-density preference survive unlock so a later caption round starts with the user's established configuration.
 - A later Create Captions action forms a new Picture Lock and generates a new Project-Time Caption Track against the revised complete video.
 - Unlock does not retain a hidden stale Caption Track or attempt to merge obsolete caption edits into a later lock; the explicit warning is the recovery boundary.
@@ -407,7 +423,7 @@ Redesign the complete Camenya experience around a calm, native iPhone hierarchy 
 ### Idle Capture
 
 - Capture is an immersive portrait 9:16 live-preview mode with no Project Timeline, source management, preparation, or export controls.
-- The top chrome contains only Back and the Project name; readiness copy and status pills remain absent unless the user must act.
+- The top chrome contains Back and one restrained Capture Options control; the auto-generated Project title and legacy expandable Take shelf are absent.
 - The bottom chrome uses three stable positions modeled on familiar system camera controls: Project Note on the left, the dominant Record control in the center, and Flip on the right.
 - Project Note and Flip may use symbol-only controls with 44-point targets, precise accessibility names and hints, and unambiguous state; a restrained indicator may show that the Project Note contains text.
 - Record is the only visually dominant idle action and becomes unavailable when capture is not ready.
@@ -535,7 +551,7 @@ Redesign the complete Camenya experience around a calm, native iPhone hierarchy 
 
 ### Secondary Capture controls
 
-- The restrained chevron associated with the Project title opens a compact native Capture controls surface only while idle or paused.
+- A restrained Capture Options symbol opens a compact native controls surface only while idle or paused.
 - The surface contains Follow Subject and Low Light: Auto only when the current camera configuration supports them, plus an operational state only when it requires user attention.
 - Stabilization, continuous autofocus, continuous exposure, automatic white balance, face priority, and geometric correction remain automatic capability policy rather than user-facing toggles.
 - The controls surface closes before Record or Resume and leaves the active-Segment interface completely.
@@ -575,9 +591,9 @@ Redesign the complete Camenya experience around a calm, native iPhone hierarchy 
 
 - Dynamic Type applies to navigation, menus, workflow copy, transcript text, and named controls without obscuring the media surface.
 - VoiceOver identifies Clip order, duration, selection, preparation state, time position, and available actions.
-- Timeline, reorder, trim, and caption-timing gestures have named adjustable or contextual alternatives, and Switch Control can reach every required action.
+- Timeline, trim, and caption-timing gestures have named adjustable or contextual alternatives, and Switch Control can reach every required action. Reordering uses named controls directly.
 - Selection, readiness, warning, and failure never depend on color alone.
-- Reduce Motion replaces lift, zoom, and animated-scrolling transitions with restrained state changes while preserving insertion and selection clarity.
+- Reduce Motion replaces zoom transitions with restrained state changes while preserving Playhead and selection clarity.
 - Haptic feedback supplements visible and accessible state and is never the sole confirmation.
 
 ### Error and resource-state policy

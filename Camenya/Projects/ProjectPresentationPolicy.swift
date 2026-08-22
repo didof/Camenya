@@ -16,6 +16,22 @@ enum ProjectViewerPrimaryAction: Equatable, Sendable {
     case retryPreparation
 }
 
+enum ProjectCaptionWorkspaceAction: Equatable, Sendable {
+    case reviewVideo
+    case createCaptions
+    case openCaptionEditor
+}
+
+enum ProjectSpokenLanguageSource: Equatable, Sendable {
+    case projectDefault
+    case takeOverride
+}
+
+struct ProjectSpokenLanguagePresentation: Equatable, Sendable {
+    let effectiveIdentifier: String
+    let source: ProjectSpokenLanguageSource
+}
+
 enum ProjectPresentationPolicy {
     static func captionLanguageIdentifiers(
         including persistedIdentifiers: [String],
@@ -53,6 +69,31 @@ enum ProjectPresentationPolicy {
 
     static func viewerPrimaryAction(isPreparationFailed: Bool) -> ProjectViewerPrimaryAction {
         isPreparationFailed ? .retryPreparation : .togglePlayback
+    }
+
+    static func captionWorkspaceAction(
+        isPictureLocked: Bool,
+        isReadyForPictureLock: Bool
+    ) -> ProjectCaptionWorkspaceAction {
+        if isPictureLocked { return .openCaptionEditor }
+        return isReadyForPictureLock ? .createCaptions : .reviewVideo
+    }
+
+    static func spokenLanguagePresentation(
+        projectDefaultIdentifier: String,
+        takeOverrideIdentifier: String?
+    ) -> ProjectSpokenLanguagePresentation {
+        guard let override = takeOverrideIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !override.isEmpty else {
+            return ProjectSpokenLanguagePresentation(
+                effectiveIdentifier: projectDefaultIdentifier,
+                source: .projectDefault
+            )
+        }
+        return ProjectSpokenLanguagePresentation(
+            effectiveIdentifier: override,
+            source: .takeOverride
+        )
     }
 
     static func canAddFullTakeToStoryline(

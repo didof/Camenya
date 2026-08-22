@@ -62,7 +62,7 @@ struct TakeFinalizer {
             compositionVideo.preferredTransform = transform
         }
 
-        let preset = equivalentTransforms ? AVAssetExportPresetPassthrough : AVAssetExportPreset1920x1080
+        let preset = equivalentTransforms ? AVAssetExportPresetPassthrough : AVAssetExportPresetHEVCHighestQuality
         guard let exporter = AVAssetExportSession(asset: composition, presetName: preset) else {
             throw FinalizationError.exportUnavailable
         }

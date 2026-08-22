@@ -25,13 +25,13 @@ struct ProjectCaptionSetupSheet: View {
                 VStack(spacing: 6) {
                     Text("Create Captions")
                         .font(.title2.bold())
-                    Text("Choose the language spoken in this Project.")
+                    Text("Choose the Project default. Take overrides below take priority.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                 }
 
-                Picker("Spoken Language", selection: $localeIdentifier) {
+                Picker("Project Default Language", selection: $localeIdentifier) {
                     ForEach(languageIdentifiers, id: \.self) { identifier in
                         Text(Locale.current.localizedString(forIdentifier: identifier)
                             ?? identifier)
@@ -41,6 +41,35 @@ struct ProjectCaptionSetupSheet: View {
                 .pickerStyle(.menu)
                 .frame(maxWidth: .infinity, minHeight: 50)
                 .background(.background, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                if !takeLanguageOverrides.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Take Overrides")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        ForEach(takeLanguageOverrides.prefix(3)) { item in
+                            HStack {
+                                Text(item.title)
+                                Spacer()
+                                Text(languageName(item.identifier))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .font(.subheadline)
+                        }
+                        if takeLanguageOverrides.count > 3 {
+                            Text("And \(takeLanguageOverrides.count - 3) more")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(14)
+                    .background(.background, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
+
+                Text("Creating captions locks the current edit. Unlocking it later removes generated captions.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
 
                 Spacer(minLength: 0)
 
@@ -82,6 +111,29 @@ struct ProjectCaptionSetupSheet: View {
 
     private var languageIdentifiers: [String] {
         ProjectPresentationPolicy.captionLanguageIdentifiers(including: [localeIdentifier])
+    }
+
+    private struct TakeLanguageOverride: Identifiable {
+        let id: UUID
+        let title: String
+        let identifier: String
+    }
+
+    private var takeLanguageOverrides: [TakeLanguageOverride] {
+        let activeTakeIDs = Set(model.project.primaryStoryline.clips.map(\.takeID))
+        return model.project.takes.enumerated().compactMap { index, take in
+            guard activeTakeIDs.contains(take.id),
+                  let identifier = take.spokenLanguageIdentifier else { return nil }
+            return TakeLanguageOverride(
+                id: take.id,
+                title: "Take \(index + 1)",
+                identifier: identifier
+            )
+        }
+    }
+
+    private func languageName(_ identifier: String) -> String {
+        Locale.current.localizedString(forIdentifier: identifier) ?? identifier
     }
 }
 
@@ -1058,23 +1110,30 @@ private struct ProjectCaptionStyleSheet: View {
     @State private var appliedDensity: CaptionTextDensity
     @State private var failedConfiguration: ProjectCaptionConfiguration?
     @State private var failedDismissAfterSuccess = false
+    @State private var savedStyles: [SavedCaptionStyle]
+    @State private var savingCurrentStyle = false
+    @State private var savedStyleName = ""
+    private let styleStore: CaptionStyleStore
 
     init(
         model: AppModel,
         player: AVPlayer,
         previewCues: [CaptionCue],
         preferredCueID: UUID?,
+        styleStore: CaptionStyleStore = CaptionStyleStore(),
         onApply: @escaping (ProjectCaptionConfiguration) -> Bool
     ) {
         self.model = model
         self.player = player
         self.previewCues = previewCues
         self.preferredCueID = preferredCueID
+        self.styleStore = styleStore
         self.onApply = onApply
         let initial = model.captionConfiguration
             ?? ProjectCaptionConfiguration(localeIdentifier: "en-US", placement: .lower)
         _configuration = State(initialValue: initial)
         _appliedDensity = State(initialValue: initial.density)
+        _savedStyles = State(initialValue: styleStore.load())
     }
 
     var body: some View {
@@ -1166,6 +1225,28 @@ private struct ProjectCaptionStyleSheet: View {
                                 }
                             }
                         }
+
+                        Button("Save Custom Style", systemImage: "bookmark") {
+                            savedStyleName = ""
+                            savingCurrentStyle = true
+                        }
+                    }
+
+                    if !savedStyles.isEmpty {
+                        Menu("Saved Styles", systemImage: "bookmark.fill") {
+                            ForEach(savedStyles) { style in
+                                Button(style.name) { applySavedStyle(style) }
+                            }
+                            Divider()
+                            Menu("Delete Saved Style", systemImage: "trash") {
+                                ForEach(savedStyles) { style in
+                                    Button(style.name, role: .destructive) {
+                                        styleStore.delete(id: style.id)
+                                        savedStyles = styleStore.load()
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     Button("Reset Style", systemImage: "arrow.counterclockwise") {
@@ -1238,6 +1319,14 @@ private struct ProjectCaptionStyleSheet: View {
                     .background(.bar)
                 }
             }
+            .alert("Save Caption Style", isPresented: $savingCurrentStyle) {
+                TextField("Style name", text: $savedStyleName)
+                Button("Cancel", role: .cancel) {}
+                Button("Save") { saveCurrentStyle() }
+                    .disabled(savedStyleName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            } message: {
+                Text("Saves font, colors, highlighting, and background for other Projects.")
+            }
         }
     }
 
@@ -1270,6 +1359,19 @@ private struct ProjectCaptionStyleSheet: View {
             failedConfiguration = candidate
             failedDismissAfterSuccess = dismissAfterSuccess
         }
+    }
+
+    private func saveCurrentStyle() {
+        _ = styleStore.save(
+            name: savedStyleName,
+            customization: configuration.customization
+        )
+        savedStyles = styleStore.load()
+    }
+
+    private func applySavedStyle(_ style: SavedCaptionStyle) {
+        configuration.style = .custom
+        configuration.customization = style.customization
     }
 }
 

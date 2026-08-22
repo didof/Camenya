@@ -15,6 +15,44 @@ enum TimelineTrimFrameSampling {
     }
 }
 
+enum TimelineFilmstripFrameSampling {
+    static let maximumDecodedFrameCount = 64
+
+    struct Metrics: Equatable, Sendable {
+        let tileWidth: CGFloat
+        let tileCount: Int
+        let sampleCount: Int
+
+        func sampleIndex(forTile tileIndex: Int) -> Int {
+            guard tileCount > 0, sampleCount > 0 else { return 0 }
+            let clampedTile = min(max(0, tileIndex), tileCount - 1)
+            return min(sampleCount - 1, clampedTile * sampleCount / tileCount)
+        }
+    }
+
+    static func metrics(
+        width: CGFloat,
+        height: CGFloat,
+        frameAspectRatio: CGFloat
+    ) -> Metrics {
+        guard width.isFinite,
+              height.isFinite,
+              frameAspectRatio.isFinite,
+              width > 0,
+              height > 0,
+              frameAspectRatio > 0 else {
+            return Metrics(tileWidth: 1, tileCount: 1, sampleCount: 1)
+        }
+        let tileWidth = max(1, height * frameAspectRatio)
+        let tileCount = max(1, Int(ceil(width / tileWidth)))
+        return Metrics(
+            tileWidth: tileWidth,
+            tileCount: tileCount,
+            sampleCount: min(tileCount, maximumDecodedFrameCount)
+        )
+    }
+}
+
 actor TimelineTrimFrameLoader {
     typealias FrameDataProvider = @Sendable (URL, MediaTime) async -> Data?
 

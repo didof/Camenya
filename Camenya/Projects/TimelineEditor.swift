@@ -227,6 +227,21 @@ struct TimelineTrimSession: Equatable, Sendable {
         }
     }
 
+    mutating func nudge(
+        edge: TimelineTrimEdge,
+        direction: TimelineNudgeDirection,
+        seconds: TimeInterval
+    ) {
+        guard seconds.isFinite, seconds > 0 else { return }
+        let current = edge == .start
+            ? candidateSelection.start.seconds
+            : candidateSelection.end.seconds
+        update(
+            edge: edge,
+            to: current + (direction == .earlier ? -seconds : seconds)
+        )
+    }
+
     var commitEdit: TimelineEdit? {
         guard candidateSelection != originalSelection else { return nil }
         return .trim(clipID: clipID, selection: candidateSelection)
@@ -803,7 +818,9 @@ actor TimelineEditor {
                 id: clip.id,
                 takeID: take.id,
                 mediaURL: projectStore.takeMovieURL(projectID: project.id, takeID: take.id),
-                thumbnailURL: projectStore.takeThumbnailURL(projectID: project.id, takeID: take.id),
+                thumbnailURL: take.thumbnailFileName == nil
+                    ? nil
+                    : projectStore.takeThumbnailURL(projectID: project.id, takeID: take.id),
                 sourceCreatedAt: take.createdAt,
                 sourceRange: sourceRange,
                 availableRange: clip.availableRange,

@@ -202,17 +202,8 @@ struct ProjectPictureLock: Codable, Equatable, Hashable, Identifiable, Sendable 
 }
 
 enum ProjectPictureLockReadiness {
-    static func unresolvedTakeIDs(in project: ProjectManifest) -> Set<UUID> {
-        let activeTakeIDs = Set(project.primaryStoryline.clips.map(\.takeID))
-        return Set(project.takes.compactMap { take in
-            guard activeTakeIDs.contains(take.id) else { return nil }
-            return take.trimDecision == nil ? take.id : nil
-        })
-    }
-
     static func isReady(_ project: ProjectManifest) -> Bool {
         !project.primaryStoryline.clips.isEmpty
-            && unresolvedTakeIDs(in: project).isEmpty
             && project.checkedStorylineRevision == project.primaryStoryline.revision
     }
 }
