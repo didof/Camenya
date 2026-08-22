@@ -13,6 +13,7 @@ struct CameraScreen: View {
     @State private var initialTimelineClipID: TimelineClip.ID?
     @State private var configuringCaptions = false
     @State private var reviewingCaptions = false
+    @State private var confirmingCurrentTakeDiscard = false
     @State private var takeListActionCoordinator = TakeListActionCoordinator()
     let onBack: (() -> Void)?
 
@@ -137,6 +138,16 @@ struct CameraScreen: View {
         } message: {
             Text(model.errorMessage ?? "")
         }
+        .confirmationDialog(
+            "Delete Current Take?",
+            isPresented: $confirmingCurrentTakeDiscard,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Current Take", role: .destructive, action: model.discardCurrentTake)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("All recorded Segments in this Take will be deleted.")
+        }
     }
 
     private func performPendingTakeListAction() {
@@ -204,6 +215,9 @@ struct CameraScreen: View {
             }
             if model.phase == .idle, !model.project.takes.isEmpty {
                 timelineShelf
+            }
+            if let cameraRecoveryMessage = model.cameraRecoveryMessage {
+                cameraRecoveryPanel(cameraRecoveryMessage)
             }
             controls
         }
@@ -392,11 +406,31 @@ struct CameraScreen: View {
 
     private var interruptedControls: some View {
         VStack(spacing: 10) {
-            primaryActionButton("Continue Take", systemImage: "play.fill", action: model.continueInterruptedTake)
-                .frame(maxWidth: .infinity)
+            if model.captureReady && !model.isRestoringCaptureSession {
+                primaryActionButton("Continue Take", systemImage: "play.fill", action: model.continueInterruptedTake)
+                    .frame(maxWidth: .infinity)
+            } else if model.isRestoringCaptureSession {
+                ProgressView()
+                    .tint(CamenyaStyle.paper)
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .accessibilityLabel("Restoring camera")
+            }
             HStack(spacing: 10) {
-                compactTextButton("Discard", role: .destructive, action: model.discardCurrentTake)
                 compactTextButton("Finish Take", action: model.stop)
+                if model.captureReady && !model.isRestoringCaptureSession {
+                    compactIconButton("Flip", systemImage: "camera.rotate", action: model.flip)
+                    Menu {
+                        Button("Delete Current Take", systemImage: "trash", role: .destructive) {
+                            confirmingCurrentTakeDiscard = true
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .font(.headline)
+                            .frame(width: 44, height: 44)
+                            .background(CamenyaStyle.paper.opacity(0.1), in: Circle())
+                    }
+                    .accessibilityLabel("More")
+                }
             }
         }
     }
@@ -408,9 +442,15 @@ struct CameraScreen: View {
                     Circle()
                         .stroke(CamenyaStyle.paper, lineWidth: 4)
                         .frame(width: 72, height: 72)
-                    Circle()
-                        .fill(CamenyaStyle.recording)
-                        .frame(width: 58, height: 58)
+                    if model.isRestoringCaptureSession {
+                        ProgressView()
+                            .controlSize(.regular)
+                            .tint(CamenyaStyle.paper)
+                    } else {
+                        Circle()
+                            .fill(CamenyaStyle.recording)
+                            .frame(width: 58, height: 58)
+                    }
                 }
                 Text("Record")
                     .font(.caption.weight(.semibold))
@@ -418,10 +458,44 @@ struct CameraScreen: View {
             .frame(minWidth: 82, minHeight: 86)
         }
         .buttonStyle(CameraPressStyle())
-        .disabled(!model.captureReady)
-        .opacity(model.captureReady ? 1 : 0.45)
+        .disabled(!model.captureReady || model.isRestoringCaptureSession)
+        .opacity(model.captureReady || model.isRestoringCaptureSession ? 1 : 0.45)
         .accessibilityLabel("Record")
-        .accessibilityHint("Starts a new Take with the \(model.selectedCamera.rawValue) camera")
+        .accessibilityHint(
+            model.isRestoringCaptureSession
+                ? "Wait while the camera reconnects"
+                : "Starts a new Take with the \(model.selectedCamera.rawValue) camera"
+        )
+    }
+
+    private func cameraRecoveryPanel(_ message: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.yellow)
+            Text(message)
+                .font(.footnote)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if model.isRestoringCaptureSession {
+                ProgressView()
+                    .tint(CamenyaStyle.paper)
+                    .accessibilityLabel("Retrying camera")
+            } else {
+                Button(action: model.retryCameraRecovery) {
+                    Image(systemName: "arrow.clockwise")
+                        .frame(width: 36, height: 36)
+                }
+                .buttonStyle(CameraPressStyle())
+                .accessibilityLabel("Retry camera")
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(CamenyaStyle.chrome, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(CamenyaStyle.hairline, lineWidth: 1)
+        )
+        .accessibilityElement(children: .contain)
     }
 
     private var preparingOverlay: some View {
@@ -649,6 +723,17 @@ struct CameraScreen: View {
                 .background(CamenyaStyle.paper.opacity(0.1), in: Capsule())
         }
         .buttonStyle(CameraPressStyle())
+    }
+
+    private func compactIconButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.headline)
+                .frame(width: 44, height: 44)
+                .background(CamenyaStyle.paper.opacity(0.1), in: Circle())
+        }
+        .buttonStyle(CameraPressStyle())
+        .accessibilityLabel(title)
     }
 
     private func format(_ duration: TimeInterval) -> String {
