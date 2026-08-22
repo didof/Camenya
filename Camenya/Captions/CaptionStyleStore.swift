@@ -62,3 +62,17 @@ struct CaptionStyleStore {
         defaults.set(data, forKey: Self.key)
     }
 }
+
+enum CaptionSavedStyleResolver {
+    static func customization(
+        for style: SavedCaptionStyle,
+        sharedAppearances: [SavedTextAppearance]
+    ) -> CaptionStyleCustomization {
+        guard let shared = sharedAppearances.first(where: {
+            $0.name.compare(style.name, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+        }) else {
+            return style.customization
+        }
+        return shared.appearance.applying(to: style.customization)
+    }
+}

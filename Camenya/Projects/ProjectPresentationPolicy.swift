@@ -18,6 +18,7 @@ enum ProjectViewerPrimaryAction: Equatable, Sendable {
 
 enum ProjectCaptionWorkspaceAction: Equatable, Sendable {
     case reviewVideo
+    case finishVideo
     case createCaptions
     case openCaptionEditor
 }
@@ -30,6 +31,11 @@ enum ProjectSpokenLanguageSource: Equatable, Sendable {
 struct ProjectSpokenLanguagePresentation: Equatable, Sendable {
     let effectiveIdentifier: String
     let source: ProjectSpokenLanguageSource
+}
+
+struct ProjectUnlockPresentation: Equatable, Sendable {
+    let actionTitle: String
+    let message: String
 }
 
 enum ProjectPresentationPolicy {
@@ -73,10 +79,15 @@ enum ProjectPresentationPolicy {
 
     static func captionWorkspaceAction(
         isPictureLocked: Bool,
-        isReadyForPictureLock: Bool
+        hasPhotosConfirmedPictureLock: Bool,
+        isReadyForPictureLock: Bool,
+        hasCaptionTrack: Bool
     ) -> ProjectCaptionWorkspaceAction {
-        if isPictureLocked { return .openCaptionEditor }
-        return isReadyForPictureLock ? .createCaptions : .reviewVideo
+        if isPictureLocked, !hasPhotosConfirmedPictureLock { return .finishVideo }
+        if hasPhotosConfirmedPictureLock {
+            return hasCaptionTrack ? .openCaptionEditor : .createCaptions
+        }
+        return isReadyForPictureLock ? .finishVideo : .reviewVideo
     }
 
     static func spokenLanguagePresentation(
@@ -93,6 +104,33 @@ enum ProjectPresentationPolicy {
         return ProjectSpokenLanguagePresentation(
             effectiveIdentifier: override,
             source: .takeOverride
+        )
+    }
+
+    static func unlockPresentation(
+        hasPhotosConfirmedPictureLock: Bool,
+        hasCaptionTrack: Bool,
+        hasTextOverlays: Bool
+    ) -> ProjectUnlockPresentation {
+        if hasPhotosConfirmedPictureLock {
+            let removalWarning: String
+            switch (hasCaptionTrack, hasTextOverlays) {
+            case (true, true): removalWarning = "Captions and Text Overlays will be removed. "
+            case (true, false): removalWarning = "Captions will be removed. "
+            case (false, true): removalWarning = "Text Overlays will be removed. "
+            case (false, false): removalWarning = ""
+            }
+            return ProjectUnlockPresentation(
+                actionTitle: "Unlock & Edit",
+                message: removalWarning
+                    + "The Clean Master already saved in Photos stays there; Takes and every Storyline edit remain safe."
+            )
+        }
+        return ProjectUnlockPresentation(
+            actionTitle: hasCaptionTrack ? "Unlock & Remove Captions" : "Unlock & Edit",
+            message: hasCaptionTrack
+                ? "This older finished video has no confirmed Clean Master in Photos. Unlocking removes its captions. Takes and every Storyline edit remain safe."
+                : "This older finished video has no confirmed Clean Master in Photos. Unlocking returns it to editing; Takes and every Storyline edit remain safe."
         )
     }
 

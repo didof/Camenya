@@ -1522,7 +1522,7 @@ final class TimelineEditorTests: XCTestCase {
     }
 
     @MainActor
-    func testReopenedWorkspaceCanStartExportBeforeEnteringCapture() async throws {
+    func testReopenedPictureLockedWorkspaceCanStartExportBeforeEnteringCapture() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1541,7 +1541,15 @@ final class TimelineEditorTests: XCTestCase {
             ),
             expectedRevision: .zero
         )
-        let model = AppModel(project: completion.project, projectStore: store)
+        let unlockedModel = AppModel(project: completion.project, projectStore: store)
+        XCTAssertFalse(unlockedModel.canExportProject)
+
+        _ = try store.markStorylineChecked(projectID: completion.project.id)
+        let locked = try store.createPictureLockForTesting(
+            projectID: completion.project.id,
+            configuration: ProjectCaptionConfiguration(localeIdentifier: "en-US", placement: .lower)
+        )
+        let model = AppModel(project: locked, projectStore: store)
         for _ in 0..<100 where model.exportSnapshot == nil {
             await Task.yield()
         }

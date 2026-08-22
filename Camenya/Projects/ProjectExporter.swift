@@ -30,6 +30,7 @@ struct ProjectExportPlan: Equatable, Sendable {
     let format: ProjectFormat
     let captionConfiguration: ProjectCaptionConfiguration?
     let captionTimeline: ProjectCaptionExportTimeline?
+    let finishingTimeline: ProjectFinishingTimeline?
     let revision: StorylineRevision
 
     var urls: [URL] { sources.map(\.url) }
@@ -39,12 +40,14 @@ struct ProjectExportPlan: Equatable, Sendable {
         format: ProjectFormat,
         captionConfiguration: ProjectCaptionConfiguration?,
         captionTimeline: ProjectCaptionExportTimeline? = nil,
+        finishingTimeline: ProjectFinishingTimeline? = nil,
         revision: StorylineRevision = .zero
     ) {
         self.sources = sources
         self.format = format
         self.captionConfiguration = captionConfiguration
         self.captionTimeline = captionTimeline
+        self.finishingTimeline = finishingTimeline
         self.revision = revision
     }
 
@@ -63,6 +66,7 @@ struct ProjectExportPlan: Equatable, Sendable {
         self.format = format
         captionConfiguration = snapshot.captionConfiguration
         captionTimeline = snapshot.captionTimeline
+        finishingTimeline = snapshot.finishingTimeline
         revision = snapshot.revision
     }
 
@@ -179,7 +183,8 @@ final class ProjectExporter {
             track: compositionVideo,
             descriptions: descriptions,
             format: plan.format,
-            captions: plan.captionTimeline
+            captions: plan.captionTimeline,
+            finishing: plan.finishingTimeline
         )
         let outputDirectory = outputURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
@@ -230,7 +235,8 @@ final class ProjectExporter {
         track: AVMutableCompositionTrack,
         descriptions: [ProjectVideoDescription],
         format: ProjectFormat,
-        captions: ProjectCaptionExportTimeline?
+        captions: ProjectCaptionExportTimeline?,
+        finishing: ProjectFinishingTimeline?
     ) -> AVMutableVideoComposition {
         let canvas = format == .portrait
             ? CGSize(width: 1080, height: 1920)
@@ -249,7 +255,14 @@ final class ProjectExporter {
             instruction.layerInstructions = [layer]
             return instruction
         }
-        if let captions, !captions.cues.isEmpty {
+        if let finishing,
+           !finishing.textOverlays.isEmpty || finishing.captions?.cues.isEmpty == false {
+            ProjectFinishingRenderer().install(
+                timeline: finishing,
+                canvas: canvas,
+                videoComposition: videoComposition
+            )
+        } else if let captions, !captions.cues.isEmpty {
             CaptionBurnInRenderer().install(
                 timeline: captions,
                 canvas: canvas,

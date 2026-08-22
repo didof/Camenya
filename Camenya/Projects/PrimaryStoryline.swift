@@ -141,6 +141,8 @@ struct ProjectTime: Codable, Equatable, Hashable, Sendable {
 struct ProjectTimeRange: Codable, Equatable, Hashable, Sendable {
     let start: ProjectTime
     let end: ProjectTime
+
+    var duration: TimeInterval { end.seconds - start.seconds }
 }
 
 struct ExportSnapshot: Equatable, Sendable {
@@ -189,6 +191,7 @@ struct ExportSnapshot: Equatable, Sendable {
     let format: ProjectFormat?
     let captionConfiguration: ProjectCaptionConfiguration?
     let captionTimeline: ProjectCaptionExportTimeline?
+    let finishingTimeline: ProjectFinishingTimeline?
     let clips: [Clip]
     let duration: ProjectTime
 
@@ -198,6 +201,7 @@ struct ExportSnapshot: Equatable, Sendable {
         format: ProjectFormat?,
         captionConfiguration: ProjectCaptionConfiguration?,
         captionTimeline: ProjectCaptionExportTimeline? = nil,
+        finishingTimeline: ProjectFinishingTimeline? = nil,
         clips: [Clip],
         duration: ProjectTime
     ) {
@@ -206,6 +210,7 @@ struct ExportSnapshot: Equatable, Sendable {
         self.format = format
         self.captionConfiguration = captionConfiguration
         self.captionTimeline = captionTimeline
+        self.finishingTimeline = finishingTimeline
         self.clips = clips
         self.duration = duration
     }

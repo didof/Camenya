@@ -29,4 +29,16 @@ final class CaptionStyleStoreTests: XCTestCase {
         store.delete(id: updated.id)
         XCTAssertTrue(store.load().isEmpty)
     }
+
+    func testDeletingSharedAppearanceByNameUsesTheSameIdentityRulesAsSave() throws {
+        let suiteName = "TextAppearanceStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = TextAppearanceStore(defaults: defaults)
+        _ = store.save(name: " Créateur ", appearance: .default)
+
+        store.delete(name: "createur")
+
+        XCTAssertTrue(store.load().isEmpty)
+    }
 }

@@ -177,7 +177,9 @@ struct TakeListScreen: View {
             .disabled(!model.canExportProject)
             .accessibilityHint(model.canExportProject
                 ? "Creates the explicit finalized Project Export and opens the system share sheet."
-                : "Add at least one Clip to the Primary Storyline before exporting.")
+                : model.isPictureLocked
+                    ? "Wait for the current operation to finish."
+                    : "Finish Video before exporting the Project.")
         }
         .font(.caption.weight(.semibold))
         .buttonStyle(.bordered)

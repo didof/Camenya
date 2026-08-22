@@ -5,7 +5,7 @@
 - A Take is one user-visible recording assembled from one or more Segment files.
 - Pause ends the current Segment. Resume starts a new Segment.
 - Flip is allowed only while idle or paused, never while a Segment is recording.
-- Only an explicit finalized Project Export may be saved to Photos; in-app Takes are never offered directly.
+- Only explicit user-requested output boundaries may save to Photos: Finish Video saves one validated Clean Master checkpoint, and Project Export saves the finalized presentation. In-app Takes are never offered directly.
 - Prefer predictable capture behavior over cleverness.
 
 ## Engineering constraints

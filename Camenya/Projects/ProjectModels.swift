@@ -201,6 +201,25 @@ struct ProjectPictureLock: Codable, Equatable, Hashable, Identifiable, Sendable 
     }
 }
 
+struct ProjectCleanMaster: Codable, Equatable, Hashable, Sendable {
+    let fileName: String
+    let storylineRevision: StorylineRevision
+    let duration: TimeInterval
+    let savedToPhotosAt: Date
+}
+
+enum CleanMasterDurationPolicy {
+    static let tolerance: TimeInterval = 0.1
+
+    static func accepts(actual: TimeInterval, expected: TimeInterval) -> Bool {
+        actual.isFinite
+            && expected.isFinite
+            && actual > 0
+            && expected > 0
+            && abs(actual - expected) <= tolerance
+    }
+}
+
 enum ProjectPictureLockReadiness {
     static func isReady(_ project: ProjectManifest) -> Bool {
         !project.primaryStoryline.clips.isEmpty
@@ -209,7 +228,7 @@ enum ProjectPictureLockReadiness {
 }
 
 struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
-    static let currentSchemaVersion = 10
+    static let currentSchemaVersion = 11
 
     var schemaVersion: Int
     var manifestRevision: UInt64
@@ -228,6 +247,8 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
     var checkedStorylineRevision: StorylineRevision?
     var pictureLock: ProjectPictureLock?
     var projectCaptionTrack: ProjectCaptionTrack?
+    var projectTextOverlays: [ProjectTextOverlay]
+    var cleanMaster: ProjectCleanMaster?
 
     init(
         schemaVersion: Int = ProjectManifest.currentSchemaVersion,
@@ -246,7 +267,9 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
         captionConfiguration: ProjectCaptionConfiguration? = nil,
         checkedStorylineRevision: StorylineRevision? = nil,
         pictureLock: ProjectPictureLock? = nil,
-        projectCaptionTrack: ProjectCaptionTrack? = nil
+        projectCaptionTrack: ProjectCaptionTrack? = nil,
+        projectTextOverlays: [ProjectTextOverlay] = [],
+        cleanMaster: ProjectCleanMaster? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.manifestRevision = manifestRevision
@@ -265,10 +288,33 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
         self.checkedStorylineRevision = checkedStorylineRevision
         self.pictureLock = pictureLock
         self.projectCaptionTrack = projectCaptionTrack
+        self.projectTextOverlays = projectTextOverlays
+        self.cleanMaster = cleanMaster
     }
 
     var approximateDuration: TimeInterval {
         primaryStoryline.clips.reduce(0) { $0 + $1.selection.duration }
+    }
+
+    var hasPhotosConfirmedPictureLock: Bool {
+        guard let pictureLock, let cleanMaster else { return false }
+        return cleanMaster.storylineRevision == pictureLock.storylineRevision
+            && cleanMaster.duration.isFinite
+            && cleanMaster.duration > 0
+            && abs(cleanMaster.duration - pictureLock.duration.seconds)
+                <= CleanMasterDurationPolicy.tolerance
+    }
+
+    var needsCleanMasterUpgrade: Bool {
+        pictureLock != nil && !hasPhotosConfirmedPictureLock
+    }
+
+    var isReadyForCleanMasterCommit: Bool {
+        if let pictureLock {
+            return pictureLock.storylineRevision == primaryStoryline.revision
+                && pictureLock.clips == primaryStoryline.clips
+        }
+        return ProjectPictureLockReadiness.isReady(self)
     }
 
     var unusedTakes: [ProjectTake] {
@@ -302,6 +348,8 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
         case checkedStorylineRevision
         case pictureLock
         case projectCaptionTrack
+        case projectTextOverlays
+        case cleanMaster
     }
 
     init(from decoder: Decoder) throws {
@@ -341,5 +389,10 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
             ProjectCaptionTrack.self,
             forKey: .projectCaptionTrack
         )
+        projectTextOverlays = try container.decodeIfPresent(
+            [ProjectTextOverlay].self,
+            forKey: .projectTextOverlays
+        ) ?? []
+        cleanMaster = try container.decodeIfPresent(ProjectCleanMaster.self, forKey: .cleanMaster)
     }
 }

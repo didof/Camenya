@@ -199,13 +199,22 @@ struct CaptionBurnInRenderer {
             font: baseFont,
             maximumWidth: maximumLineWidth
         ) ?? text
-        let attributed = NSMutableAttributedString(
-            string: resolvedText,
-            attributes: [
+        let baseAttributes: [NSAttributedString.Key: Any]
+        if configuration.style == .custom {
+            baseAttributes = StaticTextPresentation.attributes(
+                appearance: TextAppearance(captionCustomization: configuration.customization),
+                font: baseFont
+            )
+        } else {
+            baseAttributes = [
                 .font: baseFont,
                 .foregroundColor: CaptionPresentationTheme.textColor(configuration: configuration),
                 .paragraphStyle: paragraph
             ]
+        }
+        let attributed = NSMutableAttributedString(
+            string: resolvedText,
+            attributes: baseAttributes
         )
         if let range, NSMaxRange(range) <= attributed.length {
             let highlightAttributes: [NSAttributedString.Key: Any]

@@ -17,4 +17,16 @@ enum RecordingDurationFormatter {
             totalTenths % 10
         )
     }
+
+    static func preciseEditingClock(_ duration: TimeInterval) -> String {
+        guard duration.isFinite, duration > 0 else { return "00:00.00" }
+        let totalHundredths = max(0, Int((duration * 100).rounded()))
+        let seconds = totalHundredths / 100
+        return String(
+            format: "%02d:%02d.%02d",
+            seconds / 60,
+            seconds % 60,
+            totalHundredths % 100
+        )
+    }
 }
