@@ -20,6 +20,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var recoverableTakes: [TakeManifest] = []
     @Published private(set) var isInterrupted = false
     @Published private(set) var cameraOperationalState: CameraOperationalState = .configuring
+    @Published private(set) var captureCapabilities: CaptureCapabilities = .unavailable
+    @Published private(set) var captureQualityPreferences: CaptureQualityPreferences
     @Published private(set) var isExportingProject = false
     @Published private(set) var isEditingTimeline = false
     @Published private(set) var projectExportStatus: String?
@@ -54,6 +56,7 @@ final class AppModel: ObservableObject {
     private let trimAnalyzer = TakeTrimAnalyzer()
     private let captionTranscriber = CaptionTranscriber(recognizer: CaptionRecognizerFactory.make())
     private let onProjectChanged: @MainActor (ProjectManifest) -> Void
+    private let capturePreferenceStore: CapturePreferenceStore
     private var machine = RecorderStateMachine()
     private var cameraLifecyclePolicy = CameraLifecyclePolicy()
     private var logicalTimer = LogicalRecordingTimer()
@@ -67,6 +70,7 @@ final class AppModel: ObservableObject {
     private var configurationStarted = false
     private var cameraConfigurationCompleted = false
     private var currentScenePhase: ScenePhase = .active
+    private var followSubjectPreferenceCoordinator: FollowSubjectPreferenceCoordinator
     private var projectExportTask: Task<Void, Never>?
     private var projectExportProgressTimer: Timer?
     private var thumbnailTasks: [UUID: Task<Void, Never>] = [:]
@@ -79,11 +83,18 @@ final class AppModel: ObservableObject {
     init(
         project: ProjectManifest,
         projectStore: ProjectStore,
+        capturePreferenceStore: CapturePreferenceStore = CapturePreferenceStore(),
         onProjectChanged: @escaping @MainActor (ProjectManifest) -> Void = { _ in }
     ) {
+        let captureQualityPreferences = capturePreferenceStore.load()
         self.project = project
         self.exportSnapshot = nil
         self.projectStore = projectStore
+        self.capturePreferenceStore = capturePreferenceStore
+        self.captureQualityPreferences = captureQualityPreferences
+        self.followSubjectPreferenceCoordinator = FollowSubjectPreferenceCoordinator(
+            initialPreference: captureQualityPreferences.followSubjectEnabled
+        )
         self.store = projectStore.takeManifestStore(projectID: project.id)
         self.timelineEditor = TimelineEditor(projectID: project.id, projectStore: projectStore)
         self.onProjectChanged = onProjectChanged
@@ -107,6 +118,9 @@ final class AppModel: ObservableObject {
         cameraController.onInterrupted = { [weak self] reason in self?.handleCaptureInterruption(reason: reason) }
         cameraController.onInterruptionEnded = { [weak self] in self?.captureInterruptionDidEnd() }
         cameraController.onRuntimeError = { [weak self] error in self?.handleRuntimeError(error) }
+        cameraController.onCapabilitiesChanged = { [weak self] capabilities in
+            self?.captureCapabilitiesDidChange(capabilities)
+        }
         projectNote.setOnChange { [weak self] text in
             guard let self else { return }
             do {
@@ -131,7 +145,7 @@ final class AppModel: ObservableObject {
                 errorMessage = "Camera and microphone access are required before recording."
                 return
             }
-            cameraController.configure { [weak self] result in
+            cameraController.configure(qualityPreferences: captureQualityPreferences) { [weak self] result in
                 guard let self else { return }
                 switch result {
                 case .success:
@@ -330,6 +344,44 @@ final class AppModel: ObservableObject {
             cameraOperationalState = .restoring
             configure()
         }
+    }
+
+    func setFollowSubjectEnabled(_ enabled: Bool) {
+        followSubjectPreferenceCoordinator.appRequested(enabled)
+        captureQualityPreferences.followSubjectEnabled = enabled
+        persistCaptureQualityPreferences()
+    }
+
+    func setLowLightAutoEnabled(_ enabled: Bool) {
+        captureQualityPreferences.lowLightAutoEnabled = enabled
+        persistCaptureQualityPreferences()
+    }
+
+    func focusAndExpose(atPreviewPoint previewPoint: CGPoint) {
+        cameraController.focusAndExpose(atPreviewPoint: previewPoint)
+    }
+
+    func setExposureBias(_ bias: Float) {
+        cameraController.setExposureBias(bias)
+    }
+
+    func exposureBias(
+        from initialBias: Float,
+        verticalTranslation: Double
+    ) -> Float {
+        CaptureExposurePolicy.bias(
+            from: initialBias,
+            verticalTranslation: verticalTranslation,
+            supportedRange: captureCapabilities.exposureBiasRange
+        )
+    }
+
+    func adjustExposureBias(by step: Float) {
+        setExposureBias(CaptureExposurePolicy.incrementedBias(
+            from: captureCapabilities.exposureBias,
+            step: step,
+            supportedRange: captureCapabilities.exposureBiasRange
+        ))
     }
 
     func discardCurrentTake() {
@@ -1264,6 +1316,21 @@ final class AppModel: ObservableObject {
 
     private func presentPersistentCameraFailure(_ message: String) {
         cameraOperationalState = .unavailable(message)
+    }
+
+    private func persistCaptureQualityPreferences() {
+        capturePreferenceStore.save(captureQualityPreferences)
+        cameraController.setQualityPreferences(captureQualityPreferences)
+    }
+
+    private func captureCapabilitiesDidChange(_ capabilities: CaptureCapabilities) {
+        captureCapabilities = capabilities
+        guard let systemPreference = followSubjectPreferenceCoordinator.receivedSystemValue(
+            capabilities.isSubjectFollowingEnabled,
+            isSupported: capabilities.supportsSubjectFollowing
+        ) else { return }
+        captureQualityPreferences.followSubjectEnabled = systemPreference
+        capturePreferenceStore.save(captureQualityPreferences)
     }
 
     private func captureInterruptionDidEnd() {
