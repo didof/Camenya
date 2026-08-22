@@ -4,9 +4,6 @@ enum TakeListProjectAction: Equatable, Sendable {
     case playProject
     case analyzeEdges
     case reviewEdges
-    case captionSettings
-    case reviewCaptions
-    case manageCaptions(takeID: UUID)
     case manageEdges(takeID: UUID)
     case exportProject
 }

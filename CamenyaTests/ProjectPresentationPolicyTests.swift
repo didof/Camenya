@@ -2,6 +2,26 @@ import XCTest
 @testable import Camenya
 
 final class ProjectPresentationPolicyTests: XCTestCase {
+    func testCaptionLanguageOptionsIncludeCurrentAndPersistedIdentifiersWithoutDuplicates() {
+        XCTAssertEqual(
+            ProjectPresentationPolicy.captionLanguageIdentifiers(
+                including: ["pt-BR", "en-US", "", "pt-BR"],
+                currentLocaleIdentifier: "ja-JP"
+            ),
+            ["ja-JP", "pt-BR", "en-US", "en-GB", "it-IT", "de-DE", "fr-FR", "es-ES"]
+        )
+    }
+
+    func testCaptionLanguageOptionsDeduplicateUnderscoreAndBCP47Variants() {
+        XCTAssertEqual(
+            ProjectPresentationPolicy.captionLanguageIdentifiers(
+                including: ["en-US", "it_IT", "it-IT"],
+                currentLocaleIdentifier: "en_US"
+            ),
+            ["en_US", "it_IT", "en-GB", "de-DE", "fr-FR", "es-ES"]
+        )
+    }
+
     func testProjectMediaEditFailureRetriesTheExactFailedEdit() {
         let edit = TimelineEdit.addFullTakeToStoryline(takeID: UUID())
         let failure = ProjectMediaEditFailure(edit: edit)
@@ -156,29 +176,51 @@ final class ProjectPresentationPolicyTests: XCTestCase {
         ))
     }
 
-    func testClipPreparationCountIncludesTakeAndProjectedCaptionIssues() {
-        let takeID = UUID()
-        let clip = TimelineClip(
-            takeID: takeID,
-            availableRange: TakeRange(startSeconds: 0, endSeconds: 4),
-            selection: TakeRange(startSeconds: 0, endSeconds: 4)
+    func testCaptionsToolbarAlwaysRoutesToTheNextUnderstandableStep() {
+        XCTAssertEqual(
+            ProjectPresentationPolicy.captionWorkspaceAction(
+                isPictureLocked: false,
+                isReadyForPictureLock: false
+            ),
+            .reviewVideo
         )
-        let issue = CaptionTimelineIssue(
-            takeID: takeID,
-            cueID: UUID(),
-            fragments: [CaptionTimelineFragment(
-                clipID: clip.id,
-                sourceRange: TakeRange(startSeconds: 1, endSeconds: 2)
-            )],
-            reason: .boundaryCut
+        XCTAssertEqual(
+            ProjectPresentationPolicy.captionWorkspaceAction(
+                isPictureLocked: false,
+                isReadyForPictureLock: true
+            ),
+            .createCaptions
         )
+        XCTAssertEqual(
+            ProjectPresentationPolicy.captionWorkspaceAction(
+                isPictureLocked: true,
+                isReadyForPictureLock: false
+            ),
+            .openCaptionEditor
+        )
+    }
 
-        XCTAssertEqual(ProjectPresentationPolicy.preparationIssueCount(
-            for: clip,
-            trimReviewTakeIDs: [takeID],
-            captionReviewTakeIDs: [takeID],
-            captionTimelineIssues: [issue]
-        ), 3)
+    func testSpokenLanguagePresentationDistinguishesProjectDefaultFromTakeOverride() {
+        XCTAssertEqual(
+            ProjectPresentationPolicy.spokenLanguagePresentation(
+                projectDefaultIdentifier: "it-IT",
+                takeOverrideIdentifier: nil
+            ),
+            ProjectSpokenLanguagePresentation(
+                effectiveIdentifier: "it-IT",
+                source: .projectDefault
+            )
+        )
+        XCTAssertEqual(
+            ProjectPresentationPolicy.spokenLanguagePresentation(
+                projectDefaultIdentifier: "it-IT",
+                takeOverrideIdentifier: "en-US"
+            ),
+            ProjectSpokenLanguagePresentation(
+                effectiveIdentifier: "en-US",
+                source: .takeOverride
+            )
+        )
     }
 
     @MainActor

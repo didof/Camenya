@@ -169,7 +169,10 @@ final class ProjectExporter {
             cursor = CMTimeAdd(cursor, duration)
         }
 
-        guard let exporter = AVAssetExportSession(asset: composition, presetName: AVAssetExportPreset1920x1080) else {
+        guard let exporter = AVAssetExportSession(
+            asset: composition,
+            presetName: AVAssetExportPresetHEVCHighestQuality
+        ) else {
             throw ProjectExportError.exportUnavailable
         }
         exporter.videoComposition = normalizedVideoComposition(
@@ -278,7 +281,7 @@ final class ProjectExporter {
     }
 }
 
-private struct ProjectExportValidator {
+struct ProjectExportValidator {
     private let minimumDuration: TimeInterval = 0.05
 
     func validate(_ url: URL, requiresAudio: Bool) async throws -> TimeInterval {

@@ -15,7 +15,22 @@ enum ProjectFormat: String, Codable, Equatable, Hashable, Sendable {
 enum ProjectRecoveryState: String, Codable, Equatable, Hashable, Sendable {
     case clean
     case pendingExport
-    case photosSaveCompleted
+    case exportHandoffCompleted
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let value = try container.decode(String.self)
+        switch value {
+        case Self.clean.rawValue: self = .clean
+        case Self.pendingExport.rawValue: self = .pendingExport
+        case Self.exportHandoffCompleted.rawValue, "photosSaveCompleted": self = .exportHandoffCompleted
+        default:
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Unknown Project recovery state: \(value)"
+            )
+        }
+    }
 }
 
 struct MediaTime: Codable, Equatable, Hashable, Sendable {
@@ -114,7 +129,7 @@ struct ProjectTake: Codable, Equatable, Hashable, Identifiable, Sendable {
     var thumbnailFileName: String?
     var trimAnalysis: TrimAnalysisResult?
     var trimDecision: TrimReviewDecision?
-    var captions: TakeCaptionTrack?
+    var spokenLanguageIdentifier: String?
 
     init(
         id: UUID = UUID(),
@@ -124,7 +139,7 @@ struct ProjectTake: Codable, Equatable, Hashable, Identifiable, Sendable {
         thumbnailFileName: String? = nil,
         trimAnalysis: TrimAnalysisResult? = nil,
         trimDecision: TrimReviewDecision? = nil,
-        captions: TakeCaptionTrack? = nil
+        spokenLanguageIdentifier: String? = nil
     ) {
         self.id = id
         self.createdAt = createdAt
@@ -133,7 +148,7 @@ struct ProjectTake: Codable, Equatable, Hashable, Identifiable, Sendable {
         self.thumbnailFileName = thumbnailFileName
         self.trimAnalysis = trimAnalysis
         self.trimDecision = trimDecision
-        self.captions = captions
+        self.spokenLanguageIdentifier = spokenLanguageIdentifier
     }
 
     var effectiveDuration: TimeInterval {
@@ -165,8 +180,36 @@ struct ProjectTake: Codable, Equatable, Hashable, Identifiable, Sendable {
     }
 }
 
+struct ProjectPictureLock: Codable, Equatable, Hashable, Identifiable, Sendable {
+    let id: UUID
+    let createdAt: Date
+    let storylineRevision: StorylineRevision
+    let clips: [TimelineClip]
+    let duration: ProjectTime
+
+    init(
+        id: UUID = UUID(),
+        createdAt: Date,
+        storylineRevision: StorylineRevision,
+        clips: [TimelineClip]
+    ) {
+        self.id = id
+        self.createdAt = createdAt
+        self.storylineRevision = storylineRevision
+        self.clips = clips
+        duration = ProjectTime(seconds: clips.reduce(0) { $0 + $1.selection.duration })
+    }
+}
+
+enum ProjectPictureLockReadiness {
+    static func isReady(_ project: ProjectManifest) -> Bool {
+        !project.primaryStoryline.clips.isEmpty
+            && project.checkedStorylineRevision == project.primaryStoryline.revision
+    }
+}
+
 struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
-    static let currentSchemaVersion = 8
+    static let currentSchemaVersion = 10
 
     var schemaVersion: Int
     var manifestRevision: UInt64
@@ -182,7 +225,9 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
     var removedClips: [RemovedTimelineClip]
     var recoveryState: ProjectRecoveryState?
     var captionConfiguration: ProjectCaptionConfiguration?
-    var captionTimelineIssues: [CaptionTimelineIssue]
+    var checkedStorylineRevision: StorylineRevision?
+    var pictureLock: ProjectPictureLock?
+    var projectCaptionTrack: ProjectCaptionTrack?
 
     init(
         schemaVersion: Int = ProjectManifest.currentSchemaVersion,
@@ -199,7 +244,9 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
         removedClips: [RemovedTimelineClip] = [],
         recoveryState: ProjectRecoveryState? = .clean,
         captionConfiguration: ProjectCaptionConfiguration? = nil,
-        captionTimelineIssues: [CaptionTimelineIssue] = []
+        checkedStorylineRevision: StorylineRevision? = nil,
+        pictureLock: ProjectPictureLock? = nil,
+        projectCaptionTrack: ProjectCaptionTrack? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.manifestRevision = manifestRevision
@@ -215,7 +262,9 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
         self.removedClips = removedClips
         self.recoveryState = recoveryState
         self.captionConfiguration = captionConfiguration
-        self.captionTimelineIssues = captionTimelineIssues
+        self.checkedStorylineRevision = checkedStorylineRevision
+        self.pictureLock = pictureLock
+        self.projectCaptionTrack = projectCaptionTrack
     }
 
     var approximateDuration: TimeInterval {
@@ -250,7 +299,9 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
         case removedClips
         case recoveryState
         case captionConfiguration
-        case captionTimelineIssues
+        case checkedStorylineRevision
+        case pictureLock
+        case projectCaptionTrack
     }
 
     init(from decoder: Decoder) throws {
@@ -281,9 +332,14 @@ struct ProjectManifest: Codable, Equatable, Hashable, Identifiable, Sendable {
             ProjectCaptionConfiguration.self,
             forKey: .captionConfiguration
         )
-        captionTimelineIssues = try container.decodeIfPresent(
-            [CaptionTimelineIssue].self,
-            forKey: .captionTimelineIssues
-        ) ?? []
+        checkedStorylineRevision = try container.decodeIfPresent(
+            StorylineRevision.self,
+            forKey: .checkedStorylineRevision
+        )
+        pictureLock = try container.decodeIfPresent(ProjectPictureLock.self, forKey: .pictureLock)
+        projectCaptionTrack = try container.decodeIfPresent(
+            ProjectCaptionTrack.self,
+            forKey: .projectCaptionTrack
+        )
     }
 }

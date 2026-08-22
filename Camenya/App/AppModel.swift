@@ -2,6 +2,22 @@ import AVFoundation
 import Foundation
 import OSLog
 import SwiftUI
+
+struct ShareableProjectExport: Identifiable, Equatable {
+    let id = UUID()
+    let url: URL
+}
+
+enum ProjectExportVariantEligibility {
+    static func canExportWithCaptions(
+        project: ProjectManifest,
+        snapshot: ExportSnapshot
+    ) -> Bool {
+        project.projectCaptionTrack?.reviewState == .approved
+            && project.projectCaptionTrack?.isGenerationComplete == true
+            && snapshot.captionTimeline != nil
+    }
+}
 import UIKit
 
 @MainActor
@@ -9,6 +25,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var project: ProjectManifest {
         didSet {
             refreshExportSnapshot()
+            refreshProjectCaptionWaveform()
         }
     }
     @Published private(set) var exportSnapshot: ExportSnapshot?
@@ -26,15 +43,21 @@ final class AppModel: ObservableObject {
     @Published private(set) var projectExportStatus: String?
     @Published private(set) var completedTakeForReview: ProjectTake?
     @Published private(set) var projectExportProgress: Double = 0
+    @Published private(set) var shareableProjectExport: ShareableProjectExport?
+    @Published private(set) var projectExportErrorMessage: String?
     @Published private(set) var isAnalyzingTrim = false
     @Published private(set) var trimAnalysisProgress: Double = 0
     @Published private(set) var trimAnalysisStatus: String?
     @Published private(set) var trimAnalysisSummary: String?
     @Published private(set) var trimReviewTakeIDs: [UUID] = []
+    @Published private var trimWaveformCache: [UUID: [Float]] = [:]
+    @Published private var trimWaveformLoadingTakeIDs: Set<UUID> = []
+    @Published private var trimWaveformErrors: [UUID: String] = [:]
     @Published private(set) var isTranscribingCaptions = false
     @Published private(set) var captionTranscriptionProgress: Double = 0
     @Published private(set) var captionTranscriptionStatus: String?
-    @Published private(set) var captionReviewTakeIDs: [UUID] = []
+    @Published private(set) var captionGenerationErrorMessage: String?
+    @Published private(set) var projectCaptionWaveform: [Float] = []
     @Published private(set) var canRetryProjectNoteSave = false
     @Published private(set) var projectNoteSaveErrorMessage: String?
     @Published private(set) var isCapturePermissionDenied = false
@@ -45,6 +68,11 @@ final class AppModel: ObservableObject {
     var captureReady: Bool { cameraOperationalState.isReady }
     var isRestoringCaptureSession: Bool { cameraOperationalState.isRestoring }
     var cameraRecoveryMessage: String? { cameraOperationalState.recoveryMessage }
+    var hasFailedProjectExportRetry: Bool { failedProjectExportAction != nil }
+
+    private var workspaceMediaOperationsAreAvailable: Bool {
+        phase == .idle || (phase == .configuring && !configurationStarted)
+    }
 
     private let logger = Logger(subsystem: "org.camenya.app", category: "AppModel")
     private let projectStore: ProjectStore
@@ -53,12 +81,12 @@ final class AppModel: ObservableObject {
     private let finalizer = TakeFinalizer()
     private let validator = SegmentValidator()
     private let projectExporter = ProjectExporter()
-    private let photoLibrarySaver = PhotoLibrarySaver()
     private let thumbnailGenerator = TakeThumbnailGenerator()
     private let trimAnalyzer = TakeTrimAnalyzer()
     private let captionTranscriber = CaptionTranscriber(recognizer: CaptionRecognizerFactory.make())
     private let onProjectChanged: @MainActor (ProjectManifest) -> Void
     private let capturePreferenceStore: CapturePreferenceStore
+    private let trimAnalysisProvider: @Sendable (URL) async throws -> TakeTrimAnalysisOutput
     private var machine = RecorderStateMachine()
     private var cameraLifecyclePolicy = CameraLifecyclePolicy()
     private var logicalTimer = LogicalRecordingTimer()
@@ -79,13 +107,26 @@ final class AppModel: ObservableObject {
     private var trimAnalysisTask: Task<Void, Never>?
     private var captionTranscriptionTask: Task<Void, Never>?
     private var exportSnapshotTask: Task<Void, Never>?
+    private var projectCaptionWaveformTask: Task<Void, Never>?
     private var exportSnapshotRequestID = 0
+    private var projectCaptionWaveformRequestID = 0
+    private var projectCaptionGenerationID = 0
     private var timelineEditActivity = TimelineEditActivity()
+    private var failedProjectExportAction: FailedProjectExportAction?
+
+    private enum FailedProjectExportAction {
+        case encode(includeCaptions: Bool)
+        case finalizeStagedFile(URL, includeCaptions: Bool)
+        case sharePendingFile
+    }
 
     init(
         project: ProjectManifest,
         projectStore: ProjectStore,
         capturePreferenceStore: CapturePreferenceStore = CapturePreferenceStore(),
+        trimAnalysisProvider: @escaping @Sendable (URL) async throws -> TakeTrimAnalysisOutput = { url in
+            try await TakeTrimAnalyzer().analyze(movieAt: url)
+        },
         onProjectChanged: @escaping @MainActor (ProjectManifest) -> Void = { _ in }
     ) {
         let captureQualityPreferences = capturePreferenceStore.load()
@@ -93,6 +134,7 @@ final class AppModel: ObservableObject {
         self.exportSnapshot = nil
         self.projectStore = projectStore
         self.capturePreferenceStore = capturePreferenceStore
+        self.trimAnalysisProvider = trimAnalysisProvider
         self.captureQualityPreferences = captureQualityPreferences
         self.followSubjectPreferenceCoordinator = FollowSubjectPreferenceCoordinator(
             initialPreference: captureQualityPreferences.followSubjectEnabled
@@ -111,9 +153,6 @@ final class AppModel: ObservableObject {
                 return nil
             }
         }
-        self.captionReviewTakeIDs = project.takes.compactMap { take in
-            take.captions?.reviewState == .needsReview ? take.id : nil
-        }
         let projectID = project.id
         cameraController.onRecordingStarted = { [weak self] in self?.recordingDidStart() }
         cameraController.onRecordingFinished = { [weak self] url, error in self?.recordingDidFinish(url: url, error: error) }
@@ -127,6 +166,21 @@ final class AppModel: ObservableObject {
             self?.persistProjectNote(text, projectID: projectID)
         }
         refreshExportSnapshot()
+        refreshProjectCaptionWaveform()
+        if let staged = projectStore.recoverableStagedExport(projectID: project.id) {
+            projectExportErrorMessage = staged.isCommitted
+                ? "A finished video is safe in this Project. Retry sharing it."
+                : "A finished video is safe in this Project. Retry finalizing it."
+            failedProjectExportAction = staged.isCommitted
+                ? .sharePendingFile
+                : .finalizeStagedFile(
+                    staged.url,
+                    includeCaptions: staged.includeCaptions
+                )
+        } else if projectStore.pendingExportNeedsHandoff(projectID: project.id) {
+            projectExportErrorMessage = "A finished video is safe in this Project. Retry sharing it."
+            failedProjectExportAction = .sharePendingFile
+        }
     }
 
     func configure() {
@@ -175,6 +229,10 @@ final class AppModel: ObservableObject {
     }
 
     func enterCapture() {
+        guard project.pictureLock == nil else {
+            errorMessage = "Unlock the video before recording a new Take."
+            return
+        }
         recoverableTakes = projectStore.unfinishedTakes(projectID: project.id)
         if cameraConfigurationCompleted {
             restartCaptureSession()
@@ -205,6 +263,10 @@ final class AppModel: ObservableObject {
     }
 
     func record() {
+        guard project.pictureLock == nil else {
+            errorMessage = "Unlock the video before recording a new Take."
+            return
+        }
         guard !isEditingTimeline else {
             errorMessage = "Wait for the Storyline edit to finish before recording."
             return
@@ -430,6 +492,7 @@ final class AppModel: ObservableObject {
             cameraLifecyclePolicy.applicationBecameInactive()
             if cameraConfigurationCompleted { cameraOperationalState = .suspended }
         case .active:
+            resumeProjectCaptionGeneration()
             if isCapturePermissionDenied {
                 configure()
                 return
@@ -443,8 +506,20 @@ final class AppModel: ObservableObject {
             }
             if isExportingProject { cancelProjectExport() }
             if isAnalyzingTrim { cancelTrimAnalysis() }
-            if isTranscribingCaptions { cancelCaptionTranscription() }
+            if isTranscribingCaptions { suspendProjectCaptionGeneration() }
             cameraController.stopSession()
+        default:
+            break
+        }
+    }
+
+    func handleWorkspaceScenePhase(_ scenePhase: ScenePhase) {
+        currentScenePhase = scenePhase
+        switch scenePhase {
+        case .active:
+            resumeProjectCaptionGeneration()
+        case .background:
+            if isTranscribingCaptions { suspendProjectCaptionGeneration() }
         default:
             break
         }
@@ -484,7 +559,7 @@ final class AppModel: ObservableObject {
         _ edit: TimelineEdit,
         expectedRevision: StorylineRevision
     ) async throws -> TimelineEditOutcome {
-        guard phase == .idle, !isExportingProject else {
+        guard workspaceMediaOperationsAreAvailable, !isExportingProject else {
             throw TimelineEditorError.editingUnavailable
         }
         guard timelineEditActivity.begin() else {
@@ -506,7 +581,7 @@ final class AppModel: ObservableObject {
     }
 
     func deleteUnusedTakePermanently(_ takeID: UUID) async throws {
-        guard phase == .idle, !isExportingProject else {
+        guard workspaceMediaOperationsAreAvailable, !isExportingProject else {
             throw TimelineEditorError.editingUnavailable
         }
         guard timelineEditActivity.begin() else {
@@ -519,7 +594,6 @@ final class AppModel: ObservableObject {
         }
         let updated = try projectStore.deleteTake(projectID: project.id, takeID: takeID)
         trimReviewTakeIDs.removeAll { $0 == takeID }
-        captionReviewTakeIDs.removeAll { $0 == takeID }
         project = updated
         onProjectChanged(updated)
     }
@@ -529,7 +603,7 @@ final class AppModel: ObservableObject {
         expectedRevision: StorylineRevision,
         focusClipID: TimelineClip.ID?
     ) async throws -> TimelineEditOutcome {
-        guard phase == .idle, !isExportingProject else {
+        guard workspaceMediaOperationsAreAvailable, !isExportingProject else {
             throw TimelineEditorError.editingUnavailable
         }
         guard timelineEditActivity.begin() else {
@@ -555,24 +629,315 @@ final class AppModel: ObservableObject {
         trimReviewTakeIDs.compactMap { id in project.takes.first(where: { $0.id == id }) }
     }
 
-    var captionReviewTakes: [ProjectTake] {
-        captionReviewTakeIDs.compactMap { id in project.takes.first(where: { $0.id == id }) }
-    }
-
     var captionConfiguration: ProjectCaptionConfiguration? {
         project.captionConfiguration
     }
 
-    var hasReviewableCaptions: Bool {
-        guard let locale = project.captionConfiguration?.localeIdentifier else { return false }
-        return project.takes.contains { take in
-            guard let captions = take.captions else { return false }
-            return captions.localeIdentifier == locale && captions.reviewState != .stale
+    var isPictureLocked: Bool { project.pictureLock != nil }
+
+    var projectCaptionTrack: ProjectCaptionTrack? { project.projectCaptionTrack }
+
+    func dismissCaptionGenerationError() {
+        captionGenerationErrorMessage = nil
+    }
+
+    var hasCompletedProjectCaptions: Bool {
+        project.projectCaptionTrack?.reviewState == .approved
+            && project.projectCaptionTrack?.isGenerationComplete == true
+    }
+
+    var projectCaptionGenerationProgress: Double {
+        guard let track = project.projectCaptionTrack, !track.regions.isEmpty else { return 0 }
+        return Double(track.completedRegions.count) / Double(track.regions.count)
+    }
+
+    var isReadyForPictureLock: Bool {
+        ProjectPictureLockReadiness.isReady(project)
+    }
+
+    var needsStorylineCheck: Bool {
+        project.pictureLock == nil
+            && !project.primaryStoryline.clips.isEmpty
+            && project.checkedStorylineRevision != project.primaryStoryline.revision
+    }
+
+    @discardableResult
+    func markStorylineChecked() -> Bool {
+        do {
+            let updated = try projectStore.markStorylineChecked(projectID: project.id)
+            project = updated
+            onProjectChanged(updated)
+            return true
+        } catch {
+            logger.error("Storyline check failed: \(error.localizedDescription, privacy: .public)")
+            return false
         }
     }
 
-    var captionedTakeCount: Int {
-        project.takes.filter { $0.captions != nil }.count
+    @discardableResult
+    func createProjectCaptions(configuration: ProjectCaptionConfiguration) -> Bool {
+        guard workspaceMediaOperationsAreAvailable,
+              !isExportingProject,
+              !isAnalyzingTrim,
+              !isEditingTimeline else { return false }
+        do {
+            let updated = try projectStore.createPictureLock(
+                projectID: project.id,
+                configuration: configuration
+            )
+            project = updated
+            onProjectChanged(updated)
+            captionGenerationErrorMessage = nil
+            resumeProjectCaptionGeneration()
+            return true
+        } catch {
+            captionGenerationErrorMessage = "Captions couldn't be started. The video is unchanged."
+            logger.error("Project caption lock failed: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+    }
+
+    func resumeProjectCaptionGeneration() {
+        guard currentScenePhase == .active,
+              workspaceMediaOperationsAreAvailable,
+              !isExportingProject,
+              !isAnalyzingTrim,
+              !isTranscribingCaptions,
+              let track = project.projectCaptionTrack,
+              track.reviewState != .approved,
+              !track.pendingRegions.isEmpty else { return }
+        let pending = track.pendingRegions
+        let totalCount = track.regions.count
+        projectCaptionGenerationID += 1
+        let requestID = projectCaptionGenerationID
+        isTranscribingCaptions = true
+        captionGenerationErrorMessage = nil
+        captionTranscriptionProgress = projectCaptionGenerationProgress
+        captionTranscriptionStatus = "Creating Captions…"
+        setIdleTimerDisabled(true)
+        captionTranscriptionTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                for region in pending {
+                    try Task.checkCancellation()
+                    guard requestID == projectCaptionGenerationID else { return }
+                    guard let take = project.takes.first(where: { $0.id == region.takeID }) else {
+                        throw ProjectStoreError.takeNotFound(region.takeID)
+                    }
+                    captionTranscriptionStatus = "Creating Captions · \(region.localeIdentifier)"
+                    let draft = try await captionTranscriber.transcribe(
+                        movieAt: movieURL(for: take),
+                        sourceRange: region.sourceRange,
+                        localeIdentifier: region.localeIdentifier
+                    )
+                    try Task.checkCancellation()
+                    let updated = try projectStore.recordProjectCaptionRegion(
+                        projectID: project.id,
+                        regionID: region.id,
+                        draft: draft
+                    )
+                    project = updated
+                    onProjectChanged(updated)
+                    let completed = updated.projectCaptionTrack?.completedRegions.count ?? 0
+                    captionTranscriptionProgress = Double(completed) / Double(max(1, totalCount))
+                }
+                finishProjectCaptionGeneration(requestID: requestID)
+            } catch is CancellationError {
+                guard requestID == projectCaptionGenerationID else { return }
+                finishProjectCaptionGeneration(requestID: requestID)
+                resumeProjectCaptionGeneration()
+            } catch let error as CaptionTranscriptionError where error == .cancelled {
+                guard requestID == projectCaptionGenerationID else { return }
+                finishProjectCaptionGeneration(requestID: requestID)
+                resumeProjectCaptionGeneration()
+            } catch {
+                guard requestID == projectCaptionGenerationID else { return }
+                finishProjectCaptionGeneration(requestID: requestID)
+                captionGenerationErrorMessage = error.localizedDescription
+                logger.error("Project caption generation failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    @discardableResult
+    func cancelProjectCaptionGeneration() -> Bool {
+        guard project.pictureLock != nil, !isExportingProject else { return false }
+        projectCaptionGenerationID += 1
+        captionTranscriptionTask?.cancel()
+        do {
+            let updated = try projectStore.cancelProjectCaptionGeneration(projectID: project.id)
+            project = updated
+            onProjectChanged(updated)
+            captionGenerationErrorMessage = nil
+            finishProjectCaptionGeneration()
+            return true
+        } catch {
+            finishProjectCaptionGeneration()
+            captionGenerationErrorMessage = "Caption generation couldn't be cancelled. Retry."
+            return false
+        }
+    }
+
+    @discardableResult
+    func regenerateProjectCaptions(
+        projectLanguage: String,
+        takeLanguageOverrides: [UUID: String]
+    ) -> Bool {
+        guard !isExportingProject else { return false }
+        projectCaptionGenerationID += 1
+        captionTranscriptionTask?.cancel()
+        let current = captionConfiguration
+            ?? ProjectCaptionConfiguration(localeIdentifier: projectLanguage, placement: .lower)
+        let configuration = ProjectCaptionConfiguration(
+            localeIdentifier: projectLanguage,
+            placement: current.placement,
+            style: current.style,
+            density: current.density,
+            customization: current.customization
+        )
+        do {
+            let updated = try projectStore.regenerateProjectCaptions(
+                projectID: project.id,
+                configuration: configuration,
+                takeLanguageOverrides: takeLanguageOverrides
+            )
+            project = updated
+            onProjectChanged(updated)
+            captionGenerationErrorMessage = nil
+            finishProjectCaptionGeneration()
+            resumeProjectCaptionGeneration()
+            return true
+        } catch {
+            finishProjectCaptionGeneration()
+            captionGenerationErrorMessage = "Caption languages couldn't be changed. Retry."
+            return false
+        }
+    }
+
+    @discardableResult
+    func saveProjectCaptionCues(_ cues: [CaptionCue]) -> Bool {
+        guard !isExportingProject else { return false }
+        do {
+            let updated = try projectStore.saveProjectCaptionCues(
+                projectID: project.id,
+                cues: cues
+            )
+            project = updated
+            onProjectChanged(updated)
+            captionGenerationErrorMessage = nil
+            return true
+        } catch {
+            captionGenerationErrorMessage = "Caption changes couldn't be saved. Retry."
+            return false
+        }
+    }
+
+    @discardableResult
+    func completeProjectCaptionReview() -> Bool {
+        guard !isExportingProject else { return false }
+        do {
+            let updated = try projectStore.approveProjectCaptionTrack(projectID: project.id)
+            project = updated
+            onProjectChanged(updated)
+            captionGenerationErrorMessage = nil
+            return true
+        } catch ProjectStoreError.incompleteProjectCaptions {
+            captionGenerationErrorMessage = "Finish creating captions before completing review."
+            return false
+        } catch {
+            captionGenerationErrorMessage = "Fix empty or overlapping captions before completing review."
+            return false
+        }
+    }
+
+    @discardableResult
+    func updateProjectCaptionConfiguration(
+        _ configuration: ProjectCaptionConfiguration,
+        reflowedCues: [CaptionCue]? = nil
+    ) -> Bool {
+        guard !isExportingProject else { return false }
+        do {
+            let resolvedReflowedCues: [CaptionCue]?
+            if let reflowedCues {
+                resolvedReflowedCues = reflowedCues
+            } else if configuration.density != project.captionConfiguration?.density,
+               let cues = project.projectCaptionTrack?.cues {
+                resolvedReflowedCues = CaptionPresentationComposer.compose(
+                    CaptionDensityReflow.apply(
+                        configuration.density,
+                        to: cues,
+                        regions: project.projectCaptionTrack?.regions ?? [],
+                        configuration: configuration,
+                        format: project.format ?? .portrait
+                    ),
+                    configuration: configuration,
+                    format: project.format ?? .portrait
+                )
+            } else {
+                resolvedReflowedCues = nil
+            }
+            let updated = try projectStore.updateProjectCaptionPresentation(
+                projectID: project.id,
+                configuration: configuration,
+                reflowedCues: resolvedReflowedCues
+            )
+            project = updated
+            onProjectChanged(updated)
+            captionGenerationErrorMessage = nil
+            return true
+        } catch {
+            captionGenerationErrorMessage = "Caption style couldn't be saved. Retry."
+            return false
+        }
+    }
+
+    @discardableResult
+    func setSpokenLanguage(for takeID: UUID, localeIdentifier: String?) -> Bool {
+        guard !isExportingProject else { return false }
+        do {
+            let updated = try projectStore.setTakeSpokenLanguage(
+                projectID: project.id,
+                takeID: takeID,
+                localeIdentifier: localeIdentifier
+            )
+            project = updated
+            onProjectChanged(updated)
+            return true
+        } catch {
+            logger.error("Spoken language persistence failed: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+    }
+
+    @discardableResult
+    func unlockPictureLock() -> Bool {
+        guard !isExportingProject else { return false }
+        projectCaptionGenerationID += 1
+        captionTranscriptionTask?.cancel()
+        do {
+            let updated = try projectStore.unlockPictureLock(projectID: project.id)
+            let captionlessSnapshot = exportSnapshot.map { snapshot in
+                ExportSnapshot(
+                    projectID: snapshot.projectID,
+                    revision: updated.primaryStoryline.revision,
+                    format: snapshot.format,
+                    captionConfiguration: updated.captionConfiguration,
+                    captionTimeline: nil,
+                    clips: snapshot.clips,
+                    duration: snapshot.duration
+                )
+            }
+            project = updated
+            if let captionlessSnapshot { exportSnapshot = captionlessSnapshot }
+            onProjectChanged(updated)
+            captionGenerationErrorMessage = nil
+            finishProjectCaptionGeneration()
+            return true
+        } catch {
+            finishProjectCaptionGeneration()
+            captionGenerationErrorMessage = "The video couldn't be unlocked. Retry."
+            return false
+        }
     }
 
     var hasTakesNeedingEdgeAnalysis: Bool {
@@ -585,172 +950,62 @@ final class AppModel: ObservableObject {
         }
     }
 
-    @discardableResult
-    func prepareCaptionReview() -> Bool {
-        guard let locale = project.captionConfiguration?.localeIdentifier else { return false }
-        captionReviewTakeIDs = project.takes.compactMap { take in
-            guard let captions = take.captions,
-                  captions.localeIdentifier == locale,
-                  captions.reviewState != .stale else { return nil }
-            return take.id
-        }
-        return !captionReviewTakeIDs.isEmpty
-    }
-
-    @discardableResult
-    func prepareCaptionReview(takeID: UUID) -> Bool {
-        guard let locale = project.captionConfiguration?.localeIdentifier,
-              let take = project.takes.first(where: { $0.id == takeID }),
-              let captions = take.captions,
-              captions.localeIdentifier == locale,
-              captions.reviewState != .stale else {
-            return false
-        }
-        captionReviewTakeIDs = [takeID]
-        return true
-    }
-
-    func setCaptionPlacement(_ placement: CaptionPlacementZone) {
-        guard var configuration = project.captionConfiguration else { return }
-        configuration.placement = placement
-        do {
-            let updated = try projectStore.setCaptionConfiguration(
-                projectID: project.id,
-                configuration: configuration
-            )
-            project = updated
-            onProjectChanged(updated)
-        } catch {
-            errorMessage = "The caption position couldn't be saved."
-        }
-    }
-
-    func createCaptions(
-        configuration: ProjectCaptionConfiguration,
-        regenerateAll: Bool = false
-    ) {
-        guard phase == .idle,
-              !isExportingProject,
-              !isAnalyzingTrim,
-              !isTranscribingCaptions else { return }
-        let scope: CaptionTranscriptionScope = regenerateAll ? .all : .missingOrOutdated
-        let eligibleIDs = Set(CaptionTranscriptionSelection.takeIDs(
-            from: project.takes,
-            configuration: configuration,
-            scope: scope
-        ))
-        let eligible = project.takes.filter { eligibleIDs.contains($0.id) }
-        do {
-            let updated = try projectStore.setCaptionConfiguration(
-                projectID: project.id,
-                configuration: configuration
-            )
-            project = updated
-            onProjectChanged(updated)
-        } catch {
-            errorMessage = "The caption language couldn't be saved."
-            return
-        }
-        guard !eligible.isEmpty else {
-            _ = prepareCaptionReview()
-            return
-        }
-        isTranscribingCaptions = true
-        let expectedStorylineRevision = project.primaryStoryline.revision
-        captionTranscriptionProgress = 0
-        captionTranscriptionStatus = "Preparing on-device captions…"
-        captionReviewTakeIDs = []
-        setIdleTimerDisabled(true)
-        captionTranscriptionTask = Task { [weak self] in
-            guard let self else { return }
-            var reviewIDs: [UUID] = []
-            do {
-                for (offset, take) in eligible.enumerated() {
-                    try Task.checkCancellation()
-                    captionTranscriptionStatus = "Transcribing Take \(offset + 1) of \(eligible.count)…"
-                    guard let sourceRange = take.concreteEffectiveRange else {
-                        throw CaptionTranscriptionError.invalidSourceRange
-                    }
-                    let draft = try await captionTranscriber.transcribe(
-                        movieAt: movieURL(for: take),
-                        sourceRange: sourceRange,
-                        localeIdentifier: configuration.localeIdentifier
-                    )
-                    try Task.checkCancellation()
-                    let updated = try projectStore.recordCaptionDraft(
-                        projectID: project.id,
-                        takeID: take.id,
-                        draft: draft,
-                        expectedStorylineRevision: expectedStorylineRevision
-                    )
-                    project = updated
-                    onProjectChanged(updated)
-                    reviewIDs.append(take.id)
-                    captionTranscriptionProgress = Double(offset + 1) / Double(eligible.count)
-                }
-                captionReviewTakeIDs = reviewIDs
-                finishCaptionTranscription()
-            } catch is CancellationError {
-                captionReviewTakeIDs = reviewIDs
-                finishCaptionTranscription()
-            } catch let error as CaptionTranscriptionError where error == .cancelled {
-                captionReviewTakeIDs = reviewIDs
-                finishCaptionTranscription()
-            } catch {
-                captionReviewTakeIDs = reviewIDs
-                finishCaptionTranscription()
-                errorMessage = error.localizedDescription
-                logger.error("Caption transcription failed: \(error.localizedDescription, privacy: .public)")
-            }
-        }
-    }
-
-    func cancelCaptionTranscription() {
-        captionTranscriptionTask?.cancel()
-    }
-
-    @discardableResult
-    func saveCaptionDraft(takeID: UUID, track: TakeCaptionTrack) -> Bool {
-        do {
-            var draft = track
-            draft.reviewState = .needsReview
-            let updated = try projectStore.recordCaptionDraft(
-                projectID: project.id,
-                takeID: takeID,
-                draft: draft
-            )
-            project = updated
-            onProjectChanged(updated)
-            return true
-        } catch {
-            errorMessage = "Caption changes couldn't be saved."
-            return false
-        }
-    }
-
-    @discardableResult
-    func approveCaptions(takeID: UUID, track: TakeCaptionTrack) -> Bool {
-        do {
-            var draft = track
-            draft.reviewState = .needsReview
-            _ = try projectStore.recordCaptionDraft(
-                projectID: project.id,
-                takeID: takeID,
-                draft: draft
-            )
-            let updated = try projectStore.approveCaptions(projectID: project.id, takeID: takeID)
-            project = updated
-            captionReviewTakeIDs.removeAll { $0 == takeID }
-            onProjectChanged(updated)
-            return true
-        } catch {
-            errorMessage = error.localizedDescription
-            return false
-        }
-    }
-
     func trimEnvelope(for take: ProjectTake) -> [Float] {
-        (try? projectStore.trimEnvelope(projectID: project.id, takeID: take.id)) ?? []
+        if let cached = trimWaveformCache[take.id], !cached.isEmpty { return cached }
+        return (try? projectStore.trimEnvelope(projectID: project.id, takeID: take.id)) ?? []
+    }
+
+    func isPreparingTrimWaveform(for takeID: UUID) -> Bool {
+        trimWaveformLoadingTakeIDs.contains(takeID)
+    }
+
+    func trimWaveformError(for takeID: UUID) -> String? {
+        trimWaveformErrors[takeID]
+    }
+
+    func prepareTrimWaveform(takeID: UUID) async {
+        guard let take = project.takes.first(where: { $0.id == takeID }) else { return }
+        guard trimEnvelope(for: take).isEmpty else {
+            trimWaveformErrors[takeID] = nil
+            return
+        }
+        guard !trimWaveformLoadingTakeIDs.contains(takeID) else { return }
+
+        trimWaveformLoadingTakeIDs.insert(takeID)
+        trimWaveformErrors[takeID] = nil
+        defer { trimWaveformLoadingTakeIDs.remove(takeID) }
+
+        let expectedStorylineRevision = project.primaryStoryline.revision
+        do {
+            let output = try await trimAnalysisProvider(movieURL(for: take))
+            try Task.checkCancellation()
+            guard !output.envelope.isEmpty else {
+                trimWaveformErrors[takeID] = "No audio waveform is available for this Clip."
+                return
+            }
+
+            // Publish the reduced samples first so Trim stays useful even if the
+            // Storyline changes before the optional on-disk cache is committed.
+            trimWaveformCache[takeID] = output.envelope
+            do {
+                let updated = try projectStore.recordTrimAnalysis(
+                    projectID: project.id,
+                    takeID: takeID,
+                    result: output.result,
+                    envelope: output.envelope,
+                    expectedStorylineRevision: expectedStorylineRevision
+                )
+                project = updated
+                onProjectChanged(updated)
+            } catch {
+                logger.info("Trim waveform cache was not persisted: \(error.localizedDescription, privacy: .public)")
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            logger.warning("Trim waveform preparation failed: \(error.localizedDescription, privacy: .public)")
+            trimWaveformErrors[takeID] = "The waveform couldn't be built."
+        }
     }
 
     func storageBytes(for take: ProjectTake) -> Int64 {
@@ -900,36 +1155,88 @@ final class AppModel: ObservableObject {
             && !isEditingTimeline
             && !isAnalyzingTrim
             && !isTranscribingCaptions
+            && project.pictureLock == nil
     }
 
     var canExportProject: Bool {
-        canManageTakes
-            && (canRetryProjectExportSave || exportSnapshot?.clips.isEmpty == false)
+        workspaceMediaOperationsAreAvailable
+            && !isExportingProject
+            && !isTranscribingCaptions
+            && !isEditingTimeline
+            && !isAnalyzingTrim
+            && !project.primaryStoryline.clips.isEmpty
     }
 
-    func exportProject() {
-        guard phase == .idle,
-              !isExportingProject,
-              !isEditingTimeline,
-              !isAnalyzingTrim else { return }
-        if canRetryProjectExportSave {
-            retryProjectExportSave()
+    func exportProject(includeCaptions: Bool = true) {
+        guard canExportProject else {
+            projectExportErrorMessage = "Finish the current operation before exporting."
+            failedProjectExportAction = nil
+            return
+        }
+        guard !includeCaptions || hasCompletedProjectCaptions else {
+            projectExportErrorMessage = "Complete Caption Review before exporting with captions."
+            failedProjectExportAction = nil
+            return
+        }
+        if projectStore.pendingExportMatches(
+            projectID: project.id,
+            includeCaptions: includeCaptions
+        ) {
+            retryProjectExportShare()
             return
         }
         let sourceBytes = project.takes.reduce(Int64(0)) { $0 + storageBytes(for: $1) }
         let requiredBytes = StoragePreflight.exportRequiredBytes(sourceBytes: sourceBytes)
         guard hasStorageCapacity(requiredBytes: requiredBytes) else {
-            errorMessage = storageErrorMessage(action: "Export", requiredBytes: requiredBytes)
+            projectExportErrorMessage = storageErrorMessage(
+                action: "Export",
+                requiredBytes: requiredBytes
+            )
+            failedProjectExportAction = .encode(includeCaptions: includeCaptions)
             return
         }
-        do {
-            guard let exportSnapshot, !exportSnapshot.clips.isEmpty else {
-                throw TimelineEditorError.corruptPrimaryStoryline
+        projectExportErrorMessage = nil
+        failedProjectExportAction = nil
+        isExportingProject = true
+        projectExportStatus = "Preparing Export…"
+        projectExportProgress = 0
+        setIdleTimerDisabled(true)
+        projectExportTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let freshSnapshot = try await timelineEditor.snapshot()
+                try Task.checkCancellation()
+                guard !freshSnapshot.clips.isEmpty else {
+                    throw TimelineEditorError.corruptPrimaryStoryline
+                }
+                let selectedSnapshot = includeCaptions
+                    ? freshSnapshot
+                    : ExportSnapshot(
+                        projectID: freshSnapshot.projectID,
+                        revision: freshSnapshot.revision,
+                        format: freshSnapshot.format,
+                        captionConfiguration: freshSnapshot.captionConfiguration,
+                        captionTimeline: nil,
+                        clips: freshSnapshot.clips,
+                        duration: freshSnapshot.duration
+                    )
+                guard !includeCaptions || ProjectExportVariantEligibility.canExportWithCaptions(
+                    project: project,
+                    snapshot: selectedSnapshot
+                ) else {
+                    throw ProjectStoreError.invalidProjectCaptionTrack
+                }
+                beginProjectExport(
+                    plan: try ProjectExportPlan(snapshot: selectedSnapshot),
+                    includeCaptions: includeCaptions
+                )
+            } catch is CancellationError {
+                finishProjectExport()
+            } catch {
+                finishProjectExport()
+                projectExportErrorMessage = "The Project couldn't be prepared for export."
+                failedProjectExportAction = .encode(includeCaptions: includeCaptions)
             }
-            let plan = try ProjectExportPlan(snapshot: exportSnapshot)
-            beginProjectExport(plan: plan)
-        } catch {
-            errorMessage = error.localizedDescription
         }
     }
 
@@ -937,15 +1244,81 @@ final class AppModel: ObservableObject {
         errorMessage = "A saved Take selection is invalid. Reset its edge cleanup and try again."
     }
 
-    func retryProjectExportSave() {
+    func retryProjectExportShare() {
         let url = projectStore.pendingExportURL(projectID: project.id)
-        guard FileManager.default.fileExists(atPath: url.path), !isExportingProject else { return }
-        saveProjectExportToPhotos(url)
+        guard !isExportingProject, !isTranscribingCaptions else { return }
+        let includeCaptions: Bool
+        if projectStore.pendingExportMatches(projectID: project.id, includeCaptions: true) {
+            includeCaptions = true
+        } else if projectStore.pendingExportMatches(projectID: project.id, includeCaptions: false) {
+            includeCaptions = false
+        } else {
+            projectExportErrorMessage = "The prepared export no longer matches this Project. Export it again."
+            failedProjectExportAction = nil
+            return
+        }
+        projectExportErrorMessage = nil
+        failedProjectExportAction = nil
+        isExportingProject = true
+        projectExportStatus = "Checking Finished Video…"
+        projectExportProgress = 0
+        setIdleTimerDisabled(true)
+        projectExportTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await ProjectExportValidator().validate(
+                    url,
+                    requiresAudio: project.primaryStoryline.clips.contains { !$0.isMuted }
+                )
+                try Task.checkCancellation()
+                guard projectStore.pendingExportMatches(
+                    projectID: project.id,
+                    includeCaptions: includeCaptions
+                ) else {
+                    finishProjectExport()
+                    projectExportErrorMessage = "The prepared export no longer matches this Project. Export it again."
+                    failedProjectExportAction = .encode(includeCaptions: includeCaptions)
+                    return
+                }
+                finishProjectExport()
+                shareableProjectExport = ShareableProjectExport(url: url)
+            } catch is CancellationError {
+                finishProjectExport()
+            } catch {
+                finishProjectExport()
+                projectStore.invalidateExportRecoveryMetadata(projectID: project.id)
+                projectExportErrorMessage = "The prepared export is no longer usable. Export the Project again."
+                failedProjectExportAction = .encode(includeCaptions: includeCaptions)
+            }
+        }
+    }
+
+    func retryFailedProjectExport() {
+        guard let failedProjectExportAction, !isExportingProject else { return }
+        switch failedProjectExportAction {
+        case let .encode(includeCaptions):
+            exportProject(includeCaptions: includeCaptions)
+        case let .finalizeStagedFile(url, includeCaptions):
+            finalizeStagedProjectExport(url, includeCaptions: includeCaptions)
+        case .sharePendingFile:
+            retryProjectExportShare()
+        }
+    }
+
+    func dismissProjectExportError() {
+        projectExportErrorMessage = nil
+        failedProjectExportAction = nil
+    }
+
+    func projectExportSharingFinished(completed: Bool) {
+        shareableProjectExport = nil
+        guard completed else { return }
+        completeProjectExportShare()
     }
 
     func cancelProjectExport() {
-        guard isExportingProject, projectExportStatus == "Combining Takes…" else { return }
-        projectExporter.cancel()
+        guard isExportingProject else { return }
+        if projectExportStatus == "Combining Takes…" { projectExporter.cancel() }
         projectExportTask?.cancel()
     }
 
@@ -955,8 +1328,12 @@ final class AppModel: ObservableObject {
 
     var canRetrySave: Bool { phase == .storingTake && finalMovieURL != nil && errorMessage != nil }
 
-    var canRetryProjectExportSave: Bool {
-        !isExportingProject && projectStore.pendingExportNeedsPhotoSave(projectID: project.id)
+    var canRetryProjectExportShare: Bool {
+        !isExportingProject
+            && (
+                projectStore.pendingExportMatches(projectID: project.id, includeCaptions: true)
+                    || projectStore.pendingExportMatches(projectID: project.id, includeCaptions: false)
+            )
     }
 
     var canOpenSettingsForCurrentError: Bool {
@@ -968,34 +1345,32 @@ final class AppModel: ObservableObject {
             && !isExportingProject
             && !isEditingTimeline
             && !isAnalyzingTrim
-            && !isTranscribingCaptions
+            && (!isTranscribingCaptions || project.pictureLock != nil)
     }
 
     var preparationItemCount: Int {
-        trimReviewTakeIDs.count
-            + captionReviewTakeIDs.count
-            + project.captionTimelineIssues.filter { $0.reviewState == .needsReview }.count
+        needsStorylineCheck ? 1 : 0
     }
 
-    func preparationIssueCount(for clip: TimelinePlaybackSession.FilmstripClip) -> Int {
-        guard let snapshotClip = exportSnapshot?.clips.first(where: { $0.id == clip.id }) else {
-            return 0
-        }
-        let takeID = snapshotClip.takeID
-        return (trimReviewTakeIDs.contains(takeID) ? 1 : 0)
-            + (captionReviewTakeIDs.contains(takeID) ? 1 : 0)
-            + project.captionTimelineIssues.filter {
-                $0.reviewState == .needsReview
-                    && $0.fragments.contains(where: { $0.clipID == clip.id })
-            }.count
+    func preparationIssueCount(for _: TimelinePlaybackSession.FilmstripClip) -> Int {
+        0
     }
 
-    private func finishCaptionTranscription() {
+    private func suspendProjectCaptionGeneration() {
+        captionTranscriptionTask?.cancel()
+    }
+
+    private func finishProjectCaptionGeneration() {
         isTranscribingCaptions = false
-        captionTranscriptionProgress = 0
+        captionTranscriptionProgress = projectCaptionGenerationProgress
         captionTranscriptionStatus = nil
         captionTranscriptionTask = nil
         setIdleTimerDisabled(false)
+    }
+
+    private func finishProjectCaptionGeneration(requestID: Int) {
+        guard requestID == projectCaptionGenerationID else { return }
+        finishProjectCaptionGeneration()
     }
 
     private func updateTrimDecision(takeID: UUID, decision: TrimReviewDecision) {
@@ -1205,6 +1580,40 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func refreshProjectCaptionWaveform() {
+        projectCaptionWaveformRequestID += 1
+        let requestID = projectCaptionWaveformRequestID
+        projectCaptionWaveformTask?.cancel()
+        guard let lock = project.pictureLock else {
+            projectCaptionWaveform = []
+            projectCaptionWaveformTask = nil
+            return
+        }
+        let projectID = project.id
+        let takes = project.takes
+        let store = projectStore
+        projectCaptionWaveformTask = Task { [weak self] in
+            let waveform = await Task.detached(priority: .utility) {
+                let envelopes = Dictionary(uniqueKeysWithValues: takes.map { take in
+                    (
+                        take.id,
+                        (try? store.trimEnvelope(projectID: projectID, takeID: take.id)) ?? []
+                    )
+                })
+                return ProjectCaptionWaveformBuilder.make(
+                    lock: lock,
+                    takes: takes,
+                    envelopes: envelopes
+                )
+            }.value
+            guard !Task.isCancelled,
+                  let self,
+                  requestID == projectCaptionWaveformRequestID else { return }
+            projectCaptionWaveform = waveform
+            projectCaptionWaveformTask = nil
+        }
+    }
+
     private func generateThumbnail(for takeID: UUID) {
         let movieURL = projectStore.takeMovieURL(projectID: project.id, takeID: takeID)
         let thumbnailURL = projectStore.takeThumbnailURL(projectID: project.id, takeID: takeID)
@@ -1224,9 +1633,9 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func beginProjectExport(plan: ProjectExportPlan) {
-        errorMessage = nil
-        isExportingProject = true
+    private func beginProjectExport(plan: ProjectExportPlan, includeCaptions: Bool) {
+        projectExportErrorMessage = nil
+        failedProjectExportAction = nil
         projectExportStatus = "Combining Takes…"
         projectExportProgress = 0
         projectExportProgressTimer?.invalidate()
@@ -1237,50 +1646,149 @@ final class AppModel: ObservableObject {
             }
         }
         setIdleTimerDisabled(true)
-        let outputURL = projectStore.pendingExportURL(projectID: project.id)
+        let outputURL = projectStore.pendingExportWorkingURL(projectID: project.id)
+        let pendingURL = projectStore.pendingExportURL(projectID: project.id)
         projectExportTask = Task { [weak self] in
             guard let self else { return }
+            var committedNewExport = false
+            var stagedExportReady = false
+            var stagedExportURL = outputURL
             do {
-                let url = try await projectExporter.export(plan: plan, to: outputURL)
+                let workingURL = try await projectExporter.export(plan: plan, to: outputURL)
+                stagedExportURL = try projectStore.markValidatedStagedExportCompleted(
+                    projectID: project.id,
+                    stagedURL: workingURL,
+                    includeCaptions: includeCaptions
+                )
+                stagedExportReady = true
+                try projectStore.recordStagedExportDescriptor(
+                    projectID: project.id,
+                    stagedURL: stagedExportURL,
+                    includeCaptions: includeCaptions
+                )
                 try Task.checkCancellation()
+                let url = try projectStore.commitPendingExport(
+                    projectID: project.id,
+                    stagedURL: stagedExportURL
+                )
+                committedNewExport = true
                 let updated = try projectStore.setPendingExportState(projectID: project.id, pending: true)
+                try projectStore.recordPendingExportDescriptor(
+                    projectID: project.id,
+                    includeCaptions: includeCaptions
+                )
+                try projectStore.clearStagedExportRequest(projectID: project.id)
                 project = updated
                 onProjectChanged(updated)
-                projectExportStatus = "Saving to Photos…"
-                try await photoLibrarySaver.saveVideo(at: url)
-                completeProjectExportPhotosSave()
                 finishProjectExport()
+                shareableProjectExport = ShareableProjectExport(url: url)
                 haptic(.success)
             } catch let error as ProjectExportError where error == .cancelled {
                 finishProjectExport()
             } catch is CancellationError {
                 finishProjectExport()
             } catch {
-                let exportIsReady = FileManager.default.fileExists(atPath: outputURL.path)
+                let exportIsReady = committedNewExport
+                    && FileManager.default.fileExists(atPath: pendingURL.path)
                 finishProjectExport()
-                errorMessage = exportIsReady
-                    ? "The finished video is safe in this Project, but it couldn't be added to Photos."
-                    : "The Project couldn't be combined. Every Take is still safe."
+                projectExportErrorMessage = exportIsReady
+                    ? "The finished video is safe in this Project. Retry sharing it."
+                    : (stagedExportReady && FileManager.default.fileExists(atPath: stagedExportURL.path)
+                        ? "The finished video is safe in this Project. Retry finalizing it."
+                        : "The Project couldn't be combined. Every Take is still safe.")
+                if exportIsReady {
+                    failedProjectExportAction = .sharePendingFile
+                } else if stagedExportReady,
+                          FileManager.default.fileExists(atPath: stagedExportURL.path) {
+                    failedProjectExportAction = .finalizeStagedFile(
+                        stagedExportURL,
+                        includeCaptions: includeCaptions
+                    )
+                } else {
+                    failedProjectExportAction = .encode(includeCaptions: includeCaptions)
+                }
                 logger.error("Project export failed: \(error.localizedDescription, privacy: .public)")
             }
         }
     }
 
-    private func saveProjectExportToPhotos(_ url: URL) {
-        errorMessage = nil
+    private func finalizeStagedProjectExport(
+        _ stagedURL: URL,
+        includeCaptions: Bool
+    ) {
+        guard !isExportingProject,
+              !isTranscribingCaptions,
+              let recovery = projectStore.recoverableStagedExport(projectID: project.id),
+              !recovery.isCommitted,
+              recovery.includeCaptions == includeCaptions,
+              recovery.url.standardizedFileURL == stagedURL.standardizedFileURL else {
+            projectExportErrorMessage = "The prepared export no longer matches this Project. Export it again."
+            failedProjectExportAction = nil
+            return
+        }
+        projectExportErrorMessage = nil
+        failedProjectExportAction = nil
         isExportingProject = true
-        projectExportStatus = "Saving to Photos…"
+        projectExportStatus = "Checking Finished Video…"
+        projectExportProgress = 0
         setIdleTimerDisabled(true)
         projectExportTask = Task { [weak self] in
             guard let self else { return }
+            var validated = false
             do {
-                try await photoLibrarySaver.saveVideo(at: url)
-                completeProjectExportPhotosSave()
+                _ = try await ProjectExportValidator().validate(
+                    stagedURL,
+                    requiresAudio: project.primaryStoryline.clips.contains { !$0.isMuted }
+                )
+                validated = true
+                try Task.checkCancellation()
+                try projectStore.recordStagedExportDescriptor(
+                    projectID: project.id,
+                    stagedURL: stagedURL,
+                    includeCaptions: includeCaptions
+                )
+                let url = try projectStore.commitPendingExport(
+                    projectID: project.id,
+                    stagedURL: stagedURL
+                )
+                let updated = try projectStore.setPendingExportState(projectID: project.id, pending: true)
+                try projectStore.recordPendingExportDescriptor(
+                    projectID: project.id,
+                    includeCaptions: includeCaptions
+                )
+                try projectStore.clearStagedExportRequest(projectID: project.id)
+                project = updated
+                onProjectChanged(updated)
                 finishProjectExport()
+                shareableProjectExport = ShareableProjectExport(url: url)
                 haptic(.success)
-            } catch {
+            } catch is CancellationError {
                 finishProjectExport()
-                errorMessage = "The finished video is still safe in this Project. Camenya couldn't add it to Photos."
+            } catch {
+                let pendingURL = projectStore.pendingExportURL(projectID: project.id)
+                let committed = FileManager.default.fileExists(atPath: pendingURL.path)
+                    && !FileManager.default.fileExists(atPath: stagedURL.path)
+                finishProjectExport()
+                if !validated {
+                    projectStore.quarantineInvalidStagedExport(
+                        projectID: project.id,
+                        stagedURL: stagedURL
+                    )
+                    failedProjectExportAction = .encode(includeCaptions: includeCaptions)
+                    projectExportErrorMessage = "The prepared export is no longer usable. Export the Project again."
+                } else if committed {
+                    failedProjectExportAction = .sharePendingFile
+                    projectExportErrorMessage = "The finished video is safe in this Project. Retry sharing it."
+                } else if projectStore.recoverableStagedExport(projectID: project.id) != nil {
+                    failedProjectExportAction = .finalizeStagedFile(
+                        stagedURL,
+                        includeCaptions: includeCaptions
+                    )
+                    projectExportErrorMessage = "The finished video is safe in this Project. Retry finalizing it."
+                } else {
+                    failedProjectExportAction = .encode(includeCaptions: includeCaptions)
+                    projectExportErrorMessage = "The prepared export is no longer usable. Export the Project again."
+                }
             }
         }
     }
@@ -1295,15 +1803,15 @@ final class AppModel: ObservableObject {
         setIdleTimerDisabled(false)
     }
 
-    private func completeProjectExportPhotosSave() {
+    private func completeProjectExportShare() {
         do {
-            try projectStore.recordPhotosSaveCompleted(projectID: project.id)
+            try projectStore.recordExportHandoffCompleted(projectID: project.id)
             try projectStore.removePendingExport(projectID: project.id)
             let updated = try projectStore.setPendingExportState(projectID: project.id, pending: false)
             project = updated
             onProjectChanged(updated)
         } catch {
-            logger.warning("Photos save succeeded; durable cleanup will resume on launch: \(error.localizedDescription, privacy: .public)")
+            logger.warning("Export sharing completed; durable cleanup will resume on launch: \(error.localizedDescription, privacy: .public)")
             if let updated = try? projectStore.load(id: project.id) {
                 project = updated
                 onProjectChanged(updated)

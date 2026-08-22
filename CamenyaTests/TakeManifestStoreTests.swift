@@ -2,6 +2,16 @@ import XCTest
 @testable import Camenya
 
 final class TakeManifestStoreTests: XCTestCase {
+    func testDraftWithoutCompletedSegmentsIsNotOfferedForRecovery() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = TakeManifestStore(recordingsRoot: root)
+
+        _ = try store.createTake(orientation: .portrait)
+
+        XCTAssertTrue(store.unfinishedTakes().isEmpty)
+    }
+
     func testManifestRoundTripPreservesDeterministicSegmentOrder() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }

@@ -726,135 +726,6 @@ final class TimelineEditorTests: XCTestCase {
         XCTAssertEqual(persisted.clips.map(\.id), [completed.clip.id])
     }
 
-    func testSplitKeepsApprovedTakeCaptionsAvailableToBothAdjacentClips() async throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let store = ProjectStore(projectsRoot: root)
-        let project = try store.createProject()
-        let editor = TimelineEditor(projectID: project.id, projectStore: store)
-        let completed = try await editor.completeFinalizedTake(
-            FinalizedTake(
-                id: UUID(),
-                movieURL: try makeMovie(in: root),
-                orientation: .portrait,
-                duration: 10,
-                createdAt: Date(timeIntervalSince1970: 1)
-            ),
-            expectedRevision: .zero
-        )
-        let captions = TakeCaptionTrack(
-            localeIdentifier: "en-US",
-            sourceRange: TakeRange(startSeconds: 0, endSeconds: 10),
-            recognizer: .speechRecognizerIOS18,
-            reviewState: .approved,
-            cues: [CaptionCue(
-                range: TakeRange(startSeconds: 3, endSeconds: 7),
-                recognizedText: "one continuous thought",
-                text: "one continuous thought",
-                confidence: 0.9,
-                alternatives: [],
-                timedSpans: [CaptionTimedSpan(
-                    range: TakeRange(startSeconds: 3.5, endSeconds: 4.5),
-                    text: "continuous",
-                    granularity: .word,
-                    confidence: 0.9
-                )]
-            )]
-        )
-        var seeded = try store.load(id: project.id)
-        seeded.captionConfiguration = ProjectCaptionConfiguration(
-            localeIdentifier: "en-US",
-            placement: .lower
-        )
-        seeded.takes[0].captions = captions
-        try store.persist(seeded, expectedRevision: completed.snapshot.revision)
-
-        let outcome = try await editor.perform(
-            .split(clipID: completed.clip.id, at: ProjectTime(seconds: 4)),
-            expectedRevision: completed.snapshot.revision
-        )
-
-        let captionTimeline = outcome.snapshot.captionTimeline
-        XCTAssertEqual(captionTimeline?.cues.map(\.range), [
-            TakeRange(startSeconds: 3, endSeconds: 7)
-        ])
-        XCTAssertEqual(captionTimeline?.cues.first?.timedSpans.map(\.range), [
-            TakeRange(startSeconds: 3.5, endSeconds: 4.5)
-        ])
-        XCTAssertTrue(outcome.project.captionTimelineIssues.isEmpty)
-        XCTAssertEqual(
-            try ProjectExportPlan(snapshot: outcome.snapshot).captionTimeline,
-            outcome.snapshot.captionTimeline
-        )
-    }
-
-    func testSeparatingSplitFragmentsCreatesDiscontinuousCaptionIssue() async throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let store = ProjectStore(projectsRoot: root)
-        let project = try store.createProject()
-        let editor = TimelineEditor(projectID: project.id, projectStore: store)
-        let first = try await editor.completeFinalizedTake(
-            FinalizedTake(
-                id: UUID(),
-                movieURL: try makeMovie(in: root),
-                orientation: .portrait,
-                duration: 10,
-                createdAt: Date(timeIntervalSince1970: 1)
-            ),
-            expectedRevision: .zero
-        )
-        var seeded = try store.load(id: project.id)
-        seeded.captionConfiguration = ProjectCaptionConfiguration(
-            localeIdentifier: "en-US",
-            placement: .lower
-        )
-        seeded.takes[0].captions = TakeCaptionTrack(
-            localeIdentifier: "en-US",
-            sourceRange: TakeRange(startSeconds: 0, endSeconds: 10),
-            recognizer: .speechRecognizerIOS18,
-            reviewState: .approved,
-            cues: [CaptionCue(
-                range: TakeRange(startSeconds: 3, endSeconds: 7),
-                recognizedText: "keep this continuous",
-                text: "keep this continuous",
-                confidence: 0.9,
-                alternatives: [],
-                timedSpans: []
-            )]
-        )
-        try store.persist(seeded, expectedRevision: first.snapshot.revision)
-        let second = try await editor.completeFinalizedTake(
-            FinalizedTake(
-                id: UUID(),
-                movieURL: try makeMovie(in: root),
-                orientation: .portrait,
-                duration: 3,
-                createdAt: Date(timeIntervalSince1970: 2)
-            ),
-            expectedRevision: first.snapshot.revision
-        )
-        let split = try await editor.perform(
-            .split(clipID: first.clip.id, at: ProjectTime(seconds: 4)),
-            expectedRevision: second.snapshot.revision
-        )
-        let rightFragmentID = split.snapshot.clips[1].id
-
-        let separated = try await editor.perform(
-            .move(clipID: rightFragmentID, toIndex: 2),
-            expectedRevision: split.snapshot.revision
-        )
-
-        XCTAssertEqual(separated.project.captionTimelineIssues.count, 1)
-        XCTAssertEqual(separated.project.captionTimelineIssues.first?.reason, .discontinuousProjection)
-        XCTAssertEqual(separated.project.captionTimelineIssues.first?.reviewState, .needsReview)
-        XCTAssertFalse(separated.snapshot.captionTimeline?.cues.contains(where: {
-            $0.text == "keep this continuous"
-        }) ?? true)
-    }
-
     func testMoveClipAtomicallyReordersStorylineAndRecalculatesProjectTime() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -1194,152 +1065,6 @@ final class TimelineEditorTests: XCTestCase {
         ))
     }
 
-    func testOrdinaryTrimThroughApprovedCueOmitsUnsafeCaptionUntilPhaseNineReview() async throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let store = ProjectStore(projectsRoot: root)
-        let project = try store.createProject()
-        let editor = TimelineEditor(projectID: project.id, projectStore: store)
-        let completed = try await editor.completeFinalizedTake(
-            FinalizedTake(
-                id: UUID(),
-                movieURL: try makeMovie(in: root),
-                orientation: .portrait,
-                duration: 10,
-                createdAt: Date(timeIntervalSince1970: 1)
-            ),
-            expectedRevision: .zero
-        )
-        var seeded = try store.load(id: project.id)
-        seeded.captionConfiguration = ProjectCaptionConfiguration(
-            localeIdentifier: "en-US",
-            placement: .lower
-        )
-        seeded.takes[0].captions = TakeCaptionTrack(
-            localeIdentifier: "en-US",
-            sourceRange: TakeRange(startSeconds: 0, endSeconds: 10),
-            recognizer: .speechRecognizerIOS18,
-            reviewState: .approved,
-            cues: [
-                CaptionCue(
-                    range: TakeRange(startSeconds: 3, endSeconds: 7),
-                    recognizedText: "go go",
-                    text: "go go",
-                    confidence: 0.9,
-                    alternatives: [],
-                    timedSpans: [
-                        CaptionTimedSpan(
-                            range: TakeRange(startSeconds: 3.5, endSeconds: 4.5),
-                            text: "go",
-                            granularity: .word,
-                            confidence: 0.9
-                        ),
-                        CaptionTimedSpan(
-                            range: TakeRange(startSeconds: 5.5, endSeconds: 6.5),
-                            text: "go",
-                            granularity: .word,
-                            confidence: 0.9
-                        )
-                    ]
-                ),
-                CaptionCue(
-                    range: TakeRange(startSeconds: 8, endSeconds: 9),
-                    recognizedText: "still safe",
-                    text: "still safe",
-                    confidence: 0.9,
-                    alternatives: [],
-                    timedSpans: []
-                )
-            ]
-        )
-        try store.persist(seeded, expectedRevision: completed.snapshot.revision)
-
-        let outcome = try await editor.perform(
-            .trim(
-                clipID: completed.clip.id,
-                selection: TakeRange(startSeconds: 5, endSeconds: 10)
-            ),
-            expectedRevision: completed.snapshot.revision
-        )
-
-        let issue = try XCTUnwrap(outcome.project.captionTimelineIssues.first)
-        XCTAssertEqual(issue.reason, .boundaryCut)
-        XCTAssertEqual(issue.reviewState, .needsReview)
-        XCTAssertEqual(outcome.snapshot.captionTimeline?.cues.map(\.text), ["still safe"])
-        XCTAssertEqual(outcome.snapshot.captionTimeline?.cues.map(\.range), [
-            TakeRange(startSeconds: 3, endSeconds: 4)
-        ])
-
-        let approved = try await editor.perform(
-            .approveCaptionTimelineIssue(issueID: issue.id),
-            expectedRevision: outcome.snapshot.revision
-        )
-
-        XCTAssertEqual(approved.project.captionTimelineIssues.first?.reviewState, .approved)
-        XCTAssertEqual(approved.snapshot.captionTimeline?.cues.map(\.text), [
-            "go go", "still safe"
-        ])
-        XCTAssertEqual(approved.snapshot.captionTimeline?.cues.first?.range, TakeRange(startSeconds: 0, endSeconds: 2))
-        XCTAssertEqual(approved.snapshot.captionTimeline?.cues.first?.timedSpans.map(\.range), [
-            TakeRange(startSeconds: 0.5, endSeconds: 1.5)
-        ])
-        let activeCaption = try XCTUnwrap(approved.snapshot.captionTimeline.flatMap {
-            ProjectCaptionOverlayResolver.active(in: $0, at: 1)
-        })
-        let textRuns = ProjectCaptionOverlayResolver.textRuns(for: activeCaption)
-        XCTAssertEqual(textRuns.map(\.text), ["go ", "go"])
-        XCTAssertEqual(textRuns.map(\.isHighlighted), [false, true])
-
-        let undoneApproval = try await editor.restoreSessionState(
-            TimelineSessionState(project: outcome.project),
-            expectedRevision: approved.snapshot.revision,
-            focusClipID: completed.clip.id
-        )
-        XCTAssertEqual(undoneApproval.project.captionTimelineIssues.first?.reviewState, .needsReview)
-        XCTAssertEqual(undoneApproval.snapshot.captionTimeline?.cues.map(\.text), ["still safe"])
-
-        let redoneApproval = try await editor.restoreSessionState(
-            TimelineSessionState(project: approved.project),
-            expectedRevision: undoneApproval.snapshot.revision,
-            focusClipID: completed.clip.id
-        )
-        XCTAssertEqual(redoneApproval.project.captionTimelineIssues.first?.reviewState, .approved)
-        XCTAssertEqual(redoneApproval.snapshot.captionTimeline?.cues.map(\.text), [
-            "go go", "still safe"
-        ])
-
-        let changedGeometry = try await editor.perform(
-            .trim(
-                clipID: completed.clip.id,
-                selection: TakeRange(startSeconds: 6, endSeconds: 10)
-            ),
-            expectedRevision: redoneApproval.snapshot.revision
-        )
-
-        XCTAssertEqual(changedGeometry.project.captionTimelineIssues.first?.id, issue.id)
-        XCTAssertEqual(changedGeometry.project.captionTimelineIssues.first?.reviewState, .needsReview)
-        XCTAssertEqual(changedGeometry.snapshot.captionTimeline?.cues.map(\.text), ["still safe"])
-
-        let safelyRestored = try await editor.perform(
-            .resetTrim(clipID: completed.clip.id),
-            expectedRevision: changedGeometry.snapshot.revision
-        )
-        XCTAssertEqual(safelyRestored.project.captionTimelineIssues.first?.id, issue.id)
-        XCTAssertEqual(safelyRestored.project.captionTimelineIssues.first?.reviewState, .needsReview)
-        XCTAssertEqual(safelyRestored.project.captionTimelineIssues.first?.fragments, [])
-        XCTAssertEqual(safelyRestored.snapshot.captionTimeline?.cues.map(\.text), ["still safe"])
-
-        let approvedReturn = try await editor.perform(
-            .approveCaptionTimelineIssue(issueID: issue.id),
-            expectedRevision: safelyRestored.snapshot.revision
-        )
-        XCTAssertTrue(approvedReturn.project.captionTimelineIssues.isEmpty)
-        XCTAssertEqual(approvedReturn.snapshot.captionTimeline?.cues.map(\.text), [
-            "go go", "still safe"
-        ])
-    }
-
     func testCompletingFinalizedTakeCreatesDistinctFullRangeClip() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -1582,13 +1307,42 @@ final class TimelineEditorTests: XCTestCase {
         XCTAssertEqual(exportPlan.revision, sharedSnapshot.revision)
         XCTAssertEqual(previewSession.state.revision, sharedSnapshot.revision)
         XCTAssertEqual(previewSession.state.clips.map(\.id), sharedSnapshot.clips.map(\.id))
-        XCTAssertEqual(previewSession.state.clips.map(\.thumbnailURL), [
-            store.takeThumbnailURL(projectID: project.id, takeID: first.take.id)
-        ])
+        XCTAssertEqual(previewSession.state.clips.map(\.thumbnailURL), [nil])
         XCTAssertEqual(previewSession.state.clips.map(\.sourceCreatedAt), [first.take.createdAt])
         XCTAssertEqual(exportPlan.urls, sharedSnapshot.clips.map(\.mediaURL))
         XCTAssertEqual(exportPlan.sources.map(\.selection), sharedSnapshot.clips.map(\.selection))
         XCTAssertEqual(exportPlan.sources.count, 1)
+    }
+
+    func testSnapshotPublishesThumbnailURLOnlyAfterThumbnailMetadataIsCommitted() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let editor = TimelineEditor(projectID: project.id, projectStore: store)
+        let completed = try await editor.completeFinalizedTake(
+            FinalizedTake(
+                id: UUID(),
+                movieURL: try makeMovie(in: root),
+                orientation: .portrait,
+                duration: 3,
+                createdAt: Date(timeIntervalSince1970: 1)
+            ),
+            expectedRevision: .zero
+        )
+
+        XCTAssertNil(completed.snapshot.clips.first?.thumbnailURL)
+
+        let thumbnailURL = store.takeThumbnailURL(
+            projectID: project.id,
+            takeID: completed.take.id
+        )
+        try Data("thumbnail".utf8).write(to: thumbnailURL)
+        _ = try store.setThumbnail(projectID: project.id, takeID: completed.take.id)
+
+        let refreshed = try await editor.snapshot()
+        XCTAssertEqual(refreshed.clips.first?.thumbnailURL, thumbnailURL)
     }
 
     func testStaleCompletionCannotWriteMediaOrOverwriteNewerStoryline() async throws {
@@ -1729,6 +1483,80 @@ final class TimelineEditorTests: XCTestCase {
         XCTAssertEqual(persisted.clips.count, 1)
         XCTAssertTrue(FileManager.default.fileExists(atPath: firstSource.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: secondSource.path))
+    }
+
+    @MainActor
+    func testReopenedWorkspaceCanCommitTrimBeforeEnteringCapture() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let completion = try await TimelineEditor(
+            projectID: project.id,
+            projectStore: store
+        ).completeFinalizedTake(
+            FinalizedTake(
+                id: UUID(),
+                movieURL: try makeMovie(in: root),
+                orientation: .portrait,
+                duration: 4,
+                createdAt: Date(timeIntervalSince1970: 1)
+            ),
+            expectedRevision: .zero
+        )
+        let model = AppModel(project: completion.project, projectStore: store)
+        let selection = TakeRange(startSeconds: 0.5, endSeconds: 2.8)
+
+        XCTAssertEqual(model.phase, .configuring)
+        let outcome = try await model.performTimelineEdit(
+            .trim(clipID: completion.clip.id, selection: selection),
+            expectedRevision: completion.snapshot.revision
+        )
+
+        XCTAssertEqual(outcome.snapshot.clips.first?.selection, selection)
+        XCTAssertEqual(
+            try store.load(id: project.id).primaryStoryline.clips.first?.selection,
+            selection
+        )
+    }
+
+    @MainActor
+    func testReopenedWorkspaceCanStartExportBeforeEnteringCapture() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let completion = try await TimelineEditor(
+            projectID: project.id,
+            projectStore: store
+        ).completeFinalizedTake(
+            FinalizedTake(
+                id: UUID(),
+                movieURL: try makeMovie(in: root),
+                orientation: .portrait,
+                duration: 4,
+                createdAt: Date(timeIntervalSince1970: 1)
+            ),
+            expectedRevision: .zero
+        )
+        let model = AppModel(project: completion.project, projectStore: store)
+        for _ in 0..<100 where model.exportSnapshot == nil {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(model.phase, .configuring)
+        XCTAssertNotNil(model.exportSnapshot)
+        XCTAssertTrue(model.canExportProject)
+
+        model.exportProject(includeCaptions: false)
+
+        XCTAssertTrue(
+            model.isExportingProject,
+            "A visible Workspace export action must never discard the tap silently."
+        )
+        model.cancelProjectExport()
     }
 
     private func makeMovie(in directory: URL = FileManager.default.temporaryDirectory) throws -> URL {

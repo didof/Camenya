@@ -36,16 +36,24 @@ struct CaptionBurnInRenderer {
         overlayLayer.frame = parentLayer.frame
         parentLayer.addSublayer(videoLayer)
         parentLayer.addSublayer(overlayLayer)
+        let configuration = ProjectCaptionConfiguration(
+            localeIdentifier: "und",
+            placement: timeline.placement,
+            style: timeline.style,
+            customization: timeline.customization
+        )
 
         for cue in timeline.cues {
             let base = captionLayer(
                 text: attributedCaption(
                     cue.text,
                     highlighting: nil,
-                    fontSize: metrics.fontSize
+                    fontSize: metrics.fontSize,
+                    configuration: configuration,
+                    maximumLineWidth: canvas.width * (1 - CaptionPresentationLayout.horizontalInsetFraction * 2)
+                        - metrics.padding * 2
                 ),
-                placement: timeline.placement,
-                style: timeline.style,
+                configuration: configuration,
                 canvas: canvas,
                 metrics: metrics
             )
@@ -53,6 +61,7 @@ struct CaptionBurnInRenderer {
             overlayLayer.addSublayer(base)
 
             for span in cue.timedSpans {
+                if !CaptionPresentationTheme.usesHighlight(configuration: configuration) { continue }
                 guard let highlightedRange = ProjectCaptionOverlayResolver.highlightRange(
                     for: span,
                     in: cue
@@ -61,10 +70,12 @@ struct CaptionBurnInRenderer {
                     text: attributedCaption(
                         cue.text,
                         highlighting: highlightedRange,
-                        fontSize: metrics.fontSize
+                        fontSize: metrics.fontSize,
+                        configuration: configuration,
+                        maximumLineWidth: canvas.width * (1 - CaptionPresentationLayout.horizontalInsetFraction * 2)
+                            - metrics.padding * 2
                     ),
-                    placement: timeline.placement,
-                    style: timeline.style,
+                    configuration: configuration,
                     canvas: canvas,
                     metrics: metrics
                 )
@@ -75,12 +86,45 @@ struct CaptionBurnInRenderer {
         return LayerTree(parent: parentLayer, video: videoLayer, overlay: overlayLayer)
     }
 
+    func makePreviewLayer(
+        cue: ProjectCaptionExportCue,
+        configuration: ProjectCaptionConfiguration,
+        canvas: CGSize,
+        activeTime: TimeInterval?
+    ) -> CALayer {
+        let metrics = CaptionPresentationLayout.metrics(for: canvas)
+        let highlightedRange = CaptionPresentationTheme.usesHighlight(configuration: configuration)
+            ? activeTime.flatMap { time in
+            cue.timedSpans.first(where: {
+                time >= $0.range.start.seconds && time < $0.range.end.seconds
+            }).flatMap { ProjectCaptionOverlayResolver.highlightRange(for: $0, in: cue) }
+            }
+            : nil
+        let layer = captionLayer(
+            text: attributedCaption(
+                cue.text,
+                highlighting: highlightedRange,
+                fontSize: metrics.fontSize,
+                configuration: configuration,
+                maximumLineWidth: canvas.width
+                    * (1 - CaptionPresentationLayout.horizontalInsetFraction * 2)
+                    - metrics.padding * 2
+            ),
+            configuration: configuration,
+            canvas: canvas,
+            metrics: metrics,
+            previewCoordinates: true
+        )
+        layer.opacity = 1
+        return layer
+    }
+
     private func captionLayer(
         text: NSAttributedString,
-        placement: CaptionPlacementZone,
-        style: CaptionStylePreset,
+        configuration: ProjectCaptionConfiguration,
         canvas: CGSize,
-        metrics: CaptionPresentationLayout.Metrics
+        metrics: CaptionPresentationLayout.Metrics,
+        previewCoordinates: Bool = false
     ) -> CALayer {
         let padding = metrics.padding
         let maximumWidth = canvas.width * (1 - CaptionPresentationLayout.horizontalInsetFraction * 2)
@@ -96,16 +140,22 @@ struct CaptionBurnInRenderer {
         )
 
         let container = CALayer()
-        container.frame = CaptionPresentationLayout.coreAnimationFrame(
-            placement: placement,
-            width: width,
-            height: height,
-            canvas: canvas
-        )
-        switch style {
-        case .highContrast:
-            container.backgroundColor = UIColor.black.withAlphaComponent(0.76).cgColor
-        }
+        container.frame = previewCoordinates
+            ? CaptionPresentationLayout.previewFrame(
+                placement: configuration.placement,
+                width: width,
+                height: height,
+                canvas: canvas
+            )
+            : CaptionPresentationLayout.coreAnimationFrame(
+                placement: configuration.placement,
+                width: width,
+                height: height,
+                canvas: canvas
+            )
+        container.backgroundColor = UIColor.black.withAlphaComponent(
+            CaptionPresentationTheme.backgroundAlpha(configuration: configuration)
+        ).cgColor
         container.cornerRadius = metrics.cornerRadius
         container.masksToBounds = true
         container.opacity = 0
@@ -116,7 +166,13 @@ struct CaptionBurnInRenderer {
         textLayer.contentsScale = 1
         textLayer.isWrapped = true
         textLayer.alignmentMode = .center
-        textLayer.truncationMode = .end
+        textLayer.truncationMode = .none
+        if CaptionPresentationTheme.usesShadow(configuration: configuration) {
+            textLayer.shadowColor = UIColor.black.cgColor
+            textLayer.shadowOpacity = 0.9
+            textLayer.shadowRadius = configuration.style == .impact ? 4 : 3
+            textLayer.shadowOffset = CGSize(width: 0, height: 2)
+        }
         textLayer.frame = CGRect(
             x: padding,
             y: max(0, (height - ceil(textBounds.height)) / 2),
@@ -130,24 +186,44 @@ struct CaptionBurnInRenderer {
     private func attributedCaption(
         _ text: String,
         highlighting range: NSRange?,
-        fontSize: CGFloat
+        fontSize: CGFloat,
+        configuration: ProjectCaptionConfiguration,
+        maximumLineWidth: CGFloat
     ) -> NSAttributedString {
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .center
         paragraph.lineBreakMode = .byWordWrapping
+        let baseFont = CaptionPresentationTheme.font(configuration: configuration, size: fontSize)
+        let resolvedText = CaptionLineComposer.resolvedText(
+            text,
+            font: baseFont,
+            maximumWidth: maximumLineWidth
+        ) ?? text
         let attributed = NSMutableAttributedString(
-            string: text,
+            string: resolvedText,
             attributes: [
-                .font: UIFont.systemFont(ofSize: fontSize, weight: .bold),
-                .foregroundColor: UIColor.white,
+                .font: baseFont,
+                .foregroundColor: CaptionPresentationTheme.textColor(configuration: configuration),
                 .paragraphStyle: paragraph
             ]
         )
         if let range, NSMaxRange(range) <= attributed.length {
-            attributed.addAttributes([
-                .foregroundColor: UIColor.systemYellow,
-                .font: UIFont.systemFont(ofSize: fontSize, weight: .heavy)
-            ], range: range)
+            let highlightAttributes: [NSAttributedString.Key: Any]
+            let usesPill = configuration.style == .impact
+                || (configuration.style == .custom && configuration.customization.highlighting == .pill)
+            if usesPill {
+                highlightAttributes = [
+                    .foregroundColor: UIColor.black,
+                    .backgroundColor: CaptionPresentationTheme.accentColor(configuration: configuration),
+                    .font: CaptionPresentationTheme.font(configuration: configuration, size: fontSize)
+                ]
+            } else {
+                highlightAttributes = [
+                    .foregroundColor: CaptionPresentationTheme.accentColor(configuration: configuration),
+                    .font: CaptionPresentationTheme.font(configuration: configuration, size: fontSize)
+                ]
+            }
+            attributed.addAttributes(highlightAttributes, range: range)
         }
         return attributed
     }
