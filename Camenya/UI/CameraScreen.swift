@@ -7,16 +7,11 @@ struct CameraScreen: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var editingNote = false
     @State private var reviewingTake: ProjectTake?
-    @State private var managingTakes = false
-    @State private var reviewingTimeline = false
-    @State private var timelineSnapshot: ExportSnapshot?
-    @State private var initialTimelineClipID: TimelineClip.ID?
     @State private var confirmingCurrentTakeDiscard = false
     @State private var focusPoint: CGPoint?
     @State private var focusPulse = 0
     @State private var exposureDragStart: Float?
     @State private var isAdjustingExposure = false
-    @State private var takeListActionCoordinator = TakeListActionCoordinator()
     let onBack: (() -> Void)?
     let onCaptureEnded: ((ProjectTake?) -> Void)?
 
@@ -85,7 +80,7 @@ struct CameraScreen: View {
         .onChange(of: scenePhase) { _, newPhase in model.handleScenePhase(newPhase) }
         .sheet(isPresented: $editingNote) {
             ProjectNoteEditor(
-                text: $projectNote.text,
+                note: projectNote,
                 saveErrorMessage: model.projectNoteSaveErrorMessage,
                 canRetry: model.canRetryProjectNoteSave,
                 onRetry: model.retryProjectNoteSave
@@ -107,30 +102,6 @@ struct CameraScreen: View {
                 title: "Take \((model.project.takes.firstIndex(of: take) ?? 0) + 1)",
                 format: model.project.format ?? .portrait
             )
-        }
-        .sheet(isPresented: $managingTakes, onDismiss: performPendingTakeListAction) {
-            TakeListScreen(model: model) { action in
-                takeListActionCoordinator.request(action)
-                managingTakes = false
-            }
-                .presentationDetents([.medium, .large])
-                .presentationDragIndicator(.visible)
-        }
-        .sheet(isPresented: $reviewingTimeline) {
-            if let timelineSnapshot {
-                TimelineReviewScreen(
-                    snapshot: timelineSnapshot,
-                    title: model.project.name,
-                    format: model.project.format ?? .portrait,
-                    model: model,
-                    initialSelectedClipID: initialTimelineClipID
-                )
-            }
-        }
-        .onChange(of: model.isAnalyzingTrim) { wasAnalyzing, isAnalyzing in
-            if wasAnalyzing, !isAnalyzing, !model.trimReviewTakeIDs.isEmpty {
-                openTimeline(preferredTakeID: model.trimReviewTakeIDs.first)
-            }
         }
         .onChange(of: model.completedTakeForReview) { _, take in
             guard let take else { return }
@@ -168,38 +139,6 @@ struct CameraScreen: View {
         } message: {
             Text("All recorded Segments in this Take will be deleted.")
         }
-    }
-
-    private func performPendingTakeListAction() {
-        guard let action = takeListActionCoordinator.consumeNextAction(
-            sheetIsPresented: managingTakes
-        ) else { return }
-        switch action {
-        case .playProject:
-            openTimeline()
-        case .analyzeEdges:
-            model.cleanUpEdges()
-        case .reviewEdges:
-            openTimeline(preferredTakeID: model.trimReviewTakeIDs.first)
-        case let .manageEdges(takeID):
-            if model.prepareTrimReview(takeID: takeID) {
-                openTimeline(preferredTakeID: takeID)
-            }
-        case .exportProject:
-            model.exportProject(includeCaptions: model.hasCompletedProjectCaptions)
-        }
-    }
-
-    private func openTimeline(preferredTakeID: UUID? = nil) {
-        guard let snapshot = model.timelinePlaybackSnapshot else {
-            model.reportInvalidTrimRange()
-            return
-        }
-        timelineSnapshot = snapshot
-        initialTimelineClipID = preferredTakeID.flatMap { takeID in
-            snapshot.clips.first(where: { $0.takeID == takeID })?.id
-        }
-        reviewingTimeline = true
     }
 
     private var previewInteractionLayer: some View {
@@ -341,9 +280,6 @@ struct CameraScreen: View {
                 pausePanel
                     .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
-            if model.phase == .idle, !model.project.takes.isEmpty {
-                timelineShelf
-            }
             if let cameraRecoveryMessage = model.cameraRecoveryMessage {
                 cameraRecoveryPanel(cameraRecoveryMessage)
             }
@@ -432,46 +368,13 @@ struct CameraScreen: View {
                 )
             }
         } label: {
-            HStack(spacing: 6) {
-                Text(model.project.name)
-                    .lineLimit(1)
-                Image(systemName: "chevron.down")
-                    .font(.caption2.weight(.bold))
-            }
-            .font(.subheadline.weight(.semibold))
-            .padding(.horizontal, 12)
-            .frame(height: 38)
-            .background(CamenyaStyle.chrome, in: Capsule())
-            .overlay(Capsule().stroke(CamenyaStyle.hairline, lineWidth: 1))
+            Image(systemName: "slider.horizontal.3")
+                .font(.body.weight(.semibold))
+                .frame(width: 44, height: 44)
+                .background(CamenyaStyle.chrome, in: Circle())
+                .overlay(Circle().stroke(CamenyaStyle.hairline, lineWidth: 1))
         }
-        .accessibilityLabel("Capture options for \(model.project.name)")
-    }
-
-    private var timelineShelf: some View {
-        Button { managingTakes = true } label: {
-            HStack(spacing: 9) {
-                Image(systemName: "film.stack")
-                Text("\(model.project.takes.count) \(model.project.takes.count == 1 ? "Take" : "Takes")")
-                    .font(.subheadline.weight(.semibold))
-                Spacer(minLength: 8)
-                Text(RecordingDurationFormatter.clock(model.project.approximateDuration))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(CamenyaStyle.muted)
-                Image(systemName: "chevron.up")
-                    .font(.caption2.weight(.bold))
-                    .accessibilityHidden(true)
-            }
-            .padding(.horizontal, 14)
-            .frame(height: 44)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(CameraPressStyle())
-        .background(CamenyaStyle.chrome, in: Capsule())
-        .overlay(Capsule().stroke(CamenyaStyle.hairline, lineWidth: 1))
-        .accessibilityLabel("View \(model.project.takes.count) \(model.project.takes.count == 1 ? "Take" : "Takes")")
-        .accessibilityValue(RecordingDurationFormatter.clock(model.project.approximateDuration))
-        .accessibilityHint("Opens the Take list for review, reordering, and deletion")
-        .accessibilityIdentifier("take-list-open")
+        .accessibilityLabel("Capture Options")
     }
 
     private var pausePanel: some View {
@@ -970,20 +873,19 @@ private enum RoundCameraButtonKind {
 }
 
 struct ProjectNoteEditor: View {
-    @Binding var text: String
+    @ObservedObject var note: ProjectNoteStore
     let saveErrorMessage: String?
     let canRetry: Bool
     let onRetry: () -> Void
     @Environment(\.dismiss) private var dismiss
-    @FocusState private var isFocused: Bool
 
     init(
-        text: Binding<String>,
+        note: ProjectNoteStore,
         saveErrorMessage: String? = nil,
         canRetry: Bool = false,
         onRetry: @escaping () -> Void = {}
     ) {
-        _text = text
+        self.note = note
         self.saveErrorMessage = saveErrorMessage
         self.canRetry = canRetry
         self.onRetry = onRetry
@@ -1009,7 +911,7 @@ struct ProjectNoteEditor: View {
                     .background(.orange.opacity(0.12))
                 }
                 ZStack(alignment: .topLeading) {
-                    if text.isEmpty {
+                    if note.text.isEmpty {
                         Text("Write the next line, reminder, or cue…")
                             .font(.title3)
                             .foregroundStyle(.secondary)
@@ -1017,13 +919,15 @@ struct ProjectNoteEditor: View {
                             .padding(.vertical, 18)
                             .allowsHitTesting(false)
                     }
-                    TextEditor(text: $text)
-                        .font(.title3)
-                        .lineSpacing(4)
-                        .padding(12)
-                        .scrollContentBackground(.hidden)
-                        .focused($isFocused)
-                        .accessibilityLabel("Project Note")
+                    ProjectNoteTextView(
+                        text: $note.text,
+                        navigationState: note.navigationState(for: note.text)
+                    ) { navigation in
+                        note.rememberNavigation(
+                            cursorUTF16Offset: navigation.cursorUTF16Offset,
+                            verticalScrollOffset: navigation.verticalScrollOffset
+                        )
+                    }
                 }
             }
             .background(Color(uiColor: .secondarySystemBackground))
@@ -1035,7 +939,6 @@ struct ProjectNoteEditor: View {
                         .fontWeight(.semibold)
                 }
             }
-            .onAppear { isFocused = true }
         }
     }
 }

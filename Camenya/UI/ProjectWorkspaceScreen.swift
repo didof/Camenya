@@ -19,6 +19,7 @@ struct ProjectWorkspaceScreen: View {
     @State private var confirmingUnlock = false
     @State private var choosingExportVariant = false
     @State private var openCaptionEditorAfterSetup = false
+    @State private var openCaptionSetupAfterStorylineReview = false
     @State private var failedWorkspaceCaptionAction: WorkspaceCaptionAction?
 
     private enum WorkspaceCaptionAction {
@@ -90,12 +91,12 @@ struct ProjectWorkspaceScreen: View {
             recorder.handleWorkspaceScenePhase(newPhase)
         }
         .sheet(isPresented: $editingNote) {
-            ProjectNoteEditor(text: Binding(
-                get: { recorder.projectNote.text },
-                set: { recorder.projectNote.text = $0 }
-            ), saveErrorMessage: recorder.projectNoteSaveErrorMessage,
-            canRetry: recorder.canRetryProjectNoteSave,
-            onRetry: recorder.retryProjectNoteSave)
+            ProjectNoteEditor(
+                note: recorder.projectNote,
+                saveErrorMessage: recorder.projectNoteSaveErrorMessage,
+                canRetry: recorder.canRetryProjectNoteSave,
+                onRetry: recorder.retryProjectNoteSave
+            )
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
         }
@@ -203,7 +204,45 @@ struct ProjectWorkspaceScreen: View {
                 .disabled(!recorder.canLeaveProject)
             }
 
-            ToolbarItem(placement: .principal) {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                if recorder.timelinePlaybackSnapshot?.clips.isEmpty == false {
+                    Button(action: performCaptionWorkspaceAction) {
+                        ZStack {
+                            Image(systemName: "captions.bubble")
+                            if recorder.isTranscribingCaptions, recorder.isPictureLocked {
+                                ProgressView()
+                                    .controlSize(.mini)
+                                    .offset(x: 9, y: -9)
+                            }
+                        }
+                    }
+                    .accessibilityLabel(captionToolbarLabel)
+                    .accessibilityHint(captionToolbarHint)
+                    .disabled(recorder.isExportingProject)
+
+                    Button("Edit") {
+                        openCaptionSetupAfterStorylineReview = false
+                        if recorder.isPictureLocked { confirmingUnlock = true }
+                        else { isEditingStoryline = true }
+                    }
+                    .accessibilityLabel(recorder.isPictureLocked ? "Edit Video" : "Edit Storyline")
+                    .disabled(recorder.isExportingProject)
+                }
+                Button {
+                    if recorder.hasCompletedProjectCaptions {
+                        choosingExportVariant = true
+                    } else {
+                        recorder.exportProject(includeCaptions: false)
+                    }
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                }
+                .disabled(!recorder.canExportProject)
+                .accessibilityLabel("Share Project")
+                .accessibilityHint(recorder.isTranscribingCaptions
+                    ? "Wait for caption generation to finish"
+                    : "Choose a finished video to share")
+
                 Menu {
                     Button("Rename", systemImage: "pencil") {
                         draftName = recorder.project.name
@@ -220,71 +259,10 @@ struct ProjectWorkspaceScreen: View {
                         confirmingDeletion = true
                     }
                 } label: {
-                    HStack(spacing: 5) {
-                        Text(recorder.project.name)
-                            .font(.headline)
-                            .lineLimit(1)
-                        if recorder.isPictureLocked {
-                            Image(systemName: "lock.fill")
-                                .font(.caption2)
-                        }
-                        Image(systemName: "chevron.down")
-                            .font(.caption2.weight(.bold))
-                    }
+                    Image(systemName: recorder.isPictureLocked ? "lock.circle" : "ellipsis.circle")
                 }
-                .accessibilityLabel("Project menu for \(recorder.project.name)")
+                .accessibilityLabel("Project menu")
                 .accessibilityValue(recorder.isPictureLocked ? "Video Locked" : "")
-            }
-
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                if recorder.timelinePlaybackSnapshot?.clips.isEmpty == false,
-                   recorder.isPictureLocked || recorder.isReadyForPictureLock {
-                    Button {
-                        if recorder.project.projectCaptionTrack != nil {
-                            showingCaptionEditor = true
-                        } else {
-                            showingCaptionSetup = true
-                        }
-                    } label: {
-                        ZStack {
-                            Image(systemName: "captions.bubble")
-                            if recorder.isTranscribingCaptions, recorder.isPictureLocked {
-                                ProgressView()
-                                    .controlSize(.mini)
-                                    .offset(x: 9, y: -9)
-                            }
-                        }
-                    }
-                    .accessibilityLabel(recorder.isPictureLocked ? "Open Captions" : "Create Captions")
-                    .disabled(recorder.isExportingProject)
-
-                    Button {
-                        if recorder.isPictureLocked { confirmingUnlock = true }
-                        else { isEditingStoryline = true }
-                    } label: {
-                        Image(systemName: "pencil")
-                    }
-                    .accessibilityLabel(recorder.isPictureLocked ? "Edit Video" : "Edit Storyline")
-                    .disabled(recorder.isExportingProject)
-                }
-                Button {
-                    if recorder.hasCompletedProjectCaptions {
-                        choosingExportVariant = true
-                    } else {
-                        recorder.exportProject(includeCaptions: false)
-                    }
-                } label: {
-                    Image(systemName: "square.and.arrow.up")
-                }
-                .disabled(
-                    recorder.timelinePlaybackSnapshot?.clips.isEmpty != false
-                        || recorder.isExportingProject
-                        || recorder.isTranscribingCaptions
-                )
-                .accessibilityLabel("Share Project")
-                .accessibilityHint(recorder.isTranscribingCaptions
-                    ? "Wait for caption generation to finish"
-                    : "Choose a finished video to share")
             }
         }
     }
@@ -303,7 +281,11 @@ struct ProjectWorkspaceScreen: View {
                     presentation: .embedded,
                     onDone: { context in
                         playbackContext = context
+                        let opensCaptionSetup = openCaptionSetupAfterStorylineReview
+                            && recorder.isReadyForPictureLock
+                        openCaptionSetupAfterStorylineReview = false
                         isEditingStoryline = false
+                        if opensCaptionSetup { showingCaptionSetup = true }
                     }
                 )
             } else {
@@ -315,7 +297,7 @@ struct ProjectWorkspaceScreen: View {
                             isActive: destination == .workspace,
                             initialContext: playbackContext,
                             onContextChanged: { playbackContext = $0 },
-                            onPrepare: { isEditingStoryline = true }
+                            onPrepare: beginCaptionPreparation
                         )
                     } else {
                         ProgressView("Preparing Project…")
@@ -387,6 +369,45 @@ struct ProjectWorkspaceScreen: View {
     private func beginCapture() {
         destination = .capture
         recorder.enterCapture()
+    }
+
+    private var captionWorkspaceAction: ProjectCaptionWorkspaceAction {
+        ProjectPresentationPolicy.captionWorkspaceAction(
+            isPictureLocked: recorder.isPictureLocked,
+            isReadyForPictureLock: recorder.isReadyForPictureLock
+        )
+    }
+
+    private var captionToolbarLabel: String {
+        switch captionWorkspaceAction {
+        case .reviewVideo: "Review Before Captions"
+        case .createCaptions: "Create Captions"
+        case .openCaptionEditor: "Open Captions"
+        }
+    }
+
+    private var captionToolbarHint: String {
+        switch captionWorkspaceAction {
+        case .reviewVideo: "Review and confirm the current video, then create captions."
+        case .createCaptions: "Choose the spoken language and lock this edit for captioning."
+        case .openCaptionEditor: "Review and edit the captions for this locked video."
+        }
+    }
+
+    private func performCaptionWorkspaceAction() {
+        switch captionWorkspaceAction {
+        case .reviewVideo:
+            beginCaptionPreparation()
+        case .createCaptions:
+            showingCaptionSetup = true
+        case .openCaptionEditor:
+            showingCaptionEditor = true
+        }
+    }
+
+    private func beginCaptionPreparation() {
+        openCaptionSetupAfterStorylineReview = true
+        isEditingStoryline = true
     }
 
     private var workspaceCaptionErrorMessage: String? {
@@ -511,16 +532,18 @@ private struct ProjectWorkspacePlaybackView: View {
                         selectionSummary
                     }
 
-                    if model.preparationItemCount > 0, !model.isPictureLocked {
+                    if model.needsStorylineCheck, !model.isPictureLocked {
                         Button(action: onPrepare) {
                             HStack(spacing: 10) {
-                                Image(systemName: model.needsStorylineCheck
-                                    ? "play.rectangle"
-                                    : "wand.and.stars")
-                                Text(model.needsStorylineCheck ? "Check Video" : "Prepare Project")
+                                Image(systemName: "captions.bubble")
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Review Before Captions")
+                                    Text("Confirm this edit before generating text.")
+                                        .font(.caption)
+                                        .fontWeight(.regular)
+                                        .foregroundStyle(.secondary)
+                                }
                                 Spacer()
-                                Text("\(model.preparationItemCount)")
-                                    .foregroundStyle(.secondary)
                                 Image(systemName: "chevron.right")
                                     .font(.caption.weight(.semibold))
                                     .foregroundStyle(.tertiary)
@@ -609,66 +632,13 @@ private struct ProjectWorkspacePlaybackView: View {
     }
 
     private var storylineOverview: some View {
-        GeometryReader { geometry in
-            let spacing = CGFloat(max(0, playback.state.clips.count - 1)) * 2
-            HStack(spacing: 2) {
-                ForEach(Array(playback.state.clips.enumerated()), id: \.element.id) { index, clip in
-                    let fraction = clip.duration / max(0.001, playback.state.duration.seconds)
-                    let preparationIssueCount = model.preparationIssueCount(for: clip)
-                    Button {
-                        playback.send(.selectClip(clip.id))
-                    } label: {
-                        TakeThumbnailView(
-                            url: clip.thumbnailURL,
-                            placeholderSystemName: "film",
-                            cornerRadius: 5
-                        )
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(Color(uiColor: .secondarySystemBackground))
-                        .clipped()
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                .stroke(
-                                    playback.state.selectedClipID == clip.id
-                                        ? Color.accentColor
-                                        : Color(uiColor: .separator),
-                                    lineWidth: playback.state.selectedClipID == clip.id ? 3 : 0.5
-                                )
-                        }
-                        .overlay(alignment: .topTrailing) {
-                            if preparationIssueCount > 0 {
-                                Image(systemName: "exclamationmark.circle.fill")
-                                    .font(.caption.weight(.semibold))
-                                    .symbolRenderingMode(.palette)
-                                    .foregroundStyle(.white, .orange)
-                                    .padding(4)
-                                    .accessibilityHidden(true)
-                            }
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .frame(width: max(1, (geometry.size.width - spacing) * fraction))
-                    .accessibilityLabel("Clip \(index + 1) of \(playback.state.clipCount)")
-                    .accessibilityValue(clipAccessibilityValue(
-                        clip,
-                        preparationIssueCount: preparationIssueCount
-                    ))
-                }
-            }
-            .contentShape(Rectangle())
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 2).onChanged { value in
-                    let fraction = min(max(0, value.location.x / max(1, geometry.size.width)), 1)
-                    playback.send(.previewSeek(ProjectTime(
-                        seconds: Double(fraction) * playback.state.duration.seconds
-                    )))
-                }.onEnded { _ in
-                    playback.send(.seek(playback.state.playhead))
-                }
-            )
-        }
-        .frame(height: 64)
-        .accessibilityLabel("Complete Storyline")
+        TimelineFilmstrip(
+            playback: playback,
+            format: model.project.format ?? .portrait,
+            isCommitting: false,
+            preparationIssueCount: model.preparationIssueCount(for:)
+        )
+        .frame(height: 72)
     }
 
     private var selectionSummary: some View {
@@ -684,21 +654,6 @@ private struct ProjectWorkspacePlaybackView: View {
         .font(.caption)
         .foregroundStyle(.secondary)
         .accessibilityElement(children: .combine)
-    }
-
-    private func clipAccessibilityValue(
-        _ clip: TimelinePlaybackSession.FilmstripClip,
-        preparationIssueCount: Int
-    ) -> String {
-        var components = [RecordingDurationFormatter.clock(clip.duration)]
-        if playback.state.selectedClipID == clip.id { components.append("selected") }
-        if preparationIssueCount == 0 {
-            components.append("ready")
-        } else {
-            let noun = preparationIssueCount == 1 ? "item" : "items"
-            components.append("\(preparationIssueCount) preparation \(noun)")
-        }
-        return components.joined(separator: ", ")
     }
 
     private var emptyStoryline: some View {

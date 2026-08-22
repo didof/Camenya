@@ -50,6 +50,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var trimAnalysisStatus: String?
     @Published private(set) var trimAnalysisSummary: String?
     @Published private(set) var trimReviewTakeIDs: [UUID] = []
+    @Published private var trimWaveformCache: [UUID: [Float]] = [:]
+    @Published private var trimWaveformLoadingTakeIDs: Set<UUID> = []
+    @Published private var trimWaveformErrors: [UUID: String] = [:]
     @Published private(set) var isTranscribingCaptions = false
     @Published private(set) var captionTranscriptionProgress: Double = 0
     @Published private(set) var captionTranscriptionStatus: String?
@@ -67,6 +70,10 @@ final class AppModel: ObservableObject {
     var cameraRecoveryMessage: String? { cameraOperationalState.recoveryMessage }
     var hasFailedProjectExportRetry: Bool { failedProjectExportAction != nil }
 
+    private var workspaceMediaOperationsAreAvailable: Bool {
+        phase == .idle || (phase == .configuring && !configurationStarted)
+    }
+
     private let logger = Logger(subsystem: "org.camenya.app", category: "AppModel")
     private let projectStore: ProjectStore
     private let store: TakeManifestStore
@@ -79,6 +86,7 @@ final class AppModel: ObservableObject {
     private let captionTranscriber = CaptionTranscriber(recognizer: CaptionRecognizerFactory.make())
     private let onProjectChanged: @MainActor (ProjectManifest) -> Void
     private let capturePreferenceStore: CapturePreferenceStore
+    private let trimAnalysisProvider: @Sendable (URL) async throws -> TakeTrimAnalysisOutput
     private var machine = RecorderStateMachine()
     private var cameraLifecyclePolicy = CameraLifecyclePolicy()
     private var logicalTimer = LogicalRecordingTimer()
@@ -116,6 +124,9 @@ final class AppModel: ObservableObject {
         project: ProjectManifest,
         projectStore: ProjectStore,
         capturePreferenceStore: CapturePreferenceStore = CapturePreferenceStore(),
+        trimAnalysisProvider: @escaping @Sendable (URL) async throws -> TakeTrimAnalysisOutput = { url in
+            try await TakeTrimAnalyzer().analyze(movieAt: url)
+        },
         onProjectChanged: @escaping @MainActor (ProjectManifest) -> Void = { _ in }
     ) {
         let captureQualityPreferences = capturePreferenceStore.load()
@@ -123,6 +134,7 @@ final class AppModel: ObservableObject {
         self.exportSnapshot = nil
         self.projectStore = projectStore
         self.capturePreferenceStore = capturePreferenceStore
+        self.trimAnalysisProvider = trimAnalysisProvider
         self.captureQualityPreferences = captureQualityPreferences
         self.followSubjectPreferenceCoordinator = FollowSubjectPreferenceCoordinator(
             initialPreference: captureQualityPreferences.followSubjectEnabled
@@ -547,7 +559,7 @@ final class AppModel: ObservableObject {
         _ edit: TimelineEdit,
         expectedRevision: StorylineRevision
     ) async throws -> TimelineEditOutcome {
-        guard phase == .idle, !isExportingProject else {
+        guard workspaceMediaOperationsAreAvailable, !isExportingProject else {
             throw TimelineEditorError.editingUnavailable
         }
         guard timelineEditActivity.begin() else {
@@ -569,7 +581,7 @@ final class AppModel: ObservableObject {
     }
 
     func deleteUnusedTakePermanently(_ takeID: UUID) async throws {
-        guard phase == .idle, !isExportingProject else {
+        guard workspaceMediaOperationsAreAvailable, !isExportingProject else {
             throw TimelineEditorError.editingUnavailable
         }
         guard timelineEditActivity.begin() else {
@@ -591,7 +603,7 @@ final class AppModel: ObservableObject {
         expectedRevision: StorylineRevision,
         focusClipID: TimelineClip.ID?
     ) async throws -> TimelineEditOutcome {
-        guard phase == .idle, !isExportingProject else {
+        guard workspaceMediaOperationsAreAvailable, !isExportingProject else {
             throw TimelineEditorError.editingUnavailable
         }
         guard timelineEditActivity.begin() else {
@@ -646,7 +658,6 @@ final class AppModel: ObservableObject {
     var needsStorylineCheck: Bool {
         project.pictureLock == nil
             && !project.primaryStoryline.clips.isEmpty
-            && ProjectPictureLockReadiness.unresolvedTakeIDs(in: project).isEmpty
             && project.checkedStorylineRevision != project.primaryStoryline.revision
     }
 
@@ -665,7 +676,7 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func createProjectCaptions(configuration: ProjectCaptionConfiguration) -> Bool {
-        guard phase == .idle,
+        guard workspaceMediaOperationsAreAvailable,
               !isExportingProject,
               !isAnalyzingTrim,
               !isEditingTimeline else { return false }
@@ -688,7 +699,7 @@ final class AppModel: ObservableObject {
 
     func resumeProjectCaptionGeneration() {
         guard currentScenePhase == .active,
-              phase == .idle,
+              workspaceMediaOperationsAreAvailable,
               !isExportingProject,
               !isAnalyzingTrim,
               !isTranscribingCaptions,
@@ -905,7 +916,19 @@ final class AppModel: ObservableObject {
         captionTranscriptionTask?.cancel()
         do {
             let updated = try projectStore.unlockPictureLock(projectID: project.id)
+            let captionlessSnapshot = exportSnapshot.map { snapshot in
+                ExportSnapshot(
+                    projectID: snapshot.projectID,
+                    revision: updated.primaryStoryline.revision,
+                    format: snapshot.format,
+                    captionConfiguration: updated.captionConfiguration,
+                    captionTimeline: nil,
+                    clips: snapshot.clips,
+                    duration: snapshot.duration
+                )
+            }
             project = updated
+            if let captionlessSnapshot { exportSnapshot = captionlessSnapshot }
             onProjectChanged(updated)
             captionGenerationErrorMessage = nil
             finishProjectCaptionGeneration()
@@ -928,7 +951,61 @@ final class AppModel: ObservableObject {
     }
 
     func trimEnvelope(for take: ProjectTake) -> [Float] {
-        (try? projectStore.trimEnvelope(projectID: project.id, takeID: take.id)) ?? []
+        if let cached = trimWaveformCache[take.id], !cached.isEmpty { return cached }
+        return (try? projectStore.trimEnvelope(projectID: project.id, takeID: take.id)) ?? []
+    }
+
+    func isPreparingTrimWaveform(for takeID: UUID) -> Bool {
+        trimWaveformLoadingTakeIDs.contains(takeID)
+    }
+
+    func trimWaveformError(for takeID: UUID) -> String? {
+        trimWaveformErrors[takeID]
+    }
+
+    func prepareTrimWaveform(takeID: UUID) async {
+        guard let take = project.takes.first(where: { $0.id == takeID }) else { return }
+        guard trimEnvelope(for: take).isEmpty else {
+            trimWaveformErrors[takeID] = nil
+            return
+        }
+        guard !trimWaveformLoadingTakeIDs.contains(takeID) else { return }
+
+        trimWaveformLoadingTakeIDs.insert(takeID)
+        trimWaveformErrors[takeID] = nil
+        defer { trimWaveformLoadingTakeIDs.remove(takeID) }
+
+        let expectedStorylineRevision = project.primaryStoryline.revision
+        do {
+            let output = try await trimAnalysisProvider(movieURL(for: take))
+            try Task.checkCancellation()
+            guard !output.envelope.isEmpty else {
+                trimWaveformErrors[takeID] = "No audio waveform is available for this Clip."
+                return
+            }
+
+            // Publish the reduced samples first so Trim stays useful even if the
+            // Storyline changes before the optional on-disk cache is committed.
+            trimWaveformCache[takeID] = output.envelope
+            do {
+                let updated = try projectStore.recordTrimAnalysis(
+                    projectID: project.id,
+                    takeID: takeID,
+                    result: output.result,
+                    envelope: output.envelope,
+                    expectedStorylineRevision: expectedStorylineRevision
+                )
+                project = updated
+                onProjectChanged(updated)
+            } catch {
+                logger.info("Trim waveform cache was not persisted: \(error.localizedDescription, privacy: .public)")
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            logger.warning("Trim waveform preparation failed: \(error.localizedDescription, privacy: .public)")
+            trimWaveformErrors[takeID] = "The waveform couldn't be built."
+        }
     }
 
     func storageBytes(for take: ProjectTake) -> Int64 {
@@ -1082,20 +1159,20 @@ final class AppModel: ObservableObject {
     }
 
     var canExportProject: Bool {
-        phase == .idle
+        workspaceMediaOperationsAreAvailable
             && !isExportingProject
             && !isTranscribingCaptions
             && !isEditingTimeline
             && !isAnalyzingTrim
-            && exportSnapshot?.clips.isEmpty == false
+            && !project.primaryStoryline.clips.isEmpty
     }
 
     func exportProject(includeCaptions: Bool = true) {
-        guard phase == .idle,
-              !isExportingProject,
-              !isTranscribingCaptions,
-              !isEditingTimeline,
-              !isAnalyzingTrim else { return }
+        guard canExportProject else {
+            projectExportErrorMessage = "Finish the current operation before exporting."
+            failedProjectExportAction = nil
+            return
+        }
         guard !includeCaptions || hasCompletedProjectCaptions else {
             projectExportErrorMessage = "Complete Caption Review before exporting with captions."
             failedProjectExportAction = nil
@@ -1272,16 +1349,11 @@ final class AppModel: ObservableObject {
     }
 
     var preparationItemCount: Int {
-        ProjectPictureLockReadiness.unresolvedTakeIDs(in: project).count
-            + (needsStorylineCheck ? 1 : 0)
+        needsStorylineCheck ? 1 : 0
     }
 
-    func preparationIssueCount(for clip: TimelinePlaybackSession.FilmstripClip) -> Int {
-        guard let snapshotClip = exportSnapshot?.clips.first(where: { $0.id == clip.id }) else {
-            return 0
-        }
-        let takeID = snapshotClip.takeID
-        return ProjectPictureLockReadiness.unresolvedTakeIDs(in: project).contains(takeID) ? 1 : 0
+    func preparationIssueCount(for _: TimelinePlaybackSession.FilmstripClip) -> Int {
+        0
     }
 
     private func suspendProjectCaptionGeneration() {

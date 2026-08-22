@@ -928,8 +928,7 @@ struct ProjectStore: Sendable {
         var project = try load(id: projectID)
         let expectedRevision = project.primaryStoryline.revision
         guard project.pictureLock == nil else { throw ProjectStoreError.pictureLocked }
-        guard !project.primaryStoryline.clips.isEmpty,
-              ProjectPictureLockReadiness.unresolvedTakeIDs(in: project).isEmpty else {
+        guard !project.primaryStoryline.clips.isEmpty else {
             throw ProjectStoreError.projectNotReadyForPictureLock
         }
         project.checkedStorylineRevision = expectedRevision

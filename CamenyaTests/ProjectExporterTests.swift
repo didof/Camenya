@@ -304,6 +304,8 @@ final class ProjectExporterTests: XCTestCase {
         let audioTracks = try await asset.loadTracks(withMediaType: .audio)
         let video = try XCTUnwrap(videoTracks.first)
         let size = try await video.load(.naturalSize)
+        let formatDescriptions = try await video.load(.formatDescriptions)
+        let formatDescription = try XCTUnwrap(formatDescriptions.first)
         let imageGenerator = AVAssetImageGenerator(asset: asset)
         imageGenerator.requestedTimeToleranceBefore = .zero
         imageGenerator.requestedTimeToleranceAfter = .zero
@@ -314,6 +316,7 @@ final class ProjectExporterTests: XCTestCase {
         XCTAssertEqual(duration, 1, accuracy: 0.08)
         XCTAssertEqual(size.width, 1920, accuracy: 1)
         XCTAssertEqual(size.height, 1080, accuracy: 1)
+        XCTAssertEqual(CMFormatDescriptionGetMediaSubType(formatDescription), kCMVideoCodecType_HEVC)
         XCTAssertEqual(audioTracks.count, 1)
         XCTAssertGreaterThan(firstColor.red, firstColor.blue)
         XCTAssertGreaterThan(secondColor.blue, secondColor.red)

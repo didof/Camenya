@@ -1307,13 +1307,42 @@ final class TimelineEditorTests: XCTestCase {
         XCTAssertEqual(exportPlan.revision, sharedSnapshot.revision)
         XCTAssertEqual(previewSession.state.revision, sharedSnapshot.revision)
         XCTAssertEqual(previewSession.state.clips.map(\.id), sharedSnapshot.clips.map(\.id))
-        XCTAssertEqual(previewSession.state.clips.map(\.thumbnailURL), [
-            store.takeThumbnailURL(projectID: project.id, takeID: first.take.id)
-        ])
+        XCTAssertEqual(previewSession.state.clips.map(\.thumbnailURL), [nil])
         XCTAssertEqual(previewSession.state.clips.map(\.sourceCreatedAt), [first.take.createdAt])
         XCTAssertEqual(exportPlan.urls, sharedSnapshot.clips.map(\.mediaURL))
         XCTAssertEqual(exportPlan.sources.map(\.selection), sharedSnapshot.clips.map(\.selection))
         XCTAssertEqual(exportPlan.sources.count, 1)
+    }
+
+    func testSnapshotPublishesThumbnailURLOnlyAfterThumbnailMetadataIsCommitted() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let editor = TimelineEditor(projectID: project.id, projectStore: store)
+        let completed = try await editor.completeFinalizedTake(
+            FinalizedTake(
+                id: UUID(),
+                movieURL: try makeMovie(in: root),
+                orientation: .portrait,
+                duration: 3,
+                createdAt: Date(timeIntervalSince1970: 1)
+            ),
+            expectedRevision: .zero
+        )
+
+        XCTAssertNil(completed.snapshot.clips.first?.thumbnailURL)
+
+        let thumbnailURL = store.takeThumbnailURL(
+            projectID: project.id,
+            takeID: completed.take.id
+        )
+        try Data("thumbnail".utf8).write(to: thumbnailURL)
+        _ = try store.setThumbnail(projectID: project.id, takeID: completed.take.id)
+
+        let refreshed = try await editor.snapshot()
+        XCTAssertEqual(refreshed.clips.first?.thumbnailURL, thumbnailURL)
     }
 
     func testStaleCompletionCannotWriteMediaOrOverwriteNewerStoryline() async throws {
@@ -1454,6 +1483,80 @@ final class TimelineEditorTests: XCTestCase {
         XCTAssertEqual(persisted.clips.count, 1)
         XCTAssertTrue(FileManager.default.fileExists(atPath: firstSource.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: secondSource.path))
+    }
+
+    @MainActor
+    func testReopenedWorkspaceCanCommitTrimBeforeEnteringCapture() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let completion = try await TimelineEditor(
+            projectID: project.id,
+            projectStore: store
+        ).completeFinalizedTake(
+            FinalizedTake(
+                id: UUID(),
+                movieURL: try makeMovie(in: root),
+                orientation: .portrait,
+                duration: 4,
+                createdAt: Date(timeIntervalSince1970: 1)
+            ),
+            expectedRevision: .zero
+        )
+        let model = AppModel(project: completion.project, projectStore: store)
+        let selection = TakeRange(startSeconds: 0.5, endSeconds: 2.8)
+
+        XCTAssertEqual(model.phase, .configuring)
+        let outcome = try await model.performTimelineEdit(
+            .trim(clipID: completion.clip.id, selection: selection),
+            expectedRevision: completion.snapshot.revision
+        )
+
+        XCTAssertEqual(outcome.snapshot.clips.first?.selection, selection)
+        XCTAssertEqual(
+            try store.load(id: project.id).primaryStoryline.clips.first?.selection,
+            selection
+        )
+    }
+
+    @MainActor
+    func testReopenedWorkspaceCanStartExportBeforeEnteringCapture() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProjectStore(projectsRoot: root)
+        let project = try store.createProject()
+        let completion = try await TimelineEditor(
+            projectID: project.id,
+            projectStore: store
+        ).completeFinalizedTake(
+            FinalizedTake(
+                id: UUID(),
+                movieURL: try makeMovie(in: root),
+                orientation: .portrait,
+                duration: 4,
+                createdAt: Date(timeIntervalSince1970: 1)
+            ),
+            expectedRevision: .zero
+        )
+        let model = AppModel(project: completion.project, projectStore: store)
+        for _ in 0..<100 where model.exportSnapshot == nil {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(model.phase, .configuring)
+        XCTAssertNotNil(model.exportSnapshot)
+        XCTAssertTrue(model.canExportProject)
+
+        model.exportProject(includeCaptions: false)
+
+        XCTAssertTrue(
+            model.isExportingProject,
+            "A visible Workspace export action must never discard the tap silently."
+        )
+        model.cancelProjectExport()
     }
 
     private func makeMovie(in directory: URL = FileManager.default.temporaryDirectory) throws -> URL {

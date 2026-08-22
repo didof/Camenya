@@ -176,6 +176,53 @@ final class ProjectPresentationPolicyTests: XCTestCase {
         ))
     }
 
+    func testCaptionsToolbarAlwaysRoutesToTheNextUnderstandableStep() {
+        XCTAssertEqual(
+            ProjectPresentationPolicy.captionWorkspaceAction(
+                isPictureLocked: false,
+                isReadyForPictureLock: false
+            ),
+            .reviewVideo
+        )
+        XCTAssertEqual(
+            ProjectPresentationPolicy.captionWorkspaceAction(
+                isPictureLocked: false,
+                isReadyForPictureLock: true
+            ),
+            .createCaptions
+        )
+        XCTAssertEqual(
+            ProjectPresentationPolicy.captionWorkspaceAction(
+                isPictureLocked: true,
+                isReadyForPictureLock: false
+            ),
+            .openCaptionEditor
+        )
+    }
+
+    func testSpokenLanguagePresentationDistinguishesProjectDefaultFromTakeOverride() {
+        XCTAssertEqual(
+            ProjectPresentationPolicy.spokenLanguagePresentation(
+                projectDefaultIdentifier: "it-IT",
+                takeOverrideIdentifier: nil
+            ),
+            ProjectSpokenLanguagePresentation(
+                effectiveIdentifier: "it-IT",
+                source: .projectDefault
+            )
+        )
+        XCTAssertEqual(
+            ProjectPresentationPolicy.spokenLanguagePresentation(
+                projectDefaultIdentifier: "it-IT",
+                takeOverrideIdentifier: "en-US"
+            ),
+            ProjectSpokenLanguagePresentation(
+                effectiveIdentifier: "en-US",
+                source: .takeOverride
+            )
+        )
+    }
+
     @MainActor
     func testLibraryLaunchPrunesOnlyContentlessAutomaticDrafts() throws {
         let root = FileManager.default.temporaryDirectory

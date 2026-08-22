@@ -128,6 +128,33 @@ final class CaptureQualityPolicyTests: XCTestCase {
         XCTAssertEqual(selection.formatID, fullHD.id)
     }
 
+    func testNeverUpscalesSubFullHDWhenA1080pFormatIsAvailable() throws {
+        let stabilized720p = CaptureFormatCandidate(
+            id: CaptureFormatID("720p-stabilized"),
+            width: 1_280,
+            height: 720,
+            supportsThirtyFPS: true,
+            supportedStabilizationModes: [.cinematicExtendedEnhanced],
+            supportsSubjectFollowing: true
+        )
+        let fullHD = CaptureFormatCandidate(
+            id: CaptureFormatID("1080p"),
+            width: 1_920,
+            height: 1_080,
+            supportsThirtyFPS: true,
+            supportedStabilizationModes: [.cinematicExtended],
+            supportsSubjectFollowing: true
+        )
+
+        let selection = try XCTUnwrap(CaptureQualityPolicy.selectFormat(
+            from: [stabilized720p, fullHD],
+            prefersSubjectFollowing: true
+        ))
+
+        XCTAssertEqual(selection.formatID, fullHD.id)
+        XCTAssertEqual(selection.stabilizationMode, .cinematicExtended)
+    }
+
     func testExposureDragClampsBiasToDeviceRange() {
         XCTAssertEqual(
             CaptureExposurePolicy.bias(

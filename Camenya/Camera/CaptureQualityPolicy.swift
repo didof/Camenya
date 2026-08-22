@@ -120,6 +120,10 @@ struct CaptureFormatCandidate: Equatable, Sendable {
     var isFullHD: Bool {
         max(width, height) == 1_920 && min(width, height) == 1_080
     }
+
+    var isFullHDOrBetter: Bool {
+        max(width, height) >= 1_920 && min(width, height) >= 1_080
+    }
 }
 
 struct CaptureQualitySelection: Equatable, Sendable {
@@ -145,10 +149,13 @@ enum CaptureQualityPolicy {
         let thirtyFPS = candidates.filter { $0.supportsThirtyFPS && $0.supportsSDR }
         guard !thirtyFPS.isEmpty else { return nil }
 
-        let subjectFollowing = thirtyFPS.filter(\.supportsSubjectFollowing)
+        let fullHDOrBetter = thirtyFPS.filter(\.isFullHDOrBetter)
+        let resolutionPool = fullHDOrBetter.isEmpty ? thirtyFPS : fullHDOrBetter
+
+        let subjectFollowing = resolutionPool.filter(\.supportsSubjectFollowing)
         let capabilityPool = prefersSubjectFollowing && !subjectFollowing.isEmpty
             ? subjectFollowing
-            : thirtyFPS
+            : resolutionPool
 
         guard let selected = capabilityPool.sorted(by: isPreferred).first else { return nil }
         return CaptureQualitySelection(

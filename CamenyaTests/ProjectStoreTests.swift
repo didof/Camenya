@@ -945,7 +945,18 @@ final class ProjectStoreTests: XCTestCase {
         let support = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: support) }
         let legacyStore = TakeManifestStore(recordingsRoot: support.appendingPathComponent("Recordings", isDirectory: true))
-        let legacyTake = try legacyStore.createTake(orientation: .portrait)
+        var legacyTake = try legacyStore.createTake(orientation: .portrait)
+        let segmentURL = legacyStore.segmentURL(takeID: legacyTake.id, index: 0)
+        try Data("segment".utf8).write(to: segmentURL)
+        legacyTake.status = .paused
+        legacyTake.segments = [Segment(
+            index: 0,
+            fileName: segmentURL.lastPathComponent,
+            cameraPosition: .front,
+            createdAt: Date(),
+            duration: 1
+        )]
+        try legacyStore.save(legacyTake)
         let store = ProjectStore(projectsRoot: support.appendingPathComponent("Projects", isDirectory: true))
 
         try store.migrateLegacyRecordingsIfNeeded()
