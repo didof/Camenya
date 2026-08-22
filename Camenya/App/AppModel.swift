@@ -18,6 +18,45 @@ enum ProjectExportVariantEligibility {
             && snapshot.captionTimeline != nil
     }
 }
+
+struct FinishVideoDependencies: Sendable {
+    let export: (@Sendable (ProjectExportPlan, URL) async throws -> URL)?
+    let validate: @Sendable (URL, Bool) async throws -> TimeInterval
+    let saveToPhotos: @Sendable (URL) async throws -> Void
+    let commitPictureLock: @Sendable (
+        ProjectStore,
+        UUID,
+        StorylineRevision
+    ) async throws -> ProjectManifest
+
+    init(
+        export: (@Sendable (ProjectExportPlan, URL) async throws -> URL)? = nil,
+        validate: @escaping @Sendable (URL, Bool) async throws -> TimeInterval = { url, requiresAudio in
+            try await ProjectExportValidator().validate(url, requiresAudio: requiresAudio)
+        },
+        saveToPhotos: @escaping @Sendable (URL) async throws -> Void = { url in
+            try await PhotoLibrarySaver().saveVideo(at: url)
+        },
+        commitPictureLock: @escaping @Sendable (
+            ProjectStore,
+            UUID,
+            StorylineRevision
+        ) async throws -> ProjectManifest = { store, projectID, revision in
+            try store.commitPictureLockAfterCleanMaster(
+                projectID: projectID,
+                expectedRevision: revision
+            )
+        }
+    ) {
+        self.export = export
+        self.validate = validate
+        self.saveToPhotos = saveToPhotos
+        self.commitPictureLock = commitPictureLock
+    }
+
+    static let live = FinishVideoDependencies()
+}
+
 import UIKit
 
 @MainActor
@@ -39,12 +78,14 @@ final class AppModel: ObservableObject {
     @Published private(set) var captureCapabilities: CaptureCapabilities = .unavailable
     @Published private(set) var captureQualityPreferences: CaptureQualityPreferences
     @Published private(set) var isExportingProject = false
+    @Published private(set) var projectExportCanCancel = false
     @Published private(set) var isEditingTimeline = false
     @Published private(set) var projectExportStatus: String?
     @Published private(set) var completedTakeForReview: ProjectTake?
     @Published private(set) var projectExportProgress: Double = 0
     @Published private(set) var shareableProjectExport: ShareableProjectExport?
     @Published private(set) var projectExportErrorMessage: String?
+    @Published private(set) var cleanMasterPhotosSaveNeedsResolution = false
     @Published private(set) var isAnalyzingTrim = false
     @Published private(set) var trimAnalysisProgress: Double = 0
     @Published private(set) var trimAnalysisStatus: String?
@@ -83,10 +124,11 @@ final class AppModel: ObservableObject {
     private let projectExporter = ProjectExporter()
     private let thumbnailGenerator = TakeThumbnailGenerator()
     private let trimAnalyzer = TakeTrimAnalyzer()
-    private let captionTranscriber = CaptionTranscriber(recognizer: CaptionRecognizerFactory.make())
+    private let captionTranscriber: CaptionTranscriber
     private let onProjectChanged: @MainActor (ProjectManifest) -> Void
     private let capturePreferenceStore: CapturePreferenceStore
     private let trimAnalysisProvider: @Sendable (URL) async throws -> TakeTrimAnalysisOutput
+    private let finishVideoDependencies: FinishVideoDependencies
     private var machine = RecorderStateMachine()
     private var cameraLifecyclePolicy = CameraLifecyclePolicy()
     private var logicalTimer = LogicalRecordingTimer()
@@ -115,6 +157,7 @@ final class AppModel: ObservableObject {
     private var failedProjectExportAction: FailedProjectExportAction?
 
     private enum FailedProjectExportAction {
+        case finishVideo
         case encode(includeCaptions: Bool)
         case finalizeStagedFile(URL, includeCaptions: Bool)
         case sharePendingFile
@@ -127,6 +170,10 @@ final class AppModel: ObservableObject {
         trimAnalysisProvider: @escaping @Sendable (URL) async throws -> TakeTrimAnalysisOutput = { url in
             try await TakeTrimAnalyzer().analyze(movieAt: url)
         },
+        finishVideoDependencies: FinishVideoDependencies = .live,
+        captionTranscriber: CaptionTranscriber = CaptionTranscriber(
+            recognizer: CaptionRecognizerFactory.make()
+        ),
         onProjectChanged: @escaping @MainActor (ProjectManifest) -> Void = { _ in }
     ) {
         let captureQualityPreferences = capturePreferenceStore.load()
@@ -135,6 +182,8 @@ final class AppModel: ObservableObject {
         self.projectStore = projectStore
         self.capturePreferenceStore = capturePreferenceStore
         self.trimAnalysisProvider = trimAnalysisProvider
+        self.finishVideoDependencies = finishVideoDependencies
+        self.captionTranscriber = captionTranscriber
         self.captureQualityPreferences = captureQualityPreferences
         self.followSubjectPreferenceCoordinator = FollowSubjectPreferenceCoordinator(
             initialPreference: captureQualityPreferences.followSubjectEnabled
@@ -180,6 +229,13 @@ final class AppModel: ObservableObject {
         } else if projectStore.pendingExportNeedsHandoff(projectID: project.id) {
             projectExportErrorMessage = "A finished video is safe in this Project. Retry sharing it."
             failedProjectExportAction = .sharePendingFile
+        } else if let cleanMaster = projectStore.recoverableCleanMaster(projectID: project.id) {
+            if cleanMaster.photosSaveStartedAt != nil, cleanMaster.savedToPhotosAt == nil {
+                presentAmbiguousCleanMasterPhotosSave()
+            } else {
+                projectExportErrorMessage = "The Clean Master is safe in this Project. Retry Finish Video."
+                failedProjectExportAction = .finishVideo
+            }
         }
     }
 
@@ -635,14 +691,40 @@ final class AppModel: ObservableObject {
 
     var isPictureLocked: Bool { project.pictureLock != nil }
 
+    var hasPhotosConfirmedPictureLock: Bool { project.hasPhotosConfirmedPictureLock }
+
     var projectCaptionTrack: ProjectCaptionTrack? { project.projectCaptionTrack }
+
+    var projectTextOverlays: [ProjectTextOverlay] { project.projectTextOverlays }
+
+    @discardableResult
+    func saveProjectTextOverlays(_ overlays: [ProjectTextOverlay]) -> Bool {
+        guard !isExportingProject,
+              !isTranscribingCaptions,
+              project.hasPhotosConfirmedPictureLock,
+              let pictureLock = project.pictureLock else { return false }
+        do {
+            let updated = try projectStore.replaceProjectTextOverlays(
+                projectID: project.id,
+                pictureLockID: pictureLock.id,
+                overlays: overlays
+            )
+            project = updated
+            onProjectChanged(updated)
+            return true
+        } catch {
+            logger.error("Text overlay save failed: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+    }
 
     func dismissCaptionGenerationError() {
         captionGenerationErrorMessage = nil
     }
 
     var hasCompletedProjectCaptions: Bool {
-        project.projectCaptionTrack?.reviewState == .approved
+        project.hasPhotosConfirmedPictureLock
+            && project.projectCaptionTrack?.reviewState == .approved
             && project.projectCaptionTrack?.isGenerationComplete == true
     }
 
@@ -652,7 +734,7 @@ final class AppModel: ObservableObject {
     }
 
     var isReadyForPictureLock: Bool {
-        ProjectPictureLockReadiness.isReady(project)
+        project.isReadyForCleanMasterCommit
     }
 
     var needsStorylineCheck: Bool {
@@ -681,7 +763,7 @@ final class AppModel: ObservableObject {
               !isAnalyzingTrim,
               !isEditingTimeline else { return false }
         do {
-            let updated = try projectStore.createPictureLock(
+            let updated = try projectStore.createProjectCaptionTrack(
                 projectID: project.id,
                 configuration: configuration
             )
@@ -697,8 +779,165 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func finishVideo() {
+        if let cleanMaster = projectStore.recoverableCleanMaster(projectID: project.id),
+           cleanMaster.photosSaveStartedAt != nil,
+           cleanMaster.savedToPhotosAt == nil {
+            presentAmbiguousCleanMasterPhotosSave()
+            return
+        }
+        guard workspaceMediaOperationsAreAvailable,
+              !isExportingProject,
+              !isAnalyzingTrim,
+              !isEditingTimeline,
+              !isTranscribingCaptions,
+              (project.pictureLock == nil || project.needsCleanMasterUpgrade),
+              isReadyForPictureLock else { return }
+        projectExportErrorMessage = nil
+        failedProjectExportAction = nil
+        cleanMasterPhotosSaveNeedsResolution = false
+        isExportingProject = true
+        projectExportCanCancel = true
+        projectExportStatus = "Creating Clean Master…"
+        projectExportProgress = 0
+        setIdleTimerDisabled(true)
+        projectExportProgressTimer?.invalidate()
+        projectExportProgressTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.isExportingProject else { return }
+                self.projectExportProgress = self.projectExporter.progress
+            }
+        }
+        projectExportTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let fresh = try await timelineEditor.snapshot()
+                try Task.checkCancellation()
+                let revision = fresh.revision
+                let cleanSnapshot = ExportSnapshot(
+                    projectID: fresh.projectID,
+                    revision: revision,
+                    format: fresh.format,
+                    captionConfiguration: nil,
+                    captionTimeline: nil,
+                    finishingTimeline: nil,
+                    clips: fresh.clips,
+                    duration: fresh.duration
+                )
+                let outputURL = projectStore.cleanMasterURL(
+                    projectID: project.id,
+                    revision: revision
+                )
+                if FileManager.default.fileExists(atPath: outputURL.path) {
+                    projectExportStatus = "Checking Clean Master…"
+                    do {
+                        _ = try await validateCleanMaster(
+                            at: outputURL,
+                            expectedDuration: fresh.duration.seconds,
+                            requiresAudio: fresh.clips.contains { !$0.isMuted }
+                        )
+                    } catch {
+                        projectStore.invalidateCleanMasterRecovery(
+                            projectID: project.id,
+                            removeMedia: true
+                        )
+                        projectExportStatus = "Rebuilding Clean Master…"
+                        _ = try await exportCleanMaster(
+                            plan: try ProjectExportPlan(snapshot: cleanSnapshot),
+                            to: outputURL
+                        )
+                    }
+                } else {
+                    _ = try await exportCleanMaster(
+                        plan: try ProjectExportPlan(snapshot: cleanSnapshot),
+                        to: outputURL
+                    )
+                }
+                let validatedDuration = try await validateCleanMaster(
+                    at: outputURL,
+                    expectedDuration: fresh.duration.seconds,
+                    requiresAudio: fresh.clips.contains { !$0.isMuted }
+                )
+                let recoverable = try projectStore.recordValidatedCleanMaster(
+                    projectID: project.id,
+                    expectedRevision: revision,
+                    cleanMasterURL: outputURL,
+                    duration: validatedDuration
+                )
+                if recoverable.savedToPhotosAt == nil {
+                    try Task.checkCancellation()
+                    projectExportStatus = "Saving Clean Master to Photos…"
+                    projectExportCanCancel = false
+                    _ = try projectStore.recordCleanMasterPhotosSaveStarted(
+                        projectID: project.id,
+                        expectedRevision: revision
+                    )
+                    do {
+                        try await finishVideoDependencies.saveToPhotos(outputURL)
+                    } catch {
+                        _ = try? projectStore.recordCleanMasterPhotosSaveFailed(
+                            projectID: project.id,
+                            expectedRevision: revision
+                        )
+                        throw error
+                    }
+                    // Persist the external side effect immediately. From here through Picture
+                    // Lock commit there is intentionally no cancellation point, so normal Retry
+                    // resumes at lock persistence instead of creating another Photos asset.
+                    _ = try projectStore.recordCleanMasterSavedToPhotos(
+                        projectID: project.id,
+                        expectedRevision: revision
+                    )
+                }
+                let updated = try await finishVideoDependencies.commitPictureLock(
+                    projectStore,
+                    project.id,
+                    revision
+                )
+                project = updated
+                onProjectChanged(updated)
+                cleanMasterPhotosSaveNeedsResolution = false
+                finishProjectExport()
+                resumeProjectCaptionGeneration()
+                haptic(.success)
+            } catch is CancellationError {
+                finishProjectExport()
+            } catch let error as ProjectExportError where error == .cancelled {
+                finishProjectExport()
+            } catch {
+                finishProjectExport()
+                projectExportErrorMessage = "Finish Video couldn't complete. Every Take and the current Storyline are unchanged."
+                failedProjectExportAction = .finishVideo
+                logger.error("Finish Video failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    private func exportCleanMaster(plan: ProjectExportPlan, to url: URL) async throws -> URL {
+        if let export = finishVideoDependencies.export {
+            return try await export(plan, url)
+        }
+        return try await projectExporter.export(plan: plan, to: url)
+    }
+
+    private func validateCleanMaster(
+        at url: URL,
+        expectedDuration: TimeInterval,
+        requiresAudio: Bool
+    ) async throws -> TimeInterval {
+        let actualDuration = try await finishVideoDependencies.validate(url, requiresAudio)
+        guard CleanMasterDurationPolicy.accepts(
+            actual: actualDuration,
+            expected: expectedDuration
+        ) else {
+            throw ProjectExportError.exportFailed("Clean Master duration does not match the Storyline")
+        }
+        return actualDuration
+    }
+
     func resumeProjectCaptionGeneration() {
         guard currentScenePhase == .active,
+              project.hasPhotosConfirmedPictureLock,
               workspaceMediaOperationsAreAvailable,
               !isExportingProject,
               !isAnalyzingTrim,
@@ -761,7 +1000,7 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func cancelProjectCaptionGeneration() -> Bool {
-        guard project.pictureLock != nil, !isExportingProject else { return false }
+        guard project.hasPhotosConfirmedPictureLock, !isExportingProject else { return false }
         projectCaptionGenerationID += 1
         captionTranscriptionTask?.cancel()
         do {
@@ -1165,11 +1404,14 @@ final class AppModel: ObservableObject {
             && !isEditingTimeline
             && !isAnalyzingTrim
             && !project.primaryStoryline.clips.isEmpty
+            && project.hasPhotosConfirmedPictureLock
     }
 
     func exportProject(includeCaptions: Bool = true) {
         guard canExportProject else {
-            projectExportErrorMessage = "Finish the current operation before exporting."
+            projectExportErrorMessage = !project.hasPhotosConfirmedPictureLock
+                ? "Finish Video before exporting the Project."
+                : "Finish the current operation before exporting."
             failedProjectExportAction = nil
             return
         }
@@ -1198,6 +1440,7 @@ final class AppModel: ObservableObject {
         projectExportErrorMessage = nil
         failedProjectExportAction = nil
         isExportingProject = true
+        projectExportCanCancel = true
         projectExportStatus = "Preparing Export…"
         projectExportProgress = 0
         setIdleTimerDisabled(true)
@@ -1217,6 +1460,14 @@ final class AppModel: ObservableObject {
                         format: freshSnapshot.format,
                         captionConfiguration: freshSnapshot.captionConfiguration,
                         captionTimeline: nil,
+                        finishingTimeline: freshSnapshot.finishingTimeline.map {
+                            ProjectFinishingTimeline(
+                                pictureLockID: $0.pictureLockID,
+                                duration: $0.duration,
+                                textOverlays: $0.textOverlays,
+                                captions: nil
+                            )
+                        },
                         clips: freshSnapshot.clips,
                         duration: freshSnapshot.duration
                     )
@@ -1260,6 +1511,7 @@ final class AppModel: ObservableObject {
         projectExportErrorMessage = nil
         failedProjectExportAction = nil
         isExportingProject = true
+        projectExportCanCancel = true
         projectExportStatus = "Checking Finished Video…"
         projectExportProgress = 0
         setIdleTimerDisabled(true)
@@ -1296,6 +1548,8 @@ final class AppModel: ObservableObject {
     func retryFailedProjectExport() {
         guard let failedProjectExportAction, !isExportingProject else { return }
         switch failedProjectExportAction {
+        case .finishVideo:
+            finishVideo()
         case let .encode(includeCaptions):
             exportProject(includeCaptions: includeCaptions)
         case let .finalizeStagedFile(url, includeCaptions):
@@ -1305,9 +1559,53 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func confirmCleanMasterIsSavedToPhotos() {
+        guard !isExportingProject,
+              let recoverable = projectStore.recoverableCleanMaster(projectID: project.id),
+              let startedAt = recoverable.photosSaveStartedAt,
+              recoverable.savedToPhotosAt == nil else { return }
+        do {
+            _ = try projectStore.recordCleanMasterSavedToPhotos(
+                projectID: project.id,
+                expectedRevision: recoverable.storylineRevision,
+                savedAt: startedAt
+            )
+            cleanMasterPhotosSaveNeedsResolution = false
+            finishVideo()
+        } catch {
+            presentAmbiguousCleanMasterPhotosSave()
+            logger.error("Clean Master Photos confirmation failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    func saveCleanMasterToPhotosAgain() {
+        guard !isExportingProject,
+              let recoverable = projectStore.recoverableCleanMaster(projectID: project.id),
+              recoverable.photosSaveStartedAt != nil,
+              recoverable.savedToPhotosAt == nil else { return }
+        do {
+            _ = try projectStore.recordCleanMasterPhotosSaveFailed(
+                projectID: project.id,
+                expectedRevision: recoverable.storylineRevision
+            )
+            cleanMasterPhotosSaveNeedsResolution = false
+            finishVideo()
+        } catch {
+            presentAmbiguousCleanMasterPhotosSave()
+            logger.error("Clean Master Photos retry reset failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     func dismissProjectExportError() {
         projectExportErrorMessage = nil
         failedProjectExportAction = nil
+        cleanMasterPhotosSaveNeedsResolution = false
+    }
+
+    private func presentAmbiguousCleanMasterPhotosSave() {
+        projectExportErrorMessage = "The Photos save may have finished. Check Photos, then confirm it or choose Save Again."
+        failedProjectExportAction = nil
+        cleanMasterPhotosSaveNeedsResolution = true
     }
 
     func projectExportSharingFinished(completed: Bool) {
@@ -1317,8 +1615,8 @@ final class AppModel: ObservableObject {
     }
 
     func cancelProjectExport() {
-        guard isExportingProject else { return }
-        if projectExportStatus == "Combining Takes…" { projectExporter.cancel() }
+        guard isExportingProject, projectExportCanCancel else { return }
+        if projectExporter.isActive { projectExporter.cancel() }
         projectExportTask?.cancel()
     }
 
@@ -1729,6 +2027,7 @@ final class AppModel: ObservableObject {
         projectExportErrorMessage = nil
         failedProjectExportAction = nil
         isExportingProject = true
+        projectExportCanCancel = true
         projectExportStatus = "Checking Finished Video…"
         projectExportProgress = 0
         setIdleTimerDisabled(true)
@@ -1797,6 +2096,7 @@ final class AppModel: ObservableObject {
         projectExportProgressTimer?.invalidate()
         projectExportProgressTimer = nil
         isExportingProject = false
+        projectExportCanCancel = false
         projectExportStatus = nil
         projectExportProgress = 0
         projectExportTask = nil

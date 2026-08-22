@@ -501,7 +501,7 @@ final class ProjectExporterTests: XCTestCase {
             decision: .keepOriginal
         )
         updated = try store.markStorylineChecked(projectID: project.id)
-        updated = try store.createPictureLock(
+        updated = try store.createPictureLockForTesting(
             projectID: project.id,
             configuration: ProjectCaptionConfiguration(localeIdentifier: "it-IT", placement: .lower)
         )

@@ -16,10 +16,11 @@ struct ProjectWorkspaceScreen: View {
     @State private var confirmingDeletion = false
     @State private var showingCaptionSetup = false
     @State private var showingCaptionEditor = false
+    @State private var showingTextOverlayEditor = false
     @State private var confirmingUnlock = false
     @State private var choosingExportVariant = false
     @State private var openCaptionEditorAfterSetup = false
-    @State private var openCaptionSetupAfterStorylineReview = false
+    @State private var finishVideoAfterStorylineReview = false
     @State private var failedWorkspaceCaptionAction: WorkspaceCaptionAction?
 
     private enum WorkspaceCaptionAction {
@@ -143,6 +144,22 @@ struct ProjectWorkspaceScreen: View {
                 )
             }
         }
+        .fullScreenCover(isPresented: $showingTextOverlayEditor) {
+            if let snapshot = recorder.timelinePlaybackSnapshot {
+                ProjectTextOverlayEditorScreen(
+                    model: recorder,
+                    snapshot: snapshot,
+                    initialProjectTime: playbackContext.projectTime,
+                    onDone: { projectTime in
+                        playbackContext = TimelinePlaybackContext(
+                            selectedClipID: recorder.timelinePlaybackSnapshot?.position(at: projectTime)?.clipID,
+                            projectTime: projectTime
+                        )
+                        showingTextOverlayEditor = false
+                    }
+                )
+            }
+        }
         .alert("Rename Project", isPresented: $renaming) {
             TextField("Project name", text: $draftName)
             Button("Cancel", role: .cancel) {}
@@ -164,12 +181,15 @@ struct ProjectWorkspaceScreen: View {
             isPresented: $confirmingUnlock,
             titleVisibility: .visible
         ) {
-            Button("Unlock & Edit", role: .destructive) {
+            Button(
+                unlockPresentation.actionTitle,
+                role: .destructive
+            ) {
                 attemptUnlock()
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Generated captions, timing, and manual caption corrections will be removed. Takes and every pre-lock Storyline edit stay unchanged.")
+            Text(unlockPresentation.message)
         }
         .confirmationDialog(
             "Export Project",
@@ -206,9 +226,20 @@ struct ProjectWorkspaceScreen: View {
 
             ToolbarItemGroup(placement: .topBarTrailing) {
                 if recorder.timelinePlaybackSnapshot?.clips.isEmpty == false {
+                    if recorder.hasPhotosConfirmedPictureLock {
+                        Button {
+                            showingTextOverlayEditor = true
+                        } label: {
+                            Image(systemName: "textformat")
+                        }
+                        .accessibilityLabel("Text Overlays")
+                        .accessibilityHint("Add and time text on the finished video")
+                        .disabled(recorder.isExportingProject || recorder.isTranscribingCaptions)
+                    }
+
                     Button(action: performCaptionWorkspaceAction) {
                         ZStack {
-                            Image(systemName: "captions.bubble")
+                            Image(systemName: captionToolbarSymbol)
                             if recorder.isTranscribingCaptions, recorder.isPictureLocked {
                                 ProgressView()
                                     .controlSize(.mini)
@@ -221,7 +252,7 @@ struct ProjectWorkspaceScreen: View {
                     .disabled(recorder.isExportingProject)
 
                     Button("Edit") {
-                        openCaptionSetupAfterStorylineReview = false
+                        finishVideoAfterStorylineReview = false
                         if recorder.isPictureLocked { confirmingUnlock = true }
                         else { isEditingStoryline = true }
                     }
@@ -239,9 +270,11 @@ struct ProjectWorkspaceScreen: View {
                 }
                 .disabled(!recorder.canExportProject)
                 .accessibilityLabel("Share Project")
-                .accessibilityHint(recorder.isTranscribingCaptions
-                    ? "Wait for caption generation to finish"
-                    : "Choose a finished video to share")
+                .accessibilityHint(!recorder.hasPhotosConfirmedPictureLock
+                    ? "Finish Video before sharing"
+                    : recorder.isTranscribingCaptions
+                        ? "Wait for caption generation to finish"
+                        : "Choose a finished video to share")
 
                 Menu {
                     Button("Rename", systemImage: "pencil") {
@@ -281,11 +314,11 @@ struct ProjectWorkspaceScreen: View {
                     presentation: .embedded,
                     onDone: { context in
                         playbackContext = context
-                        let opensCaptionSetup = openCaptionSetupAfterStorylineReview
+                        let shouldFinishVideo = finishVideoAfterStorylineReview
                             && recorder.isReadyForPictureLock
-                        openCaptionSetupAfterStorylineReview = false
+                        finishVideoAfterStorylineReview = false
                         isEditingStoryline = false
-                        if opensCaptionSetup { showingCaptionSetup = true }
+                        if shouldFinishVideo { recorder.finishVideo() }
                     }
                 )
             } else {
@@ -297,7 +330,8 @@ struct ProjectWorkspaceScreen: View {
                             isActive: destination == .workspace,
                             initialContext: playbackContext,
                             onContextChanged: { playbackContext = $0 },
-                            onPrepare: beginCaptionPreparation
+                            onPrepare: beginCaptionPreparation,
+                            onFinish: recorder.finishVideo
                         )
                     } else {
                         ProgressView("Preparing Project…")
@@ -315,6 +349,40 @@ struct ProjectWorkspaceScreen: View {
                         .padding(.horizontal, 20)
                         .padding(.vertical, 10)
                         .disabled(!recorder.canLeaveProject)
+                    } else if recorder.hasPhotosConfirmedPictureLock {
+                        HStack(spacing: 12) {
+                            Button(action: performCaptionWorkspaceAction) {
+                                Label(
+                                    recorder.projectCaptionTrack == nil ? "Captions" : "Edit Captions",
+                                    systemImage: "captions.bubble"
+                                )
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                            }
+                            Button {
+                                showingTextOverlayEditor = true
+                            } label: {
+                                Label("Text", systemImage: "textformat")
+                                    .frame(maxWidth: .infinity, minHeight: 44)
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 10)
+                        .disabled(recorder.isExportingProject || recorder.isTranscribingCaptions)
+                    } else {
+                        Button(action: recorder.finishVideo) {
+                            Label("Finish Video", systemImage: "checkmark.seal")
+                                .font(.headline)
+                                .frame(maxWidth: .infinity, minHeight: 54)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .buttonBorderShape(.capsule)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 10)
+                        .disabled(recorder.isExportingProject)
+                        .accessibilityHint(
+                            "Create, validate, and save a Clean Master before using finishing tools"
+                        )
                     }
                 }
             }
@@ -329,8 +397,10 @@ struct ProjectWorkspaceScreen: View {
             Text(recorder.projectExportStatus ?? "Preparing Project Export…")
                 .font(.footnote.weight(.semibold))
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Button("Cancel") { recorder.cancelProjectExport() }
-                .font(.footnote.weight(.semibold))
+            if recorder.projectExportCanCancel {
+                Button("Cancel") { recorder.cancelProjectExport() }
+                    .font(.footnote.weight(.semibold))
+            }
         }
         .padding(.horizontal, 16)
         .frame(minHeight: 50)
@@ -346,7 +416,18 @@ struct ProjectWorkspaceScreen: View {
             Text(message)
                 .font(.footnote)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            if recorder.hasFailedProjectExportRetry {
+            if recorder.cleanMasterPhotosSaveNeedsResolution {
+                Menu("Resolve") {
+                    Button("I See It in Photos") {
+                        recorder.confirmCleanMasterIsSavedToPhotos()
+                    }
+                    Button("Save Again") {
+                        recorder.saveCleanMasterToPhotosAgain()
+                    }
+                }
+                .font(.footnote.weight(.semibold))
+                .accessibilityHint("Choose after checking whether the Clean Master is in Photos")
+            } else if recorder.hasFailedProjectExportRetry {
                 Button("Retry") { recorder.retryFailedProjectExport() }
                     .font(.footnote.weight(.semibold))
                     .disabled(recorder.isTranscribingCaptions)
@@ -374,22 +455,42 @@ struct ProjectWorkspaceScreen: View {
     private var captionWorkspaceAction: ProjectCaptionWorkspaceAction {
         ProjectPresentationPolicy.captionWorkspaceAction(
             isPictureLocked: recorder.isPictureLocked,
-            isReadyForPictureLock: recorder.isReadyForPictureLock
+            hasPhotosConfirmedPictureLock: recorder.hasPhotosConfirmedPictureLock,
+            isReadyForPictureLock: recorder.isReadyForPictureLock,
+            hasCaptionTrack: recorder.projectCaptionTrack != nil
+        )
+    }
+
+    private var unlockPresentation: ProjectUnlockPresentation {
+        ProjectPresentationPolicy.unlockPresentation(
+            hasPhotosConfirmedPictureLock: recorder.hasPhotosConfirmedPictureLock,
+            hasCaptionTrack: recorder.projectCaptionTrack != nil,
+            hasTextOverlays: !recorder.projectTextOverlays.isEmpty
         )
     }
 
     private var captionToolbarLabel: String {
         switch captionWorkspaceAction {
         case .reviewVideo: "Review Before Captions"
+        case .finishVideo: "Finish Video"
         case .createCaptions: "Create Captions"
         case .openCaptionEditor: "Open Captions"
+        }
+    }
+
+    private var captionToolbarSymbol: String {
+        switch captionWorkspaceAction {
+        case .reviewVideo: "checkmark.circle"
+        case .finishVideo: "checkmark.seal"
+        case .createCaptions, .openCaptionEditor: "captions.bubble"
         }
     }
 
     private var captionToolbarHint: String {
         switch captionWorkspaceAction {
         case .reviewVideo: "Review and confirm the current video, then create captions."
-        case .createCaptions: "Choose the spoken language and lock this edit for captioning."
+        case .finishVideo: "Create, validate, and save a clean video before adding finishing text."
+        case .createCaptions: "Choose the spoken language for this finished video."
         case .openCaptionEditor: "Review and edit the captions for this locked video."
         }
     }
@@ -398,6 +499,8 @@ struct ProjectWorkspaceScreen: View {
         switch captionWorkspaceAction {
         case .reviewVideo:
             beginCaptionPreparation()
+        case .finishVideo:
+            recorder.finishVideo()
         case .createCaptions:
             showingCaptionSetup = true
         case .openCaptionEditor:
@@ -406,7 +509,7 @@ struct ProjectWorkspaceScreen: View {
     }
 
     private func beginCaptionPreparation() {
-        openCaptionSetupAfterStorylineReview = true
+        finishVideoAfterStorylineReview = true
         isEditingStoryline = true
     }
 
@@ -497,6 +600,7 @@ private struct ProjectWorkspacePlaybackView: View {
     let isActive: Bool
     let onContextChanged: (TimelinePlaybackContext) -> Void
     let onPrepare: () -> Void
+    let onFinish: () -> Void
     @State private var controlsVisible = true
     @State private var controlsRevealStartedAt: TimeInterval?
 
@@ -506,7 +610,8 @@ private struct ProjectWorkspacePlaybackView: View {
         isActive: Bool,
         initialContext: TimelinePlaybackContext,
         onContextChanged: @escaping (TimelinePlaybackContext) -> Void,
-        onPrepare: @escaping () -> Void
+        onPrepare: @escaping () -> Void,
+        onFinish: @escaping () -> Void
     ) {
         _playback = StateObject(wrappedValue: TimelinePlaybackSession(
             snapshot: snapshot,
@@ -518,6 +623,7 @@ private struct ProjectWorkspacePlaybackView: View {
         self.isActive = isActive
         self.onContextChanged = onContextChanged
         self.onPrepare = onPrepare
+        self.onFinish = onFinish
     }
 
     var body: some View {
@@ -554,6 +660,29 @@ private struct ProjectWorkspacePlaybackView: View {
                         .buttonStyle(.plain)
                         .padding(.horizontal, 14)
                         .background(.background, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    } else if model.isReadyForPictureLock, !model.isPictureLocked {
+                        Button(action: onFinish) {
+                            HStack(spacing: 10) {
+                                Image(systemName: "checkmark.seal")
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Finish Video")
+                                    Text("Validate and save the Clean Master before adding text.")
+                                        .font(.caption)
+                                        .fontWeight(.regular)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .font(.subheadline.weight(.semibold))
+                            .frame(minHeight: 44)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 14)
+                        .background(.background, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .disabled(model.isExportingProject)
                     }
                 }
                 .padding(.horizontal, 16)
@@ -597,6 +726,32 @@ private struct ProjectWorkspacePlaybackView: View {
         ZStack {
             PlayerLayerView(player: playback.player)
                 .background(.black)
+
+            if let finishing = snapshot.finishingTimeline {
+                ForEach(finishing.activeTextOverlays(at: playback.state.playhead.seconds)) { overlay in
+                    TextOverlayLayerPreview(overlay: overlay)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+                if let captions = finishing.captions,
+                   let active = ProjectCaptionOverlayResolver.active(
+                        in: captions,
+                        at: playback.state.playhead.seconds
+                   ) {
+                    CaptionLayerPreview(
+                        cue: active.cue,
+                        configuration: ProjectCaptionConfiguration(
+                            localeIdentifier: "und",
+                            placement: captions.placement,
+                            style: captions.style,
+                            customization: captions.customization
+                        ),
+                        activeTime: playback.state.playhead.seconds
+                    )
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+                }
+            }
 
             if playback.state.phase == .preparing {
                 ProgressView()

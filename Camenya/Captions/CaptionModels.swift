@@ -15,7 +15,7 @@ enum CaptionStylePreset: String, Codable, Equatable, Hashable, Sendable {
 }
 
 enum CaptionFontDesign: String, Codable, Equatable, Hashable, Sendable, CaseIterable {
-    case system, rounded, serif
+    case system, rounded, serif, monospaced
 }
 
 enum CaptionFontScale: String, Codable, Equatable, Hashable, Sendable, CaseIterable {
@@ -23,7 +23,7 @@ enum CaptionFontScale: String, Codable, Equatable, Hashable, Sendable, CaseItera
 }
 
 enum CaptionTextColor: String, Codable, Equatable, Hashable, Sendable, CaseIterable {
-    case white, yellow
+    case white, yellow, custom
 }
 
 enum CaptionHighlightStyle: String, Codable, Equatable, Hashable, Sendable, CaseIterable {
@@ -50,6 +50,10 @@ struct CaptionStyleCustomization: Codable, Equatable, Hashable, Sendable {
     var accentColor: CaptionAccentColor = .yellow
     var background: CaptionBackgroundStyle = .roundedBox
     var containerOpacity: CaptionContainerOpacity = .medium
+    var customTextColor: TextColor?
+    var outline: TextOutlineStyle?
+    var fontWeight: TextFontWeight?
+    var alignment: TextHorizontalAlignment?
 }
 
 enum CaptionTextDensity: String, Codable, Equatable, Hashable, Sendable {

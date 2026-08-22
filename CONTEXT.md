@@ -38,7 +38,8 @@ The current Storyline-ordered view of unresolved pre-lock Project Preparation wo
 _Avoid_: Task List, Processing Log
 
 **Picture Lock**:
-The explicit immutable snapshot of the completed Primary Storyline against which Camenya generates one Project-Time Caption Track and the final export. Returning to structural Storyline editing requires confirmed removal of the Picture Lock and its derived captions.
+The explicit immutable snapshot committed by Finish Video only after the corresponding Clean Master has been encoded, validated, and saved to Photos. It is the Project-Time foundation for captions, finishing overlays, and final export. Returning to structural Storyline editing requires confirmed removal of the Picture Lock and all finishing elements derived from it.
+Schema-10 Picture Locks are retained as legacy immutable snapshots, but finishing and final export remain unavailable until Finish Video attaches a Photos-confirmed Clean Master without replacing the existing lock or Caption Track.
 _Avoid_: Final Video, Encoded Master
 
 ## Recorded sources
@@ -128,9 +129,12 @@ The optional workflow in which the user compares a Trim Suggestion with a Timeli
 A Storyline Item that presents text for an explicit duration without referencing a Take.
 
 **Text Overlay**:
-A timed text element attached to one Timeline Clip and positioned within the Project's Content Safe Region.
+A Picture-Lock-owned finishing element displayed statically over an explicit interval in Project Time and positioned within the Project's Content Safe Region. It appears at the interval's Start and disappears at its End, without animation. It is independent of Caption Cues and never belongs to an individual Take or Timeline Clip. Text Overlays may be reordered relative to other Overlays, but every Caption Cue is always composited above every Overlay.
 
 ## Captions
+
+**Text Appearance**:
+The reusable visual treatment shared by captions and finishing text overlays, including font design and weight, text color, outline, shadow, background, and text alignment. It excludes timing, placement, overlay dimensions, caption density, and spoken-word highlighting.
 
 **Caption Configuration**:
 The Project-owned default spoken language, text density, shared visual style, and normalized placement used by its post-lock captions.
@@ -142,6 +146,13 @@ The Picture-Lock-owned collection of Caption Cues timed directly in Project Time
 One editable, optionally enabled Project Time interval within the locked Caption Track. It preserves recognized text, alternatives, confidence, and only the timing granularity supplied by recognition or review.
 
 ## Export and deletion
+
+**Finish Video**:
+The explicit transition that stages the current Primary Storyline, encodes and validates its clean result, saves that result to Photos, then commits Picture Lock and opens finishing. Failure leaves the Storyline editable and preserves recoverable staged media for an exact Retry. If Photos may have committed before local confirmation, automatic retry is forbidden until the user checks Photos and explicitly confirms the save or chooses Save Again.
+
+**Clean Master**:
+The validated captionless and overlay-free Project movie produced by Finish Video and saved to Photos before Picture Lock is committed. It is a durable clean result and a replaceable in-app finishing aid, not the canonical source for later burned-in exports.
+_Avoid_: Checkpoint Export, Encoded Source
 
 **Project Export**:
 The explicit process that renders one immutable snapshot of the Primary Storyline into a finished movie that may be saved to Photos. In-app Takes remain independent from the exported movie.

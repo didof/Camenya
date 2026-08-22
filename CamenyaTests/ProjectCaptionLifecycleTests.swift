@@ -3,13 +3,40 @@ import XCTest
 
 final class ProjectCaptionLifecycleTests: XCTestCase {
     @MainActor
-    func testReopenedWorkspaceCanCreateCaptionsBeforeEnteringCapture() throws {
+    func testReopenedFinishedWorkspaceCanCreateCaptionsBeforeEnteringCapture() throws {
         let fixture = try makeProjectWithTwoTakes()
         let readyProject = try fixture.store.load(id: fixture.project.id)
-        let model = AppModel(project: readyProject, projectStore: fixture.store)
+        let cleanMaster = fixture.store.cleanMasterURL(
+            projectID: fixture.project.id,
+            revision: readyProject.primaryStoryline.revision
+        )
+        try FileManager.default.createDirectory(
+            at: cleanMaster.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("validated clean master".utf8).write(to: cleanMaster)
+        try fixture.store.recordValidatedCleanMaster(
+            projectID: fixture.project.id,
+            expectedRevision: readyProject.primaryStoryline.revision,
+            cleanMasterURL: cleanMaster,
+            duration: readyProject.approximateDuration
+        )
+        try fixture.store.recordCleanMasterPhotosSaveStarted(
+            projectID: fixture.project.id,
+            expectedRevision: readyProject.primaryStoryline.revision
+        )
+        try fixture.store.recordCleanMasterSavedToPhotos(
+            projectID: fixture.project.id,
+            expectedRevision: readyProject.primaryStoryline.revision
+        )
+        let finishedProject = try fixture.store.commitPictureLockAfterCleanMaster(
+            projectID: fixture.project.id,
+            expectedRevision: readyProject.primaryStoryline.revision
+        )
+        let model = AppModel(project: finishedProject, projectStore: fixture.store)
 
         XCTAssertEqual(model.phase, .configuring)
-        XCTAssertTrue(model.isReadyForPictureLock)
+        XCTAssertTrue(model.isPictureLocked)
 
         let created = model.createProjectCaptions(configuration: ProjectCaptionConfiguration(
             localeIdentifier: "en-US",
@@ -17,14 +44,14 @@ final class ProjectCaptionLifecycleTests: XCTestCase {
         ))
 
         XCTAssertTrue(created)
-        XCTAssertNotNil(model.project.pictureLock)
+        XCTAssertNotNil(model.project.projectCaptionTrack)
         XCTAssertTrue(model.isTranscribingCaptions)
         XCTAssertTrue(model.cancelProjectCaptionGeneration())
     }
 
     func testCaptionedExportRequiresCompletedReviewAndCaptionTimeline() async throws {
         let fixture = try makeProjectWithTwoTakes()
-        let locked = try fixture.store.createPictureLock(
+        let locked = try fixture.store.createPictureLockForTesting(
             projectID: fixture.project.id,
             configuration: ProjectCaptionConfiguration(localeIdentifier: "en-US", placement: .lower)
         )
@@ -56,7 +83,7 @@ final class ProjectCaptionLifecycleTests: XCTestCase {
 
         _ = try store.markStorylineChecked(projectID: project.id)
 
-        XCTAssertNoThrow(try store.createPictureLock(
+        XCTAssertNoThrow(try store.createPictureLockForTesting(
             projectID: project.id,
             configuration: ProjectCaptionConfiguration(localeIdentifier: "en-US", placement: .lower)
         ))
@@ -77,7 +104,7 @@ final class ProjectCaptionLifecycleTests: XCTestCase {
             duration: 4,
             createdAt: Date()
         )
-        XCTAssertThrowsError(try store.createPictureLock(
+        XCTAssertThrowsError(try store.createPictureLockForTesting(
             projectID: project.id,
             configuration: ProjectCaptionConfiguration(localeIdentifier: "en-US", placement: .lower)
         )) { error in
@@ -86,7 +113,7 @@ final class ProjectCaptionLifecycleTests: XCTestCase {
 
         let checked = try store.markStorylineChecked(projectID: project.id)
         XCTAssertEqual(checked.checkedStorylineRevision, checked.primaryStoryline.revision)
-        XCTAssertNoThrow(try store.createPictureLock(
+        XCTAssertNoThrow(try store.createPictureLockForTesting(
             projectID: project.id,
             configuration: ProjectCaptionConfiguration(localeIdentifier: "en-US", placement: .lower)
         ))
@@ -101,7 +128,7 @@ final class ProjectCaptionLifecycleTests: XCTestCase {
             localeIdentifier: "en-US"
         )
 
-        let locked = try fixture.store.createPictureLock(
+        let locked = try fixture.store.createPictureLockForTesting(
             projectID: fixture.project.id,
             configuration: italian,
             createdAt: Date(timeIntervalSince1970: 500)
@@ -125,7 +152,7 @@ final class ProjectCaptionLifecycleTests: XCTestCase {
 
     func testConsecutiveClipsWithTheSameLanguageShareOneLanguageRegion() throws {
         let fixture = try makeProjectWithTwoTakes()
-        let locked = try fixture.store.createPictureLock(
+        let locked = try fixture.store.createPictureLockForTesting(
             projectID: fixture.project.id,
             configuration: ProjectCaptionConfiguration(localeIdentifier: "it-IT", placement: .lower)
         )
@@ -136,7 +163,7 @@ final class ProjectCaptionLifecycleTests: XCTestCase {
 
     func testCaptionCheckpointRebasesCueAndWordTimingIntoProjectTime() throws {
         let fixture = try makeProjectWithTwoTakes()
-        let locked = try fixture.store.createPictureLock(
+        let locked = try fixture.store.createPictureLockForTesting(
             projectID: fixture.project.id,
             configuration: ProjectCaptionConfiguration(localeIdentifier: "it-IT", placement: .lower)
         )
@@ -184,7 +211,7 @@ final class ProjectCaptionLifecycleTests: XCTestCase {
             placement: .lower,
             density: .less
         )
-        let locked = try fixture.store.createPictureLock(
+        let locked = try fixture.store.createPictureLockForTesting(
             projectID: fixture.project.id,
             configuration: configuration
         )
@@ -228,7 +255,7 @@ final class ProjectCaptionLifecycleTests: XCTestCase {
 
     func testProjectTimeWaveformSamplesEachLockedClipFromItsSourceRange() throws {
         let fixture = try makeProjectWithTwoTakes()
-        let locked = try fixture.store.createPictureLock(
+        let locked = try fixture.store.createPictureLockForTesting(
             projectID: fixture.project.id,
             configuration: ProjectCaptionConfiguration(localeIdentifier: "it-IT", placement: .lower)
         )
@@ -252,7 +279,7 @@ final class ProjectCaptionLifecycleTests: XCTestCase {
     func testCancelKeepsLockAndConfigurationWhileUnlockRemovesOnlyDerivedCaptions() throws {
         let fixture = try makeProjectWithTwoTakes()
         let configuration = ProjectCaptionConfiguration(localeIdentifier: "it-IT", placement: .center)
-        _ = try fixture.store.createPictureLock(
+        _ = try fixture.store.createPictureLockForTesting(
             projectID: fixture.project.id,
             configuration: configuration
         )
@@ -277,7 +304,7 @@ final class ProjectCaptionLifecycleTests: XCTestCase {
             style: .impact,
             density: .more
         )
-        let locked = try fixture.store.createPictureLock(
+        let locked = try fixture.store.createPictureLockForTesting(
             projectID: fixture.project.id,
             configuration: initial
         )
@@ -305,7 +332,7 @@ final class ProjectCaptionLifecycleTests: XCTestCase {
 
     func testPictureLockRejectsStructuralTimelineMutationAndNewTake() async throws {
         let fixture = try makeProjectWithTwoTakes()
-        let locked = try fixture.store.createPictureLock(
+        let locked = try fixture.store.createPictureLockForTesting(
             projectID: fixture.project.id,
             configuration: ProjectCaptionConfiguration(localeIdentifier: "it-IT", placement: .lower)
         )
@@ -338,7 +365,7 @@ final class ProjectCaptionLifecycleTests: XCTestCase {
 
     func testReviewCannotCompleteUntilEveryRegionIsCheckpointed() throws {
         let fixture = try makeProjectWithTwoTakes()
-        let locked = try fixture.store.createPictureLock(
+        let locked = try fixture.store.createPictureLockForTesting(
             projectID: fixture.project.id,
             configuration: ProjectCaptionConfiguration(localeIdentifier: "it-IT", placement: .lower)
         )
@@ -386,7 +413,7 @@ final class ProjectCaptionLifecycleTests: XCTestCase {
                 CaptionLineComposer.fits($0, configuration: clean, canvas: canvas)
                     && !CaptionLineComposer.fits($0, configuration: largeSerif, canvas: canvas)
             })
-        let locked = try fixture.store.createPictureLock(
+        let locked = try fixture.store.createPictureLockForTesting(
             projectID: fixture.project.id,
             configuration: clean
         )
@@ -429,7 +456,7 @@ final class ProjectCaptionLifecycleTests: XCTestCase {
 
     func testApprovedProjectTimeTrackFeedsLockedSnapshotWithoutTakeProjection() async throws {
         let fixture = try makeProjectWithTwoTakes()
-        let locked = try fixture.store.createPictureLock(
+        let locked = try fixture.store.createPictureLockForTesting(
             projectID: fixture.project.id,
             configuration: ProjectCaptionConfiguration(localeIdentifier: "it-IT", placement: .upper)
         )
@@ -475,7 +502,7 @@ final class ProjectCaptionLifecycleTests: XCTestCase {
     @MainActor
     func testUnlockImmediatelyRemovesCaptionsFromThePublishedPreviewSnapshot() async throws {
         let fixture = try makeProjectWithTwoTakes()
-        let locked = try fixture.store.createPictureLock(
+        let locked = try fixture.store.createPictureLockForTesting(
             projectID: fixture.project.id,
             configuration: ProjectCaptionConfiguration(localeIdentifier: "it-IT", placement: .lower)
         )

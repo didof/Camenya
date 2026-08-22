@@ -29,4 +29,9 @@ final class EditingTimeFormatterTests: XCTestCase {
     func testWholeSecondClockRemainsUnchanged() {
         XCTAssertEqual(RecordingDurationFormatter.clock(63.26), "01:03")
     }
+
+    func testPreciseEditingClockShowsRealHundredths() {
+        XCTAssertEqual(RecordingDurationFormatter.preciseEditingClock(1.01), "00:01.01")
+        XCTAssertEqual(RecordingDurationFormatter.preciseEditingClock(59.999), "01:00.00")
+    }
 }

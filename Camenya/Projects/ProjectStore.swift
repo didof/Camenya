@@ -16,6 +16,22 @@ private struct CompletedStagedExportIdentity: Equatable {
     let includeCaptions: Bool
 }
 
+private struct CleanMasterCheckpoint: Codable, Equatable {
+    let storylineRevision: StorylineRevision
+    let fileName: String
+    let duration: TimeInterval
+    var photosSaveStartedAt: Date?
+    var savedToPhotosAt: Date?
+}
+
+struct RecoverableCleanMaster: Equatable, Sendable {
+    let url: URL
+    let storylineRevision: StorylineRevision
+    let duration: TimeInterval
+    let photosSaveStartedAt: Date?
+    let savedToPhotosAt: Date?
+}
+
 struct RecoverableStagedExport: Equatable, Sendable {
     let url: URL
     let manifestRevision: UInt64
@@ -139,7 +155,8 @@ struct ProjectStore: Sendable {
     ) throws -> ProjectManifest {
         var project = try load(id: projectID)
         let expectedRevision = project.primaryStoryline.revision
-        guard let pictureLock = project.pictureLock,
+        guard project.hasPhotosConfirmedPictureLock,
+              let pictureLock = project.pictureLock,
               var track = project.projectCaptionTrack,
               track.pictureLockID == pictureLock.id else {
             throw ProjectStoreError.pictureLockRequired
@@ -180,31 +197,71 @@ struct ProjectStore: Sendable {
     }
 
     @discardableResult
-    func createPictureLock(
+    func commitPictureLockAfterCleanMaster(
+        projectID: UUID,
+        expectedRevision: StorylineRevision
+    ) throws -> ProjectManifest {
+        var project = try load(id: projectID)
+        guard project.primaryStoryline.revision == expectedRevision else {
+            throw ProjectStoreError.staleRevision(
+                expected: expectedRevision,
+                actual: project.primaryStoryline.revision
+            )
+        }
+        guard project.isReadyForCleanMasterCommit else {
+            throw ProjectStoreError.projectNotReadyForPictureLock
+        }
+        let expectedURL = cleanMasterURL(projectID: projectID, revision: expectedRevision)
+        guard let checkpoint = recoverableCleanMaster(projectID: projectID),
+              checkpoint.storylineRevision == expectedRevision,
+              checkpoint.url.standardizedFileURL == expectedURL.standardizedFileURL,
+              let savedToPhotosAt = checkpoint.savedToPhotosAt else {
+            throw ProjectStoreError.cleanMasterNotSavedToPhotos
+        }
+        let existingPictureLock = project.pictureLock
+        guard existingPictureLock == nil || project.needsCleanMasterUpgrade else {
+            return project
+        }
+        project.cleanMaster = ProjectCleanMaster(
+            fileName: expectedURL.lastPathComponent,
+            storylineRevision: expectedRevision,
+            duration: checkpoint.duration,
+            savedToPhotosAt: savedToPhotosAt
+        )
+        if existingPictureLock == nil {
+            project.pictureLock = ProjectPictureLock(
+                createdAt: savedToPhotosAt,
+                storylineRevision: expectedRevision,
+                clips: project.primaryStoryline.clips
+            )
+            project.projectCaptionTrack = nil
+            project.projectTextOverlays = []
+        }
+        project.modifiedAt = savedToPhotosAt
+        try save(project, expectedRevision: expectedRevision)
+        try? FileManager.default.removeItem(at: cleanMasterCheckpointURL(projectID: projectID))
+        return project
+    }
+
+    @discardableResult
+    func createProjectCaptionTrack(
         projectID: UUID,
         configuration: ProjectCaptionConfiguration,
         createdAt: Date = Date()
     ) throws -> ProjectManifest {
         var project = try load(id: projectID)
         let expectedRevision = project.primaryStoryline.revision
-        guard ProjectPictureLockReadiness.isReady(project) else {
-            throw ProjectStoreError.projectNotReadyForPictureLock
+        guard project.hasPhotosConfirmedPictureLock,
+              let pictureLock = project.pictureLock else {
+            throw ProjectStoreError.pictureLockRequired
         }
-        if project.pictureLock != nil, project.projectCaptionTrack != nil {
-            return project
-        }
-        let pictureLock = project.pictureLock ?? ProjectPictureLock(
-            createdAt: createdAt,
-            storylineRevision: expectedRevision,
-            clips: project.primaryStoryline.clips
-        )
+        if project.projectCaptionTrack != nil { return project }
         let regions = try makeProjectCaptionRegions(
             pictureLock: pictureLock,
             project: project,
             configuration: configuration
         )
         project.captionConfiguration = configuration
-        project.pictureLock = pictureLock
         project.projectCaptionTrack = ProjectCaptionTrack(
             pictureLockID: pictureLock.id,
             reviewState: .needsReview,
@@ -225,7 +282,8 @@ struct ProjectStore: Sendable {
     ) throws -> ProjectManifest {
         var project = try load(id: projectID)
         let expectedRevision = project.primaryStoryline.revision
-        guard let pictureLock = project.pictureLock,
+        guard project.hasPhotosConfirmedPictureLock,
+              let pictureLock = project.pictureLock,
               var track = project.projectCaptionTrack,
               track.pictureLockID == pictureLock.id else {
             throw ProjectStoreError.pictureLockRequired
@@ -280,7 +338,9 @@ struct ProjectStore: Sendable {
     ) throws -> ProjectManifest {
         var project = try load(id: projectID)
         let expectedRevision = project.primaryStoryline.revision
-        guard project.pictureLock != nil else { throw ProjectStoreError.pictureLockRequired }
+        guard project.hasPhotosConfirmedPictureLock else {
+            throw ProjectStoreError.pictureLockRequired
+        }
         if project.projectCaptionTrack?.reviewState != .approved {
             project.projectCaptionTrack = nil
         }
@@ -298,7 +358,8 @@ struct ProjectStore: Sendable {
     ) throws -> ProjectManifest {
         var project = try load(id: projectID)
         let expectedRevision = project.primaryStoryline.revision
-        guard let pictureLock = project.pictureLock else {
+        guard project.hasPhotosConfirmedPictureLock,
+              let pictureLock = project.pictureLock else {
             throw ProjectStoreError.pictureLockRequired
         }
         for index in project.takes.indices {
@@ -331,7 +392,8 @@ struct ProjectStore: Sendable {
     ) throws -> ProjectManifest {
         var project = try load(id: projectID)
         let expectedRevision = project.primaryStoryline.revision
-        guard let pictureLock = project.pictureLock,
+        guard project.hasPhotosConfirmedPictureLock,
+              let pictureLock = project.pictureLock,
               var track = project.projectCaptionTrack,
               track.pictureLockID == pictureLock.id else {
             throw ProjectStoreError.pictureLockRequired
@@ -360,7 +422,8 @@ struct ProjectStore: Sendable {
     ) throws -> ProjectManifest {
         var project = try load(id: projectID)
         let expectedRevision = project.primaryStoryline.revision
-        guard let pictureLock = project.pictureLock,
+        guard project.hasPhotosConfirmedPictureLock,
+              let pictureLock = project.pictureLock,
               var track = project.projectCaptionTrack,
               track.pictureLockID == pictureLock.id else {
             throw ProjectStoreError.pictureLockRequired
@@ -393,8 +456,39 @@ struct ProjectStore: Sendable {
     ) throws -> ProjectManifest {
         var project = try load(id: projectID)
         let expectedRevision = project.primaryStoryline.revision
+        let cleanMasterURL = project.cleanMaster.map {
+            self.cleanMasterURL(projectID: projectID, revision: $0.storylineRevision)
+        }
         project.pictureLock = nil
         project.projectCaptionTrack = nil
+        project.projectTextOverlays = []
+        project.cleanMaster = nil
+        project.modifiedAt = modifiedAt
+        try save(project, expectedRevision: expectedRevision)
+        if let cleanMasterURL { try? FileManager.default.removeItem(at: cleanMasterURL) }
+        invalidateCleanMasterRecovery(projectID: projectID, removeMedia: false)
+        return project
+    }
+
+    @discardableResult
+    func replaceProjectTextOverlays(
+        projectID: UUID,
+        pictureLockID: UUID,
+        overlays: [ProjectTextOverlay],
+        modifiedAt: Date = Date()
+    ) throws -> ProjectManifest {
+        var project = try load(id: projectID)
+        let expectedRevision = project.primaryStoryline.revision
+        guard project.hasPhotosConfirmedPictureLock,
+              let pictureLock = project.pictureLock,
+              pictureLock.id == pictureLockID else {
+            throw ProjectStoreError.pictureLockRequired
+        }
+        guard Set(overlays.map(\.id)).count == overlays.count,
+              overlays.allSatisfy({ $0.isValid(inside: pictureLock.duration.seconds) }) else {
+            throw ProjectStoreError.invalidProjectTextOverlays
+        }
+        project.projectTextOverlays = overlays
         project.modifiedAt = modifiedAt
         try save(project, expectedRevision: expectedRevision)
         return project
@@ -652,6 +746,184 @@ struct ProjectStore: Sendable {
 
     func projectCoverURL(projectID: UUID) -> URL {
         projectDirectory(id: projectID).appendingPathComponent("cover.jpg")
+    }
+
+    func cleanMasterURL(projectID: UUID, revision: StorylineRevision) -> URL {
+        projectDirectory(id: projectID)
+            .appendingPathComponent("CleanMaster", isDirectory: true)
+            .appendingPathComponent("clean-r\(revision.rawValue).mov")
+    }
+
+    @discardableResult
+    func recordValidatedCleanMaster(
+        projectID: UUID,
+        expectedRevision: StorylineRevision,
+        cleanMasterURL: URL,
+        duration: TimeInterval
+    ) throws -> RecoverableCleanMaster {
+        let project = try load(id: projectID)
+        guard (project.pictureLock == nil || project.needsCleanMasterUpgrade),
+              project.primaryStoryline.revision == expectedRevision,
+              project.isReadyForCleanMasterCommit else {
+            throw ProjectStoreError.projectNotReadyForPictureLock
+        }
+        let expectedURL = self.cleanMasterURL(projectID: projectID, revision: expectedRevision)
+        guard cleanMasterURL.standardizedFileURL == expectedURL.standardizedFileURL,
+              FileManager.default.fileExists(atPath: expectedURL.path),
+              duration.isFinite,
+              duration > 0 else {
+            throw ProjectStoreError.mediaNotFound(cleanMasterURL)
+        }
+        let existing = recoverableCleanMaster(projectID: projectID)
+        let checkpoint = CleanMasterCheckpoint(
+            storylineRevision: expectedRevision,
+            fileName: expectedURL.lastPathComponent,
+            duration: duration,
+            photosSaveStartedAt: existing?.storylineRevision == expectedRevision
+                ? existing?.photosSaveStartedAt
+                : nil,
+            savedToPhotosAt: existing?.storylineRevision == expectedRevision
+                ? existing?.savedToPhotosAt
+                : nil
+        )
+        let checkpointURL = cleanMasterCheckpointURL(projectID: projectID)
+        try FileManager.default.createDirectory(
+            at: checkpointURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(checkpoint).write(to: checkpointURL, options: .atomic)
+        return RecoverableCleanMaster(
+            url: expectedURL,
+            storylineRevision: expectedRevision,
+            duration: duration,
+            photosSaveStartedAt: checkpoint.photosSaveStartedAt,
+            savedToPhotosAt: checkpoint.savedToPhotosAt
+        )
+    }
+
+    @discardableResult
+    func recordCleanMasterPhotosSaveStarted(
+        projectID: UUID,
+        expectedRevision: StorylineRevision,
+        startedAt: Date = Date()
+    ) throws -> RecoverableCleanMaster {
+        guard var checkpoint = cleanMasterCheckpoint(projectID: projectID),
+              checkpoint.storylineRevision == expectedRevision,
+              let recoverable = recoverableCleanMaster(projectID: projectID),
+              recoverable.savedToPhotosAt == nil else {
+            throw ProjectStoreError.cleanMasterNotValidated
+        }
+        checkpoint.photosSaveStartedAt = startedAt
+        try writeCleanMasterCheckpoint(checkpoint, projectID: projectID)
+        return RecoverableCleanMaster(
+            url: recoverable.url,
+            storylineRevision: recoverable.storylineRevision,
+            duration: recoverable.duration,
+            photosSaveStartedAt: startedAt,
+            savedToPhotosAt: nil
+        )
+    }
+
+    @discardableResult
+    func recordCleanMasterPhotosSaveFailed(
+        projectID: UUID,
+        expectedRevision: StorylineRevision
+    ) throws -> RecoverableCleanMaster {
+        guard var checkpoint = cleanMasterCheckpoint(projectID: projectID),
+              checkpoint.storylineRevision == expectedRevision,
+              let recoverable = recoverableCleanMaster(projectID: projectID),
+              recoverable.savedToPhotosAt == nil else {
+            throw ProjectStoreError.cleanMasterNotValidated
+        }
+        checkpoint.photosSaveStartedAt = nil
+        try writeCleanMasterCheckpoint(checkpoint, projectID: projectID)
+        return RecoverableCleanMaster(
+            url: recoverable.url,
+            storylineRevision: recoverable.storylineRevision,
+            duration: recoverable.duration,
+            photosSaveStartedAt: nil,
+            savedToPhotosAt: nil
+        )
+    }
+
+    @discardableResult
+    func recordCleanMasterSavedToPhotos(
+        projectID: UUID,
+        expectedRevision: StorylineRevision,
+        savedAt: Date = Date()
+    ) throws -> RecoverableCleanMaster {
+        guard var checkpoint = cleanMasterCheckpoint(projectID: projectID),
+              checkpoint.storylineRevision == expectedRevision,
+              checkpoint.photosSaveStartedAt != nil,
+              let recoverable = recoverableCleanMaster(projectID: projectID) else {
+            throw ProjectStoreError.cleanMasterNotValidated
+        }
+        checkpoint.savedToPhotosAt = savedAt
+        try writeCleanMasterCheckpoint(checkpoint, projectID: projectID)
+        return RecoverableCleanMaster(
+            url: recoverable.url,
+            storylineRevision: recoverable.storylineRevision,
+            duration: recoverable.duration,
+            photosSaveStartedAt: checkpoint.photosSaveStartedAt,
+            savedToPhotosAt: savedAt
+        )
+    }
+
+    func recoverableCleanMaster(projectID: UUID) -> RecoverableCleanMaster? {
+        guard let project = try? load(id: projectID),
+              (project.pictureLock == nil || project.needsCleanMasterUpgrade),
+              let checkpoint = cleanMasterCheckpoint(projectID: projectID),
+              checkpoint.storylineRevision == project.primaryStoryline.revision,
+              checkpoint.duration.isFinite,
+              checkpoint.duration > 0 else { return nil }
+        let url = cleanMasterURL(projectID: projectID, revision: checkpoint.storylineRevision)
+        guard checkpoint.fileName == url.lastPathComponent,
+              FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return RecoverableCleanMaster(
+            url: url,
+            storylineRevision: checkpoint.storylineRevision,
+            duration: checkpoint.duration,
+            photosSaveStartedAt: checkpoint.photosSaveStartedAt,
+            savedToPhotosAt: checkpoint.savedToPhotosAt
+        )
+    }
+
+    func invalidateCleanMasterRecovery(projectID: UUID, removeMedia: Bool) {
+        if removeMedia,
+           let checkpoint = cleanMasterCheckpoint(projectID: projectID) {
+            let url = cleanMasterURL(projectID: projectID, revision: checkpoint.storylineRevision)
+            try? FileManager.default.removeItem(at: url)
+        }
+        try? FileManager.default.removeItem(at: cleanMasterCheckpointURL(projectID: projectID))
+    }
+
+    private func cleanMasterCheckpointURL(projectID: UUID) -> URL {
+        projectDirectory(id: projectID)
+            .appendingPathComponent("CleanMaster", isDirectory: true)
+            .appendingPathComponent("checkpoint.json")
+    }
+
+    private func cleanMasterCheckpoint(projectID: UUID) -> CleanMasterCheckpoint? {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try? decoder.decode(
+            CleanMasterCheckpoint.self,
+            from: Data(contentsOf: cleanMasterCheckpointURL(projectID: projectID))
+        )
+    }
+
+    private func writeCleanMasterCheckpoint(
+        _ checkpoint: CleanMasterCheckpoint,
+        projectID: UUID
+    ) throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(checkpoint).write(
+            to: cleanMasterCheckpointURL(projectID: projectID),
+            options: .atomic
+        )
     }
 
     func takeTrimEnvelopeURL(projectID: UUID, takeID: UUID) -> URL {
@@ -1370,6 +1642,9 @@ enum ProjectStoreError: Error, Equatable {
     case pictureLockRequired
     case captionRegionNotFound(UUID)
     case invalidProjectCaptionTrack
+    case invalidProjectTextOverlays
     case incompleteProjectCaptions
     case projectCaptionLanguageChangeRequiresRegeneration
+    case cleanMasterNotValidated
+    case cleanMasterNotSavedToPhotos
 }

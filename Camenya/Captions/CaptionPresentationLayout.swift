@@ -169,24 +169,10 @@ enum CaptionPresentationTheme {
 
     static func font(configuration: ProjectCaptionConfiguration, size: CGFloat) -> UIFont {
         guard configuration.style == .custom else { return font(style: configuration.style, size: size) }
-        let scaledSize = size * {
-            switch configuration.customization.fontScale {
-            case .small: 0.86
-            case .standard: 1
-            case .large: 1.14
-            }
-        }()
-        let base = UIFont.systemFont(ofSize: scaledSize, weight: .bold)
-        let design: UIFontDescriptor.SystemDesign = {
-            switch configuration.customization.fontDesign {
-            case .system: .default
-            case .rounded: .rounded
-            case .serif: .serif
-            }
-        }()
-        return base.fontDescriptor.withDesign(design).map {
-            UIFont(descriptor: $0, size: scaledSize)
-        } ?? base
+        return StaticTextPresentation.font(
+            for: TextAppearance(captionCustomization: configuration.customization),
+            baseSize: size
+        )
     }
 
     static func backgroundAlpha(style: CaptionStylePreset) -> CGFloat {
@@ -212,6 +198,14 @@ enum CaptionPresentationTheme {
         switch configuration.customization.textColor {
         case .white: return .white
         case .yellow: return .systemYellow
+        case .custom:
+            guard let color = configuration.customization.customTextColor else { return .white }
+            return UIColor(
+                red: color.red,
+                green: color.green,
+                blue: color.blue,
+                alpha: color.alpha
+            )
         }
     }
 

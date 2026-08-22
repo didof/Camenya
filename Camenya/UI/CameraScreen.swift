@@ -656,7 +656,19 @@ struct CameraScreen: View {
             Button("Dismiss") { model.dismissProjectExportError() }
                 .font(.footnote.weight(.semibold))
                 .frame(minWidth: 44, minHeight: 44)
-            if model.hasFailedProjectExportRetry {
+            if model.cleanMasterPhotosSaveNeedsResolution {
+                Menu("Resolve") {
+                    Button("I See It in Photos") {
+                        model.confirmCleanMasterIsSavedToPhotos()
+                    }
+                    Button("Save Again") {
+                        model.saveCleanMasterToPhotosAgain()
+                    }
+                }
+                .font(.footnote.weight(.semibold))
+                .frame(minWidth: 44, minHeight: 44)
+                .accessibilityHint("Choose after checking whether the Clean Master is in Photos")
+            } else if model.hasFailedProjectExportRetry {
                 Button("Retry") { model.retryFailedProjectExport() }
                     .font(.footnote.weight(.semibold))
                     .frame(minWidth: 44, minHeight: 44)

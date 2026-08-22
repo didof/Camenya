@@ -834,7 +834,8 @@ actor TimelineEditor {
             )
         }
         let captionTimeline: ProjectCaptionExportTimeline?
-        if let pictureLock = project.pictureLock,
+        if project.hasPhotosConfirmedPictureLock,
+           let pictureLock = project.pictureLock,
            let track = project.projectCaptionTrack,
            track.pictureLockID == pictureLock.id,
            track.reviewState == .approved,
@@ -861,12 +862,22 @@ actor TimelineEditor {
         } else {
             captionTimeline = nil
         }
+        let finishingTimeline = project.hasPhotosConfirmedPictureLock
+            ? project.pictureLock.map { pictureLock in
+            ProjectFinishingTimeline(
+                pictureLockID: pictureLock.id,
+                duration: cursor,
+                textOverlays: project.projectTextOverlays,
+                captions: captionTimeline
+            )
+        } : nil
         return ExportSnapshot(
             projectID: project.id,
             revision: project.pictureLock?.storylineRevision ?? project.primaryStoryline.revision,
             format: project.format,
             captionConfiguration: project.captionConfiguration,
             captionTimeline: captionTimeline,
+            finishingTimeline: finishingTimeline,
             clips: clips,
             duration: ProjectTime(seconds: cursor)
         )

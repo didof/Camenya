@@ -180,23 +180,47 @@ final class ProjectPresentationPolicyTests: XCTestCase {
         XCTAssertEqual(
             ProjectPresentationPolicy.captionWorkspaceAction(
                 isPictureLocked: false,
-                isReadyForPictureLock: false
+                hasPhotosConfirmedPictureLock: false,
+                isReadyForPictureLock: false,
+                hasCaptionTrack: false
             ),
             .reviewVideo
         )
         XCTAssertEqual(
             ProjectPresentationPolicy.captionWorkspaceAction(
                 isPictureLocked: false,
-                isReadyForPictureLock: true
+                hasPhotosConfirmedPictureLock: false,
+                isReadyForPictureLock: true,
+                hasCaptionTrack: false
+            ),
+            .finishVideo
+        )
+        XCTAssertEqual(
+            ProjectPresentationPolicy.captionWorkspaceAction(
+                isPictureLocked: true,
+                hasPhotosConfirmedPictureLock: true,
+                isReadyForPictureLock: false,
+                hasCaptionTrack: true
+            ),
+            .openCaptionEditor
+        )
+        XCTAssertEqual(
+            ProjectPresentationPolicy.captionWorkspaceAction(
+                isPictureLocked: true,
+                hasPhotosConfirmedPictureLock: true,
+                isReadyForPictureLock: false,
+                hasCaptionTrack: false
             ),
             .createCaptions
         )
         XCTAssertEqual(
             ProjectPresentationPolicy.captionWorkspaceAction(
                 isPictureLocked: true,
-                isReadyForPictureLock: false
+                hasPhotosConfirmedPictureLock: false,
+                isReadyForPictureLock: true,
+                hasCaptionTrack: true
             ),
-            .openCaptionEditor
+            .finishVideo
         )
     }
 
@@ -220,6 +244,51 @@ final class ProjectPresentationPolicyTests: XCTestCase {
                 effectiveIdentifier: "en-US",
                 source: .takeOverride
             )
+        )
+    }
+
+    func testUnlockCopyOnlyWarnsAboutFinishingContentThatExists() {
+        XCTAssertEqual(
+            ProjectPresentationPolicy.unlockPresentation(
+                hasPhotosConfirmedPictureLock: false,
+                hasCaptionTrack: false,
+                hasTextOverlays: false
+            ),
+            ProjectUnlockPresentation(
+                actionTitle: "Unlock & Edit",
+                message: "This older finished video has no confirmed Clean Master in Photos. Unlocking returns it to editing; Takes and every Storyline edit remain safe."
+            )
+        )
+        XCTAssertEqual(
+            ProjectPresentationPolicy.unlockPresentation(
+                hasPhotosConfirmedPictureLock: false,
+                hasCaptionTrack: true,
+                hasTextOverlays: false
+            ).actionTitle,
+            "Unlock & Remove Captions"
+        )
+        XCTAssertFalse(
+            ProjectPresentationPolicy.unlockPresentation(
+                hasPhotosConfirmedPictureLock: true,
+                hasCaptionTrack: false,
+                hasTextOverlays: false
+            ).message.contains("Captions")
+        )
+        XCTAssertEqual(
+            ProjectPresentationPolicy.unlockPresentation(
+                hasPhotosConfirmedPictureLock: true,
+                hasCaptionTrack: true,
+                hasTextOverlays: false
+            ).message,
+            "Captions will be removed. The Clean Master already saved in Photos stays there; Takes and every Storyline edit remain safe."
+        )
+        XCTAssertEqual(
+            ProjectPresentationPolicy.unlockPresentation(
+                hasPhotosConfirmedPictureLock: true,
+                hasCaptionTrack: false,
+                hasTextOverlays: true
+            ).message,
+            "Text Overlays will be removed. The Clean Master already saved in Photos stays there; Takes and every Storyline edit remain safe."
         )
     }
 

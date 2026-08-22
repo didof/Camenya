@@ -1,5 +1,6 @@
 import AVFoundation
 import SwiftUI
+import UIKit
 
 struct ProjectCaptionSetupSheet: View {
     @ObservedObject var model: AppModel
@@ -1111,6 +1112,7 @@ private struct ProjectCaptionStyleSheet: View {
     @State private var failedConfiguration: ProjectCaptionConfiguration?
     @State private var failedDismissAfterSuccess = false
     @State private var savedStyles: [SavedCaptionStyle]
+    @State private var savedTextAppearances: [SavedTextAppearance]
     @State private var savingCurrentStyle = false
     @State private var savedStyleName = ""
     private let styleStore: CaptionStyleStore
@@ -1134,6 +1136,7 @@ private struct ProjectCaptionStyleSheet: View {
         _configuration = State(initialValue: initial)
         _appliedDensity = State(initialValue: initial.density)
         _savedStyles = State(initialValue: styleStore.load())
+        _savedTextAppearances = State(initialValue: TextAppearanceStore().load())
     }
 
     var body: some View {
@@ -1191,15 +1194,35 @@ private struct ProjectCaptionStyleSheet: View {
                                 Text("System").tag(CaptionFontDesign.system)
                                 Text("Rounded").tag(CaptionFontDesign.rounded)
                                 Text("Serif").tag(CaptionFontDesign.serif)
+                                Text("Monospaced").tag(CaptionFontDesign.monospaced)
+                            }
+                            Picker("Weight", selection: captionFontWeight) {
+                                ForEach(TextFontWeight.allCases, id: \.self) {
+                                    Text($0.rawValue.capitalized).tag($0)
+                                }
                             }
                             Picker("Size", selection: $configuration.customization.fontScale) {
                                 Text("Small").tag(CaptionFontScale.small)
                                 Text("Standard").tag(CaptionFontScale.standard)
                                 Text("Large").tag(CaptionFontScale.large)
                             }
+                            Picker("Alignment", selection: captionTextAlignment) {
+                                ForEach(TextHorizontalAlignment.allCases, id: \.self) {
+                                    Text($0.rawValue.capitalized).tag($0)
+                                }
+                            }
                             Picker("Text", selection: $configuration.customization.textColor) {
                                 Text("White").tag(CaptionTextColor.white)
                                 Text("Yellow").tag(CaptionTextColor.yellow)
+                                Text("Custom").tag(CaptionTextColor.custom)
+                            }
+                            if configuration.customization.textColor == .custom {
+                                ColorPicker("Custom Color", selection: customCaptionColor, supportsOpacity: true)
+                            }
+                            Picker("Outline", selection: captionOutline) {
+                                Text("None").tag(TextOutlineStyle.none)
+                                Text("Thin").tag(TextOutlineStyle.thin)
+                                Text("Strong").tag(TextOutlineStyle.strong)
                             }
                             Picker("Highlight", selection: $configuration.customization.highlighting) {
                                 Text("None").tag(CaptionHighlightStyle.none)
@@ -1242,9 +1265,20 @@ private struct ProjectCaptionStyleSheet: View {
                                 ForEach(savedStyles) { style in
                                     Button(style.name, role: .destructive) {
                                         styleStore.delete(id: style.id)
+                                        TextAppearanceStore().delete(name: style.name)
                                         savedStyles = styleStore.load()
+                                        savedTextAppearances = TextAppearanceStore().load()
                                     }
                                 }
+                            }
+                        }
+                    }
+
+
+                    if !textOnlySavedAppearances.isEmpty {
+                        Menu("Saved Text Styles", systemImage: "textformat") {
+                            ForEach(textOnlySavedAppearances) { style in
+                                Button(style.name) { applySavedTextAppearance(style) }
                             }
                         }
                     }
@@ -1366,12 +1400,77 @@ private struct ProjectCaptionStyleSheet: View {
             name: savedStyleName,
             customization: configuration.customization
         )
+        _ = TextAppearanceStore().save(
+            name: savedStyleName,
+            appearance: TextAppearance(captionCustomization: configuration.customization)
+        )
         savedStyles = styleStore.load()
+        savedTextAppearances = TextAppearanceStore().load()
+    }
+
+    private var captionOutline: Binding<TextOutlineStyle> {
+        Binding(
+            get: { configuration.customization.outline ?? .none },
+            set: { configuration.customization.outline = $0 }
+        )
+    }
+
+    private var captionFontWeight: Binding<TextFontWeight> {
+        Binding(
+            get: { configuration.customization.fontWeight ?? .bold },
+            set: { configuration.customization.fontWeight = $0 }
+        )
+    }
+
+    private var captionTextAlignment: Binding<TextHorizontalAlignment> {
+        Binding(
+            get: { configuration.customization.alignment ?? .center },
+            set: { configuration.customization.alignment = $0 }
+        )
+    }
+
+    private var customCaptionColor: Binding<Color> {
+        Binding(
+            get: {
+                let color = configuration.customization.customTextColor ?? .white
+                return Color(
+                    red: color.red,
+                    green: color.green,
+                    blue: color.blue,
+                    opacity: color.alpha
+                )
+            },
+            set: { value in
+                let resolved = UIColor(value)
+                var red: CGFloat = 1, green: CGFloat = 1, blue: CGFloat = 1, alpha: CGFloat = 1
+                resolved.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+                configuration.customization.customTextColor = TextColor(
+                    red: red,
+                    green: green,
+                    blue: blue,
+                    alpha: alpha
+                )
+            }
+        )
     }
 
     private func applySavedStyle(_ style: SavedCaptionStyle) {
         configuration.style = .custom
-        configuration.customization = style.customization
+        configuration.customization = CaptionSavedStyleResolver.customization(
+            for: style,
+            sharedAppearances: savedTextAppearances
+        )
+    }
+
+
+    private var textOnlySavedAppearances: [SavedTextAppearance] {
+        let captionNames = Set(savedStyles.map { $0.name.lowercased() })
+        return savedTextAppearances.filter { !captionNames.contains($0.name.lowercased()) }
+    }
+
+    private func applySavedTextAppearance(_ style: SavedTextAppearance) {
+        configuration.style = .custom
+        configuration.customization = style.appearance.applying(to: configuration.customization)
     }
 }
 
